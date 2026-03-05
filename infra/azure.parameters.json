@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "resourceBaseName": {
+      "value": "bot${{RESOURCE_SUFFIX}}"
+    },
+    "azureOpenAIKey": {
+      "value": "${{SECRET_AZURE_OPENAI_API_KEY}}"
+    },
+    "azureOpenAIEndpoint": {
+      "value": "${{AZURE_OPENAI_ENDPOINT}}"
+    },
+    "azureOpenAIDeploymentName": {
+      "value": "${{AZURE_OPENAI_DEPLOYMENT_NAME}}"
+    },
+    "graphClientId": {
+      "value": "${{GRAPH_CLIENT_ID}}"
+    },
+    "graphClientSecret": {
+      "value": "${{SECRET_GRAPH_CLIENT_SECRET}}"
+    },
+    "cognitiveServicesEndpoint": {
+      "value": "${{COGNITIVE_SERVICES_ENDPOINT}}"
+    },
+    "cognitiveServicesKey": {
+      "value": "${{SECRET_COGNITIVE_SERVICES_KEY}}"
+    },
+    "webAppSKU": {
+      "value": "B1"
+    },
+    "botDisplayName": {
+      "value": "Missa The Translator"
+    }
+  }
+}

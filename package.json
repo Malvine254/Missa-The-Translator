@@ -1,0 +1,45 @@
+{
+    "name": "missathetranslator",
+    "version": "1.0.0",
+    "msteams": {
+        "teamsAppId": null
+    },
+    "description": "Microsoft 365 Agents Toolkit AI Chat Agent Sample with Microsoft Teams SDK",
+    "engines": {
+        "node": "20 || 22"
+    },
+    "author": "Microsoft",
+    "license": "MIT",
+    "main": "./lib/src/index.js",
+    "scripts": {
+        "dev:teamsfx": "env-cmd --silent -f .localConfigs npm run dev",
+        "dev:teamsfx:testtool": "env-cmd --silent -f .localConfigs.playground npm run dev",
+        "dev:teamsfx:launch-testtool": "env-cmd --silent -f env/.env.playground agentsplayground start",
+        "dev": "nodemon --exec node --inspect=9239 --signal SIGINT -r ts-node/register ./src/index.ts",
+        "build": "tsc --build && shx cp ./src/app/*.txt ./lib/src/app",
+        "start": "node ./lib/src/index.js",
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "watch": "nodemon --exec \"npm run start\""
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com"
+    },
+    "dependencies": {
+        "@azure/identity": "^4.11.1",
+        "@microsoft/microsoft-graph-client": "^3.0.0",
+        "@microsoft/teams.ai": "^2.0.0",
+        "@microsoft/teams.apps": "^2.0.0",
+        "@microsoft/teams.common": "^2.0.0",
+        "@microsoft/teams.openai": "^2.0.0",
+        "axios": "^1.6.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.19.35",
+        "env-cmd": "^10.1.0",
+        "nodemon": "^3.1.7",
+        "shx": "^0.3.3",
+        "ts-node": "^10.4.0",
+        "typescript": "~5.8.3"
+    }
+}

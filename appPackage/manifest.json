@@ -1,0 +1,138 @@
+{
+    "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.19/MicrosoftTeams.schema.json",
+    "manifestVersion": "1.19",
+    "version": "1.0.13",
+    "id": "${{TEAMS_APP_ID}}",
+    "developer": {
+        "name": "Armely AI Solutions",
+        "websiteUrl": "https://armely.com",
+        "privacyUrl": "https://armely.com/privacy",
+        "termsOfUseUrl": "https://armely.com/privacy"
+    },
+    "icons": {
+        "outline": "outline.png",
+        "color": "color.png"
+    },
+    "name": {
+        "short": "Missa The Translator${{APP_NAME_SUFFIX}}",
+        "full": "Missa The Translator — AI Meeting Assistant"
+    },
+    "description": {
+        "short": "AI meeting assistant that joins calls, transcribes, and summarizes",
+        "full": "Missa The Translator is an AI-powered Microsoft Teams meeting assistant. It joins meetings, captures conversations, provides intelligent transcripts, generates meeting summaries, and extracts key insights and action items."
+    },
+    "accentColor": "#FFFFFF",
+    "bots": [
+        {
+            "botId": "${{BOT_ID}}",
+            "scopes": [
+                "team",
+                "groupChat",
+                "personal"
+            ],
+            "commandLists": [
+                {
+                    "commands": [
+                        {
+                            "title": "join",
+                            "description": "Join the current meeting and start transcribing"
+                        },
+                        {
+                            "title": "transcribe",
+                            "description": "Get the transcript from the last meeting"
+                        },
+                        {
+                            "title": "summarize",
+                            "description": "Get an AI summary of the last meeting"
+                        },
+                        {
+                            "title": "minutes",
+                            "description": "Generate formal meeting minutes"
+                        }
+                    ],
+                    "scopes": [
+                        "personal"
+                    ]
+                },
+                {
+                    "commands": [
+                        {
+                            "title": "join",
+                            "description": "Join the current meeting and start transcribing"
+                        },
+                        {
+                            "title": "summarize",
+                            "description": "Get an AI summary of the meeting"
+                        },
+                        {
+                            "title": "minutes",
+                            "description": "Generate formal meeting minutes"
+                        }
+                    ],
+                    "scopes": [
+                        "groupChat"
+                    ]
+                },
+                {
+                    "commands": [
+                        {
+                            "title": "join",
+                            "description": "Join the current meeting and start transcribing"
+                        },
+                        {
+                            "title": "summarize",
+                            "description": "Get an AI summary of the meeting"
+                        },
+                        {
+                            "title": "minutes",
+                            "description": "Generate formal meeting minutes"
+                        }
+                    ],
+                    "scopes": [
+                        "team"
+                    ]
+                }
+            ],
+            "isNotificationOnly": false,
+            "supportsCalling": false,
+            "supportsVideo": false,
+            "supportsFiles": true
+        }
+    ],
+    "validDomains": [
+        "${{BOT_DOMAIN}}"
+    ],
+    "webApplicationInfo": {
+        "id": "${{BOT_ID}}"
+    },
+    "authorization": {
+        "permissions": {
+            "resourceSpecific": [
+                {
+                    "name": "ChatSettings.Read.Chat",
+                    "type": "Application"
+                },
+                {
+                    "name": "ChatMessage.Read.Chat",
+                    "type": "Application"
+                },
+                {
+                    "name": "ChatMember.Read.Chat",
+                    "type": "Application"
+                },
+                {
+                    "name": "OnlineMeeting.ReadBasic.Chat",
+                    "type": "Application"
+                },
+                {
+                    "name": "OnlineMeetingTranscript.Read.Chat",
+                    "type": "Application"
+                },
+                {
+                    "name": "OnlineMeetingRecording.Read.Chat",
+                    "type": "Application"
+                }
+            ]
+        }
+    }
+}
