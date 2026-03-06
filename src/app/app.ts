@@ -1,4 +1,4 @@
-﻿import { App } from "@microsoft/teams.apps";
+import { App } from "@microsoft/teams.apps";
 import { ChatPrompt } from "@microsoft/teams.ai";
 import { LocalStorage } from "@microsoft/teams.common";
 import { OpenAIChatModel } from "@microsoft/teams.openai";
@@ -12,6 +12,15 @@ import summarizationHelper from "../summarizationHelper";
 
 // Create storage for conversation history
 const storage = new LocalStorage();
+
+// Track last bot response for each conversation - used for contextual follow-ups like "send it to my email"
+interface LastBotResponse {
+  content: string;
+  contentType: 'calendar' | 'summary' | 'minutes' | 'transcript' | 'meeting_overview' | 'insights' | 'general';
+  subject?: string;
+  timestamp: number;
+}
+const lastBotResponseMap = new Map<string, LastBotResponse>();
 
 // Track active call IDs -> { conversationId, serviceUrl, organizerId, joinWebUrl } for webhook handling
 interface ActiveCall {
@@ -39,7 +48,7 @@ const callToConversationMap = new Map<string, string>();
 
 // Directory for persisted transcript files - use Azure's writable temp directory if available
 const TRANSCRIPTS_DIR = process.env.TEMP || process.env.HOME 
-  ? path.join(process.env.TEMP || process.env.HOME || '', 'missa_transcripts')
+  ? path.join(process.env.TEMP || process.env.HOME || '', 'mela_transcripts')
   : path.join(__dirname, '..', '..', 'transcripts');
 const MEETING_CONTEXT_FILE = path.join(TRANSCRIPTS_DIR, 'meeting_context.json');
 
@@ -132,7 +141,7 @@ function parseVttToEntries(vttContent: string): TranscriptEntry[] {
       const trimmed = line.trim();
       if (!trimmed) continue;
 
-      // Cue sequence number — skip
+      // Cue sequence number � skip
       if (/^\d+$/.test(trimmed)) continue;
 
       // Timestamp line: 00:00:00.000 --> 00:00:03.000
@@ -142,7 +151,7 @@ function parseVttToEntries(vttContent: string): TranscriptEntry[] {
         continue;
       }
 
-      // Text line — extract speaker tag if present
+      // Text line � extract speaker tag if present
       // Handles: <v Speaker Name>text</v>, <v Speaker Name>text, and plain text
       const speakerMatch = trimmed.match(/^<v\s+([^>]+)>(.*)/);
       if (speakerMatch) {
@@ -151,7 +160,7 @@ function parseVttToEntries(vttContent: string): TranscriptEntry[] {
         const text = speakerMatch[2].replace(/<\/v>/g, '').trim();
         if (text) textParts.push(text);
       } else {
-        // Plain continuation text — strip any stray </v> tags
+        // Plain continuation text � strip any stray </v> tags
         const cleaned = trimmed.replace(/<\/v>/g, '').trim();
         if (cleaned) textParts.push(cleaned);
       }
@@ -176,7 +185,7 @@ function parseVttToEntries(vttContent: string): TranscriptEntry[] {
 
 /**
  * Convert a VTT timestamp (HH:MM:SS.mmm) to a compact display format (H:MM:SS).
- * e.g. "00:01:22.530" → "0:01:22", "01:22:32.000" → "1:22:32"
+ * e.g. "00:01:22.530" ? "0:01:22", "01:22:32.000" ? "1:22:32"
  */
 function formatVttTimestamp(vttTime: string): string {
   if (!vttTime) return '';
@@ -283,7 +292,7 @@ function buildTranscriptMarkdown(
   const participantNames = members.length > 0 ? members : transcriptSpeakers;
 
   // --- Header ---
-  let md = `## 📝 Meeting Transcript\n\n`;
+  let md = `## ?? Meeting Transcript\n\n`;
   md += `### **${meetingTitle}**\n\n`;
   md += `**Meeting details**\n`;
   md += `- **Date:** ${dateStr}\n`;
@@ -353,7 +362,7 @@ function saveTranscriptToFile(conversationId: string) {
       hour: 'numeric', minute: '2-digit'
     });
 
-    // ── Header ──
+    // -- Header --
     let content = '';
     content += `MEETING TRANSCRIPT\n`;
     content += `==================\n\n`;
@@ -365,7 +374,7 @@ function saveTranscriptToFile(conversationId: string) {
     content += `TRANSCRIPT\n`;
     content += `----------\n\n`;
 
-    // ── Body: Teams-style speaker blocks ──
+    // -- Body: Teams-style speaker blocks --
     // Each new speaker (or same speaker at a different timestamp) gets a header line
     let lastSpeaker = '';
     let lastTime = '';
@@ -598,9 +607,9 @@ async function generateKeyMeetingInsights(transcriptText: string, meetingTitle: 
   return response.content || 'I could not generate insights from the transcript.';
 }
 
-// ═══════════════════════════════════════════════════════════════
+// ---------------------------------------------------------------
 // HTML & AI-Driven Summary Generators
-// ═══════════════════════════════════════════════════════════════
+// ---------------------------------------------------------------
 
 async function generateMeetingSummary(
   entries: TranscriptEntry[],
@@ -773,31 +782,47 @@ async function classifyIntent(message: string, isMeetingConversation: boolean): 
   const text = (message || '').trim();
   if (!text) return 'general_chat';
 
+  // Get current date context for smarter calendar detection
+  const now = new Date();
+  const dateContext = `Current date: ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}`;
+
   const prompt = new ChatPrompt({
     messages: [
       {
         role: 'user',
         content:
-          `Classify this Teams message into exactly one intent label and return strict JSON only.\n` +
-          `Message: "${text}"\n` +
-          `MeetingConversation: ${isMeetingConversation ? 'true' : 'false'}\n\n` +
-          `Allowed labels:\n` +
-          `- join_meeting (user wants bot to join call/meeting)\n` +
-          `- summarize (user asks for summary/recap - INCLUDES requests like "summarize and send to email")\n` +
-          `- minutes (user asks for meeting notes/minutes - INCLUDES "send minutes to email")\n` +
-          `- transcribe (user asks transcript/transcribe - INCLUDES "email the transcript")\n` +
-          `- meeting_overview (user asks "tell me about [the last] meeting" or "meeting overview/summary")\n` +
-          `- insights (user asks key insights/highlights from meeting)\n` +
-          `- meeting_question (user asks a question about what happened in the meeting)\n` +
-          `- send_email (ONLY when user wants to send a generic email, NOT when combined with summarize/minutes/transcript)\n` +
-          `- check_calendar (user asks about calendar, schedule, availability, meetings today/yesterday/tomorrow, free time, conflicts)\n` +
-          `- general_chat (everything else)\n\n` +
-          `IMPORTANT: For compound requests like "summarize and send to email" or "send the summary to my email", ` +
-          `classify as the PRIMARY action (summarize, minutes, or transcribe) NOT as send_email.\n\n` +
-          `Response format: {"intent":"<one_label>"}`,
+          `You are a smart intent classifier for a Teams meeting assistant bot. Analyze the user's message and determine their intent.\n\n` +
+          `User message: "${text}"\n` +
+          `Is this a meeting conversation: ${isMeetingConversation ? 'Yes' : 'No'}\n` +
+          `${dateContext}\n\n` +
+          `**Available intents:**\n` +
+          `1. **join_meeting** - User wants the bot to join an ongoing call/meeting (e.g., "join the call", "come to the meeting", "join us")\n` +
+          `2. **summarize** - User wants a summary/recap of content (e.g., "summarize this", "give me a recap", "what was discussed", "summarize and email me")\n` +
+          `3. **minutes** - User wants formal meeting notes/minutes (e.g., "create minutes", "meeting notes", "action items", "send minutes to email")\n` +
+          `4. **transcribe** - User wants a transcript (e.g., "transcribe the meeting", "get the transcript", "email the transcript")\n` +
+          `5. **meeting_overview** - User asks about a specific meeting's details (e.g., "tell me about the meeting", "what happened in my last meeting")\n` +
+          `6. **insights** - User wants key insights/highlights (e.g., "key takeaways", "main points", "highlights")\n` +
+          `7. **meeting_question** - User asks a specific question about meeting content (e.g., "what did John say about X", "when did we discuss Y")\n` +
+          `8. **send_email** - User wants to compose/send a generic email NOT related to meetings (e.g., "send an email to Bob about the project")\n` +
+          `9. **check_calendar** - User asks about their schedule, meetings, availability, or calendar:\n` +
+          `   - "what meetings do I have today/tomorrow/this week"\n` +
+          `   - "am I free at 3pm"\n` +
+          `   - "check my calendar"\n` +
+          `   - "do I have any meetings"\n` +
+          `   - "what's on my schedule"\n` +
+          `   - "meetings today"\n` +
+          `   - "am I available"\n` +
+          `   - "when is my next meeting"\n` +
+          `10. **general_chat** - Casual conversation, greetings, or anything that doesn't fit above\n\n` +
+          `**Important rules:**\n` +
+          `- For compound requests like "summarize and send to email", choose the PRIMARY content action (summarize/minutes/transcribe)\n` +
+          `- Questions about calendar/schedule/availability should ALWAYS be check_calendar\n` +
+          `- "meetings today", "my meetings", "do I have meetings" = check_calendar\n` +
+          `- Greetings like "hi", "hello", "good morning" = general_chat\n\n` +
+          `Respond with JSON only: {"intent": "<one_intent_label>", "confidence": "high|medium|low", "reasoning": "<brief explanation>"}`,
       },
     ],
-    instructions: 'You are a strict intent classifier. For compound requests combining content generation (summarize/minutes/transcribe) with email sending, choose the content generation intent. Output valid JSON only with key intent.',
+    instructions: 'You are a precise intent classifier. Think carefully about what the user REALLY wants. Output valid JSON with intent, confidence, and reasoning fields.',
     model: new OpenAIChatModel({
       model: config.azureOpenAIDeploymentName,
       apiKey: config.azureOpenAIKey,
@@ -809,8 +834,15 @@ async function classifyIntent(message: string, isMeetingConversation: boolean): 
   try {
     const response = await prompt.send('');
     const raw = (response.content || '').trim();
-    const parsed = JSON.parse(raw);
+    // Handle potential markdown code blocks
+    const jsonStr = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const parsed = JSON.parse(jsonStr);
     const intent = parsed?.intent as IntentLabel;
+    const confidence = parsed?.confidence || 'medium';
+    const reasoning = parsed?.reasoning || '';
+    
+    console.log(`[INTENT] LLM classified: "${intent}" (${confidence}) - ${reasoning}`);
+    
     const allowed: IntentLabel[] = [
       'join_meeting',
       'summarize',
@@ -826,20 +858,11 @@ async function classifyIntent(message: string, isMeetingConversation: boolean): 
     if (allowed.includes(intent)) {
       return intent;
     }
+    console.warn(`[INTENT] LLM returned unknown intent: ${intent}, defaulting to general_chat`);
   } catch (error) {
-    console.warn(`[INTENT] Classifier fallback to keyword logic`, error);
+    console.warn(`[INTENT] LLM classification failed, defaulting to general_chat:`, error);
   }
 
-  const lower = text.toLowerCase();
-  if ((lower.includes('join') && lower.includes('meeting')) || (lower.includes('join') && lower.includes('call'))) return 'join_meeting';
-  if (lower.includes('summarize') || lower.includes('summary') || lower.includes('recap')) return 'summarize';
-  if (lower.includes('minutes') || lower.includes('meeting notes')) return 'minutes';
-  if (lower.includes('transcribe') || lower.includes('transcript')) return 'transcribe';
-  if ((lower.includes('tell') && lower.includes('meeting')) || lower.includes('meeting overview') || (lower.includes('last') && lower.includes('meeting')) || lower.includes('about the meeting')) return 'meeting_overview';
-  if (lower.includes('insight')) return 'insights';
-  if ((lower.includes('send') && lower.includes('email')) || (lower.includes('email') && (lower.includes('to') || lower.includes('me')))) return 'send_email';
-  if (lower.includes('calendar') || lower.includes('schedule') || lower.includes('availability') || lower.includes('free time') || lower.includes('busy') || (lower.includes('meeting') && lower.includes('scheduled'))) return 'check_calendar';
-  if (isMeetingConversation && (lower.includes('?') || lower.includes('what ') || lower.includes('who ') || lower.includes('when ') || lower.includes('why ') || lower.includes('how '))) return 'meeting_question';
   return 'general_chat';
 }
 
@@ -953,7 +976,7 @@ interface PendingJoin {
 const pendingJoinMap = new Map<string, PendingJoin>();
 
 const RETRY_INTERVAL_MS = 15_000;  // 15 seconds between retries
-const MAX_RETRIES = 20;            // 20 retries × 15s = 5 minutes
+const MAX_RETRIES = 20;            // 20 retries � 15s = 5 minutes
 
 interface TranscriptionStartupState {
   attemptCount: number;
@@ -1024,7 +1047,7 @@ async function attemptAutoStartTranscription(
       await graphApiHelper.sendProactiveMessage(
         callEntry.serviceUrl,
         callEntry.conversationId,
-        `⚠️ **I couldn't auto-start Teams transcription.**\n\nPlease ensure:\n• Meeting policy allows transcription\n• The bot app has **Calls.AccessMedia.All** with admin consent\n\nYou can still start transcription manually in Teams if needed.`
+        `?? **I couldn't auto-start Teams transcription.**\n\nPlease ensure:\n� Meeting policy allows transcription\n� The bot app has **Calls.AccessMedia.All** with admin consent\n\nYou can still start transcription manually in Teams if needed.`
       );
     }
     return;
@@ -1055,7 +1078,7 @@ async function attemptAutoStartTranscription(
       await graphApiHelper.sendProactiveMessage(
         callEntry.serviceUrl,
         callEntry.conversationId,
-        `⚠️ **I couldn't auto-start Teams transcription.**\n\nPlease ensure:\n• Meeting policy allows transcription\n• The bot app has **Calls.AccessMedia.All** with admin consent\n\nYou can still start transcription manually in Teams if needed.`
+        `?? **I couldn't auto-start Teams transcription.**\n\nPlease ensure:\n� Meeting policy allows transcription\n� The bot app has **Calls.AccessMedia.All** with admin consent\n\nYou can still start transcription manually in Teams if needed.`
       );
     }
     return;
@@ -1111,7 +1134,7 @@ async function pollLiveTranscript(state: LiveTranscriptPollingState) {
           await graphApiHelper.sendProactiveMessage(
             state.serviceUrl,
             state.conversationId,
-            `✅ **Live transcript is now flowing!** Captured ${allEntries.length} entries so far.`
+            `? **Live transcript is now flowing!** Captured ${allEntries.length} entries so far.`
           );
         }
         
@@ -1174,12 +1197,12 @@ async function scheduleJoinRetry(conversationId: string) {
 
   pending.retryCount++;
   if (pending.retryCount > pending.maxRetries) {
-    console.log(`[JOIN_RETRY] Max retries (${pending.maxRetries}) reached for ${conversationId} — giving up`);
+    console.log(`[JOIN_RETRY] Max retries (${pending.maxRetries}) reached for ${conversationId} � giving up`);
     pendingJoinMap.delete(conversationId);
     await graphApiHelper.sendProactiveMessage(
       pending.serviceUrl,
       conversationId,
-      `⚠️ **I gave up waiting to join the meeting.**\n\nI retried for 5 minutes but the call never became active. Please start the meeting and ask me to join again.`
+      `?? **I gave up waiting to join the meeting.**\n\nI retried for 5 minutes but the call never became active. Please start the meeting and ask me to join again.`
     );
     return;
   }
@@ -1189,7 +1212,7 @@ async function scheduleJoinRetry(conversationId: string) {
     try {
       const meetingInfo = await resolveMeetingInfoForConversation(conversationId);
       if (!meetingInfo?.organizer?.id) {
-        console.warn(`[JOIN_RETRY] No meeting info on retry — scheduling next`);
+        console.warn(`[JOIN_RETRY] No meeting info on retry � scheduling next`);
         await scheduleJoinRetry(conversationId);
         return;
       }
@@ -1202,16 +1225,16 @@ async function scheduleJoinRetry(conversationId: string) {
       );
 
       if (callResult) {
-        console.log(`[JOIN_RETRY] Join call placed, callId=${callResult.id} — waiting for webhook`);
+        console.log(`[JOIN_RETRY] Join call placed, callId=${callResult.id} � waiting for webhook`);
         activeCallMap.set(callResult.id, {
           conversationId,
           serviceUrl: pending.serviceUrl,
           organizerId: meetingInfo.organizer?.id,
           joinWebUrl: meetingInfo.joinWebUrl,
         });
-        // Don't delete from pendingJoinMap yet — webhook will do it on 'established' or final failure
+        // Don't delete from pendingJoinMap yet � webhook will do it on 'established' or final failure
       } else {
-        console.warn(`[JOIN_RETRY] joinMeetingCall returned null — scheduling next`);
+        console.warn(`[JOIN_RETRY] joinMeetingCall returned null � scheduling next`);
         await scheduleJoinRetry(conversationId);
       }
     } catch (err) {
@@ -1453,11 +1476,11 @@ app.on('message', async ({ send, stream, activity }) => {
       console.log(`[MEETING_AUTOJOIN] Detected meeting start message. Sending automatic greeting.`);
 
       const greetingActivity = new MessageActivity(
-        `👋 **Missa The Translator** auto-joined this meeting chat.\n\n` +
+        `Hello, **Mela AI Meeting Assistant** auto-joined this meeting chat.\n\n` +
         `I can help you with:\n` +
-        `• **Summarize** - Get a quick recap of the chat\n` +
-        `• **Minutes** - Generate meeting minutes\n` +
-        `• **Transcribe** - Get transcript when recording is available`
+        `- **Summarize** - Get a quick recap of the chat\n` +
+        `- **Minutes** - Generate meeting minutes\n` +
+        `- **Transcribe** - Get transcript when recording is available`
       ).addAiGenerated().addFeedback();
 
       await send(greetingActivity);
@@ -1479,9 +1502,77 @@ app.on('message', async ({ send, stream, activity }) => {
       
       try {
         console.log(`[DEBUG] Processing summarization for user`);
+        
+        // Use LLM to understand WHAT the user wants to summarize
+        const targetExtractPrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content: `Analyze this summarization request to determine what source the user wants summarized.
 
-        // First, try to get meeting transcript for summary
-        const liveEntries = liveTranscriptMap.get(activity.conversation.id);
+User request: "${cleanText || activity.text}"
+
+Determine:
+1. Is the user asking about the CURRENT conversation/meeting, or a DIFFERENT/SPECIFIC chat/group/meeting?
+2. If a specific chat/group, extract the name/identifier
+
+Respond with JSON only:
+{
+  "target": "current" | "specific",
+  "chat_name": "name of the specific chat/group if mentioned, or null",
+  "content_type": "meeting" | "chat" | "transcript" | "any"
+}`
+            }
+          ],
+          instructions: 'You are analyzing summarization requests. If the user mentions a specific group name, chat name, or meeting title (like "test agent v2 group", "the marketing chat", "yesterday\'s standup"), return target="specific" with the chat_name. If they just say "summarize" or "summarize this", return target="current". Output valid JSON only.',
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21'
+          })
+        });
+
+        const targetResponse = await targetExtractPrompt.send('');
+        const jsonStr = (targetResponse.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        let targetInfo = { target: 'current', chat_name: null, content_type: 'any' };
+        try {
+          targetInfo = JSON.parse(jsonStr);
+        } catch {
+          console.warn(`[SUMMARIZE] Could not parse target extraction, defaulting to current conversation`);
+        }
+        
+        console.log(`[SUMMARIZE] Target analysis: ${JSON.stringify(targetInfo)}`);
+        
+        // Determine which chat to summarize
+        let targetChatId = activity.conversation.id;
+        let targetChatName = 'this conversation';
+        
+        if (targetInfo.target === 'specific' && targetInfo.chat_name) {
+          // User wants to summarize a specific chat - search for it
+          console.log(`[SUMMARIZE] Searching for chat: "${targetInfo.chat_name}"`);
+          const userId = activity.from.aadObjectId || activity.from.id;
+          const matchingChats = await graphApiHelper.getUserChats(userId, targetInfo.chat_name, 20);
+          
+          if (matchingChats.length > 0) {
+            // Use the most recently updated matching chat
+            targetChatId = matchingChats[0].id;
+            targetChatName = matchingChats[0].topic || targetInfo.chat_name;
+            console.log(`[SUMMARIZE] Found matching chat: "${targetChatName}" (${targetChatId})`);
+          } else {
+            // No matching chat found
+            await send(new MessageActivity(
+              `I couldn't find a chat or group named "${targetInfo.chat_name}". Please check the name and try again, or ask me to summarize from the current conversation.`
+            ).addAiGenerated().addFeedback());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          }
+        }
+
+        // First, try to get meeting transcript for summary (only for current conversation)
+        const liveEntries = targetInfo.target === 'current' ? liveTranscriptMap.get(activity.conversation.id) : undefined;
         const transcriptEntries = liveEntries?.filter(e => e.isFinal) || [];
 
         if (transcriptEntries.length > 0) {
@@ -1501,15 +1592,24 @@ app.on('message', async ({ send, stream, activity }) => {
 
           const responseActivity = new MessageActivity(generatedSummary).addAiGenerated().addFeedback();
           await send(responseActivity);
+          
+          // Track for email follow-up
+          lastBotResponseMap.set(activity.conversation.id, {
+            content: generatedSummary,
+            contentType: 'summary',
+            subject: `Summary: ${meetingTitle}`,
+            timestamp: Date.now()
+          });
+          
           console.log(`[SUCCESS] Transcript-based summary sent to user`);
         } else {
-          // Fallback to chat message summarization
-          console.log(`[GRAPH] No transcript found, fetching chat messages for: ${activity.conversation.id}`);
-          let chatMessages = await graphApiHelper.getChatMessages(activity.conversation.id, 50);
+          // Fetch chat messages from the target chat
+          console.log(`[GRAPH] Fetching chat messages for: ${targetChatId}`);
+          let chatMessages = await graphApiHelper.getChatMessages(targetChatId, 50);
           console.log(`[GRAPH] Retrieved ${chatMessages.length} messages`);
 
-          // Fallback: if Graph API returns no messages, use stored conversation history
-          if (chatMessages.length === 0) {
+          // Fallback: if Graph API returns no messages and it's current conversation, use stored history
+          if (chatMessages.length === 0 && targetInfo.target === 'current') {
             console.log(`[FALLBACK] Graph API returned no messages, using stored conversation history`);
             const storedSharedMessages = storage.get(sharedConversationKey) || [];
 
@@ -1556,11 +1656,13 @@ app.on('message', async ({ send, stream, activity }) => {
           }
 
           if (chatMessages.length === 0) {
-            const responseActivity = new MessageActivity(
-              `I don't have enough content yet to summarize.\n\n` +
-              `If this is a meeting, ask me to join or request a transcript first. ` +
-              `If this is a chat, mention me in a few messages or grant Microsoft Graph permissions (Chat.Read.All / ChatMessage.Read.All).`
-            ).addAiGenerated().addFeedback();
+            const noContentMsg = targetInfo.target === 'specific'
+              ? `I couldn't retrieve messages from "${targetChatName}". This might be a permissions issue or the chat has no recent messages.`
+              : `I don't have enough content yet to summarize.\n\n` +
+                `If this is a meeting, ask me to join or request a transcript first. ` +
+                `If this is a chat, mention me in a few messages or grant Microsoft Graph permissions (Chat.Read.All / ChatMessage.Read.All).`;
+            
+            const responseActivity = new MessageActivity(noContentMsg).addAiGenerated().addFeedback();
             await send(responseActivity);
             storage.set(conversationKey, messages);
             storage.set(sharedConversationKey, sharedMessages);
@@ -1568,14 +1670,27 @@ app.on('message', async ({ send, stream, activity }) => {
             return;
           }
 
-          console.log(`[SUMMARIZE] Generating chat summary...`);
+          console.log(`[SUMMARIZE] Generating chat summary for "${targetChatName}"...`);
           generatedSummary = await summarizationHelper.summarizeChatMessages(chatMessages, 'detailed');
           console.log(`[SUMMARIZE] Summary generated successfully`);
 
+          const summaryHeader = targetInfo.target === 'specific' 
+            ? `**Summary of "${targetChatName}":**\n\n`
+            : `**Chat Summary for ${userName}:**\n\n`;
+
           const responseActivity = new MessageActivity(
-            `**Chat Summary for ${userName}:**\n\n${generatedSummary}`
+            `${summaryHeader}${generatedSummary}`
           ).addAiGenerated().addFeedback();
           await send(responseActivity);
+          
+          // Track for email follow-up
+          lastBotResponseMap.set(activity.conversation.id, {
+            content: `${summaryHeader}${generatedSummary}`,
+            contentType: 'summary',
+            subject: targetInfo.target === 'specific' ? `Summary: ${targetChatName}` : 'Chat Summary',
+            timestamp: Date.now()
+          });
+          
           console.log(`[SUCCESS] Chat summary sent to user`);
         }
         
@@ -1594,12 +1709,12 @@ app.on('message', async ({ send, stream, activity }) => {
             const emailResult = await graphApiHelper.sendEmail(
               activity.from.aadObjectId || activity.from.id,
               recipientEmail,
-              'Meeting Summary from Missa',
-              generatedSummary.replace(/\n/g, '<br>')
+              'Meeting Summary from Mela AI Meeting Assistant',
+              generatedSummary
             );
             
             if (emailResult.success) {
-              await send(new MessageActivity(`✉️ I've also sent the summary to **${recipientEmail}**.`).addAiGenerated());
+              await send(new MessageActivity(`?? I've also sent the summary to **${recipientEmail}**.`).addAiGenerated());
             } else {
               await send(new MessageActivity(`I couldn't send the email: ${emailResult.error}`).addAiGenerated());
             }
@@ -1654,9 +1769,9 @@ app.on('message', async ({ send, stream, activity }) => {
           const responseActivity = new MessageActivity(
             `I don't have any meeting transcript data yet.\n\n` +
             `You can:\n` +
-            `• Ask me to join an upcoming meeting\n` +
-            `• Share a meeting you already attended\n` +
-            `• Request a transcript if a meeting was recorded`
+            `� Ask me to join an upcoming meeting\n` +
+            `� Share a meeting you already attended\n` +
+            `� Request a transcript if a meeting was recorded`
           ).addAiGenerated().addFeedback();
           await send(responseActivity);
           storage.set(conversationKey, messages);
@@ -1701,7 +1816,7 @@ app.on('message', async ({ send, stream, activity }) => {
       await sendTypingIndicator(send);
       try {
         console.log(`[TRANSCRIBE_DEBUG] Step 1: Sending initial acknowledgment`);
-        await send(new MessageActivity(`⏳ **Working on it... checking transcript sources for this channel.**`).addAiGenerated());
+        await send(new MessageActivity(`? **Working on it... checking transcript sources for this channel.**`).addAiGenerated());
         console.log(`[TRANSCRIBE_DEBUG] Step 2: Resolving meeting info`);
 
         // Fetch meeting metadata (title + members) for header
@@ -1722,7 +1837,7 @@ app.on('message', async ({ send, stream, activity }) => {
         if (!isInCall && chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
           console.log(`[TRANSCRIPT] Bot not in call - fetching from Graph API first`);
           const fetchingActivity = new MessageActivity(
-            `⏳ **Checking for meeting transcript...**`
+            `? **Checking for meeting transcript...**`
           ).addAiGenerated();
           await send(fetchingActivity);
           console.log(`[TRANSCRIBE_DEBUG] Step 6: Sent checking message, now fetching transcript`);
@@ -1777,7 +1892,7 @@ app.on('message', async ({ send, stream, activity }) => {
           console.log(`[SUCCESS] Transcript sent to user (source: ${dataSource})`);
         } else {
             const fetchingActivity = new MessageActivity(
-              `⏳ **Checking for meeting transcript...**`
+              `? **Checking for meeting transcript...**`
             ).addAiGenerated();
             await send(fetchingActivity);
 
@@ -1808,23 +1923,23 @@ app.on('message', async ({ send, stream, activity }) => {
                   console.log(`[SUCCESS] Graph transcript fetched and sent (${parsed.length} entries)`);
                 } else {
                   const responseActivity = new MessageActivity(
-                    `📝 **Transcript data was found but couldn't be parsed.**\n\nTeams may still be processing it — try again in a minute.`
+                    `?? **Transcript data was found but couldn't be parsed.**\n\nTeams may still be processing it � try again in a minute.`
                   ).addAiGenerated();
                   await send(responseActivity);
                 }
               } else {
                 const responseActivity = new MessageActivity(
-                  `📝 **No transcript available yet.**\n\n` +
+                  `?? **No transcript available yet.**\n\n` +
                   `Make sure:\n` +
-                  `• Recording/transcription was enabled during the meeting\n` +
-                  `• The meeting has ended (transcripts are available post-meeting)\n\n` +
-                  `If the meeting just ended, try again in a minute — Teams may still be processing it.`
+                  `� Recording/transcription was enabled during the meeting\n` +
+                  `� The meeting has ended (transcripts are available post-meeting)\n\n` +
+                  `If the meeting just ended, try again in a minute � Teams may still be processing it.`
                 ).addAiGenerated();
                 await send(responseActivity);
               }
             } else {
               const responseActivity = new MessageActivity(
-                `📝 **No transcript available.**\n\n` +
+                `?? **No transcript available.**\n\n` +
                 `I could not find a transcript for this channel conversation yet.\n\n` +
                 `Please ensure transcription was enabled for the meeting and try again shortly after the meeting ends.`
               ).addAiGenerated();
@@ -1858,7 +1973,7 @@ app.on('message', async ({ send, stream, activity }) => {
         const meetingTitle = chatInfo?.subject || 'Meeting';
 
         const fetchingActivity = new MessageActivity(
-          `⏳ **Fetching transcript for this channel conversation...**`
+          `? **Fetching transcript for this channel conversation...**`
         ).addAiGenerated();
         await send(fetchingActivity);
 
@@ -1870,7 +1985,7 @@ app.on('message', async ({ send, stream, activity }) => {
 
         if (!transcriptText) {
           const noTranscriptActivity = new MessageActivity(
-            `📝 **No transcript available yet.**\n\n` +
+            `?? **No transcript available yet.**\n\n` +
             `I checked Teams transcript data for this channel conversation and did not find one yet.\n` +
             `Please ensure transcription was enabled and try again after the meeting ends.`
           ).addAiGenerated();
@@ -1883,7 +1998,7 @@ app.on('message', async ({ send, stream, activity }) => {
 
         const insights = await generateKeyMeetingInsights(transcriptText, meetingTitle);
         const insightsActivity = new MessageActivity(
-          `## 🔍 Key Meeting Insights\n\n${insights}`
+          `## ?? Key Meeting Insights\n\n${insights}`
         ).addAiGenerated().addFeedback();
         await send(insightsActivity);
         console.log(`[SUCCESS] Key meeting insights sent`);
@@ -2022,12 +2137,12 @@ app.on('message', async ({ send, stream, activity }) => {
             const emailResult = await graphApiHelper.sendEmail(
               activity.from.aadObjectId || activity.from.id,
               recipientEmail,
-              'Meeting Minutes from Missa',
-              generatedMinutes.replace(/\n/g, '<br>')
+              'Meeting Minutes from Mela AI Meeting Assistant',
+              generatedMinutes
             );
             
             if (emailResult.success) {
-              await send(new MessageActivity(`✉️ I've also sent the minutes to **${recipientEmail}**.`).addAiGenerated());
+              await send(new MessageActivity(`?? I've also sent the minutes to **${recipientEmail}**.`).addAiGenerated());
             } else {
               await send(new MessageActivity(`I couldn't send the email: ${emailResult.error}`).addAiGenerated());
             }
@@ -2119,7 +2234,7 @@ app.on('message', async ({ send, stream, activity }) => {
               maxRetries: MAX_RETRIES,
             });
             const joinedActivity = new MessageActivity(
-              `✅ **Joining the meeting!**\n\nI'll keep trying to connect — if the call hasn't started yet I'll automatically join once someone starts it (up to 5 minutes).\n\nOnce connected, you can ask me to:\n• **Summarize** - recap of the chat so far\n• **Minutes** - formal meeting minutes\n• **Transcribe** - get transcript if recording is available`
+              `? **Joining the meeting!**\n\nI'll keep trying to connect � if the call hasn't started yet I'll automatically join once someone starts it (up to 5 minutes).\n\nOnce connected, you can ask me to:\n� **Summarize** - recap of the chat so far\n� **Minutes** - formal meeting minutes\n� **Transcribe** - get transcript if recording is available`
             ).addAiGenerated().addFeedback();
             await send(joinedActivity);
           } else {
@@ -2134,7 +2249,7 @@ app.on('message', async ({ send, stream, activity }) => {
 
       if (!joinedCall) {
         const readyActivity = new MessageActivity(
-          `👋 I'm here in the meeting chat!\n\nYou can ask me to:\n• **Summarize** - recap of the chat so far\n• **Minutes** - formal meeting minutes\n• **Transcribe** - get transcript if recording is available`
+          `?? I'm here in the meeting chat!\n\nYou can ask me to:\n� **Summarize** - recap of the chat so far\n� **Minutes** - formal meeting minutes\n� **Transcribe** - get transcript if recording is available`
         ).addAiGenerated().addFeedback();
         await send(readyActivity);
       }
@@ -2172,7 +2287,7 @@ app.on('message', async ({ send, stream, activity }) => {
         const formatted = chatMessages
           .reverse()
           .slice(-30)
-          .map((m) => `• ${(m.from.user?.displayName || 'Unknown')}: ${m.body.content}`)
+          .map((m) => `� ${(m.from.user?.displayName || 'Unknown')}: ${m.body.content}`)
           .join('\n');
         await send(new MessageActivity(`**Recent Meeting Chats (${Math.min(chatMessages.length, 30)} shown):**\n\n${formatted}`).addAiGenerated().addFeedback());
       }
@@ -2190,10 +2305,17 @@ app.on('message', async ({ send, stream, activity }) => {
       try {
         const userText = (cleanText || activity.text || '').toLowerCase();
         
-        // Check if user wants to send summary/minutes/transcript
+        // Check if user wants to send summary/minutes/transcript (explicit keywords)
         const wantsSummary = userText.includes('summary') || userText.includes('summarize');
         const wantsMinutes = userText.includes('minutes') || userText.includes('meeting notes');
         const wantsTranscript = userText.includes('transcript');
+        
+        // Check for contextual references like "send it", "email that", "send this to me"
+        const isContextualReference = /\b(send\s+(it|this|that)|email\s+(it|this|that|me)|send\s+to\s+(my\s+)?email)\b/i.test(userText);
+        const lastResponse = lastBotResponseMap.get(activity.conversation.id);
+        const hasRecentContext = lastResponse && (Date.now() - lastResponse.timestamp) < 10 * 60 * 1000; // within 10 minutes
+        
+        console.log(`[EMAIL] Context check: isContextualReference=${isContextualReference}, hasRecentContext=${hasRecentContext}, lastContentType=${lastResponse?.contentType}`);
         
         // Extract email address from request
         const emailMatch = (cleanText || activity.text || '').match(/[\w.-]+@[\w.-]+\.\w+/i);
@@ -2207,6 +2329,34 @@ app.on('message', async ({ send, stream, activity }) => {
         
         if (!recipientEmail) {
           await send(new MessageActivity(`I couldn't determine the recipient email address. Please specify who to send the email to.`).addAiGenerated().addFeedback());
+        } else if (isContextualReference && hasRecentContext && lastResponse) {
+          // User is referring to something we just showed them - use conversation context!
+          console.log(`[EMAIL] Using contextual reference - sending last ${lastResponse.contentType} response`);
+          
+          const contentTypeLabels: Record<string, string> = {
+            'calendar': 'calendar schedule',
+            'summary': 'meeting summary',
+            'minutes': 'meeting minutes',
+            'transcript': 'transcript',
+            'meeting_overview': 'meeting overview',
+            'insights': 'meeting insights',
+            'general': 'information'
+          };
+          
+          const emailSubject = lastResponse.subject || `${contentTypeLabels[lastResponse.contentType] || 'Information'} from Mela AI Meeting Assistant`;
+          
+          const sendResult = await graphApiHelper.sendEmail(
+            activity.from.aadObjectId || activity.from.id,
+            recipientEmail,
+            emailSubject,
+            lastResponse.content
+          );
+          
+          if (sendResult.success) {
+            await send(new MessageActivity(`?? Done! I've sent your ${contentTypeLabels[lastResponse.contentType] || 'information'} to **${recipientEmail}**.`).addAiGenerated());
+          } else {
+            await send(new MessageActivity(`I couldn't send the email: ${sendResult.error}`).addAiGenerated());
+          }
         } else if (wantsSummary || wantsMinutes || wantsTranscript) {
           // Generate the requested content first, then email it
           console.log(`[EMAIL] Generating content to send: summary=${wantsSummary}, minutes=${wantsMinutes}, transcript=${wantsTranscript}`);
@@ -2214,7 +2364,7 @@ app.on('message', async ({ send, stream, activity }) => {
           const liveEntries = liveTranscriptMap.get(activity.conversation.id);
           const transcriptEntries = liveEntries?.filter(e => e.isFinal) || [];
           let contentToSend = '';
-          let emailSubject = 'Meeting Content from Missa';
+          let emailSubject = 'Meeting Content from Mela AI Meeting Assistant';
           
           if (transcriptEntries.length > 0) {
             const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
@@ -2248,12 +2398,12 @@ app.on('message', async ({ send, stream, activity }) => {
             if (chatMessages.length > 0) {
               if (wantsSummary) {
                 contentToSend = await summarizationHelper.summarizeChatMessages(chatMessages, 'detailed');
-                emailSubject = 'Chat Summary from Missa';
+                emailSubject = 'Chat Summary from Mela AI Meeting Assistant';
               } else if (wantsMinutes) {
                 const chatInfo = await graphApiHelper.getChatInfo(activity.conversation.id);
                 const participants = chatInfo?.members?.map((m: any) => m.displayName) || [userName];
                 contentToSend = await summarizationHelper.generateMeetingMinutes(chatMessages, participants, userText);
-                emailSubject = 'Meeting Minutes from Missa';
+                emailSubject = 'Meeting Minutes from Mela AI Meeting Assistant';
               }
             }
           }
@@ -2267,11 +2417,11 @@ app.on('message', async ({ send, stream, activity }) => {
               activity.from.aadObjectId || activity.from.id,
               recipientEmail,
               emailSubject,
-              contentToSend.replace(/\n/g, '<br>')
+              contentToSend
             );
             
             if (sendResult.success) {
-              await send(new MessageActivity(`✉️ I've sent the ${wantsSummary ? 'summary' : wantsMinutes ? 'minutes' : 'transcript'} to **${recipientEmail}**.`).addAiGenerated());
+              await send(new MessageActivity(`?? I've sent the ${wantsSummary ? 'summary' : wantsMinutes ? 'minutes' : 'transcript'} to **${recipientEmail}**.`).addAiGenerated());
             } else {
               await send(new MessageActivity(`I couldn't send the email: ${sendResult.error}`).addAiGenerated());
             }
@@ -2279,15 +2429,36 @@ app.on('message', async ({ send, stream, activity }) => {
             await send(new MessageActivity(`I don't have enough content to generate a ${wantsSummary ? 'summary' : wantsMinutes ? 'minutes' : 'transcript'}. If this is a meeting, ask me to join first.`).addAiGenerated().addFeedback());
           }
         } else {
-          // Generic email - use LLM to extract email parameters
+          // Generic email - use LLM with conversation context to understand what to send
+          // Build recent conversation context
+          const recentLlmMessages = (llmMessages || []).slice(-10);
+          const conversationContext = recentLlmMessages.map((msg: any) => 
+            `${msg.role === 'user' ? 'User' : 'Assistant'}: ${(msg.content || '').substring(0, 500)}`
+          ).join('\n');
+          
           const extractPrompt = new ChatPrompt({
             messages: [
               {
                 role: 'user',
-                content: `Extract email details from this request.\n\nUser request: "${cleanText || activity.text}"\nUser's name: ${userName}\n\nRespond with JSON only: {"subject": "email subject", "body": "email body content"}`
+                content: `Analyze this email request in the context of the recent conversation.
+
+User's email request: "${cleanText || activity.text}"
+User's name: ${userName}
+
+Recent conversation context:
+${conversationContext}
+
+${hasRecentContext && lastResponse ? `Last bot response type: ${lastResponse.contentType}\nLast response preview: ${lastResponse.content.substring(0, 300)}...` : 'No recent bot response.'}
+
+Based on the conversation, determine what the user wants to email:
+1. If they're referring to something discussed (like "send that", "email this info"), use the relevant content from the conversation
+2. If they want to compose a new email, extract the subject and body from their request
+3. If unclear, ask for clarification in the body
+
+Respond with JSON: {"subject": "clear email subject", "body": "complete email body content", "is_contextual": true/false, "needs_clarification": true/false}`
               }
             ],
-            instructions: 'You are a JSON extraction assistant. Extract email subject and body from user requests. Output valid JSON only.',
+            instructions: 'You are a smart email assistant. Understand context! If the user refers to previous content ("it", "that", "this", "the schedule", "the info"), include that content in the email body. Generate complete, ready-to-send email content. Output valid JSON only.',
             model: new OpenAIChatModel({
               model: config.azureOpenAIDeploymentName,
               apiKey: config.azureOpenAIKey,
@@ -2297,35 +2468,40 @@ app.on('message', async ({ send, stream, activity }) => {
           });
 
           const extractResponse = await extractPrompt.send('');
-          const extracted = JSON.parse((extractResponse.content || '').trim());
+          const jsonStr = (extractResponse.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+          const extracted = JSON.parse(jsonStr);
           
-          // Send the email
-          const sendResult = await graphApiHelper.sendEmail(
-            activity.from.aadObjectId || activity.from.id,
-            recipientEmail,
-            extracted.subject || 'Message from Missa',
-            extracted.body || cleanText || activity.text || ''
-          );
+          if (extracted.needs_clarification) {
+            await send(new MessageActivity(extracted.body || "I'm not sure what you'd like me to email. Could you please clarify what content you want me to send?").addAiGenerated().addFeedback());
+          } else {
+            // Send the email
+            const sendResult = await graphApiHelper.sendEmail(
+              activity.from.aadObjectId || activity.from.id,
+              recipientEmail,
+              extracted.subject || 'Message from Mela AI Meeting Assistant',
+              extracted.body || cleanText || activity.text || ''
+            );
 
-          // Let LLM generate the response based on result
-          const responsePrompt = new ChatPrompt({
-            messages: [
-              {
-                role: 'user',
-                content: `Generate a brief, friendly response about sending an email.\n\nResult: ${sendResult.success ? 'SUCCESS' : 'FAILED'}\nRecipient: ${recipientEmail}\nSubject: ${extracted.subject || 'Message from Missa'}\n${sendResult.error ? `Error: ${sendResult.error}` : ''}\n\nRespond naturally as if you just completed (or failed) this action.`
-              }
-            ],
-            instructions: 'You are a helpful assistant. Generate a natural, brief response about the email send result. Be friendly but concise.',
-            model: new OpenAIChatModel({
-              model: config.azureOpenAIDeploymentName,
-              apiKey: config.azureOpenAIKey,
-              endpoint: config.azureOpenAIEndpoint,
-              apiVersion: '2024-10-21'
-            })
-          });
+            // Let LLM generate the response based on result
+            const responsePrompt = new ChatPrompt({
+              messages: [
+                {
+                  role: 'user',
+                  content: `Generate a brief, friendly response about sending an email.\n\nResult: ${sendResult.success ? 'SUCCESS' : 'FAILED'}\nRecipient: ${recipientEmail}\nSubject: ${extracted.subject || 'Message from Mela AI Meeting Assistant'}\n${sendResult.error ? `Error: ${sendResult.error}` : ''}\n\nRespond naturally as if you just completed (or failed) this action.`
+                }
+              ],
+              instructions: 'You are a helpful assistant. Generate a natural, brief response about the email send result. Be friendly but concise.',
+              model: new OpenAIChatModel({
+                model: config.azureOpenAIDeploymentName,
+                apiKey: config.azureOpenAIKey,
+                endpoint: config.azureOpenAIEndpoint,
+                apiVersion: '2024-10-21'
+              })
+            });
 
-          const responseResult = await responsePrompt.send('');
-          await send(new MessageActivity(responseResult.content || 'Email action completed.').addAiGenerated().addFeedback());
+            const responseResult = await responsePrompt.send('');
+            await send(new MessageActivity(responseResult.content || 'Email action completed.').addAiGenerated().addFeedback());
+          }
         }
         console.log(`[SUCCESS] Email intent processed`);
       } catch (error) {
@@ -2403,26 +2579,37 @@ Respond with JSON only: {"query_type": "view_events|check_availability|find_free
 
         // Let LLM generate a natural response based on calendar data
         const eventsJson = calendarResult.success ? JSON.stringify(calendarResult.events?.slice(0, 15) || [], null, 2) : 'No events retrieved';
+        
         const responsePrompt = new ChatPrompt({
           messages: [
             {
               role: 'user',
-              content: `Generate a helpful response about the user's calendar.
+              content: `You are helping ${userName || 'the user'} understand their calendar.
 
-User question: "${cleanText || activity.text}"
-Query type: ${extracted.query_type || 'view_events'}
-Looking at past events: ${extracted.is_past ? 'Yes' : 'No'}
-Date range: ${extracted.start_date || 'not specified'} to ${extracted.end_date || 'not specified'}
-Result: ${calendarResult.success ? 'SUCCESS' : 'FAILED'}
+Their question: "${cleanText || activity.text}"
+Date range requested: ${extracted.start_date || 'today'} to ${extracted.end_date || 'today'}
+API result: ${calendarResult.success ? 'SUCCESS' : 'FAILED'}
 ${calendarResult.error ? `Error: ${calendarResult.error}` : ''}
 
-Calendar events:
+Raw calendar data:
 ${eventsJson}
 
-Provide a clear, organized response. If showing events, format them nicely with times and subjects. If user asked about availability, tell them if they're free or busy. If asking about past meetings, describe what was scheduled.`
+Create a beautifully formatted, easy-to-read calendar summary. Make it visually clean and scannable. Each meeting MUST be on its own line. Group active meetings separately from canceled ones. Convert all times to a friendly readable format. End with a brief encouraging note about their day.`
             }
           ],
-          instructions: 'You are a helpful calendar assistant. Generate a natural, well-formatted response about the calendar data. Use bullet points (•) for multiple events. Be concise but informative. Do NOT use markdown headers (# or ##). Use **bold** for emphasis only on key items like event names or times. Keep formatting minimal and chat-friendly.',
+          instructions: `You are a professional calendar assistant. Your responses must be VISUALLY EXCELLENT and easy to scan quickly.
+
+CRITICAL FORMATTING RULES:
+- EACH meeting MUST be on its own separate line - NEVER put multiple meetings on the same line
+- Use line breaks generously to create visual separation
+- Active meetings should be listed first, then canceled meetings in a separate section
+- Make meeting titles stand out using **bold**
+- Times should be human-friendly (e.g., "1:00 PM - 1:30 PM")
+- Canceled meetings should be clearly marked and visually distinct
+- Keep the response concise but well-organized
+- End with a short, friendly summary sentence
+
+The output should look clean and professional when displayed in a Teams chat.`,
           model: new OpenAIChatModel({
             model: config.azureOpenAIDeploymentName,
             apiKey: config.azureOpenAIKey,
@@ -2432,7 +2619,17 @@ Provide a clear, organized response. If showing events, format them nicely with 
         });
 
         const responseResult = await responsePrompt.send('');
-        await send(new MessageActivity(responseResult.content || 'Calendar check completed.').addAiGenerated().addFeedback());
+        const calendarResponseContent = responseResult.content || 'Calendar check completed.';
+        await send(new MessageActivity(calendarResponseContent).addAiGenerated().addFeedback());
+        
+        // Track this response for contextual follow-ups like "send it to my email"
+        lastBotResponseMap.set(activity.conversation.id, {
+          content: calendarResponseContent,
+          contentType: 'calendar',
+          subject: `Calendar for ${extracted.start_date || 'today'}`,
+          timestamp: Date.now()
+        });
+        
         console.log(`[SUCCESS] Calendar intent processed`);
       } catch (error) {
         console.error(`[ERROR_CHECK_CALENDAR]`, error);
@@ -2559,17 +2756,23 @@ app.on('conversationUpdate', async ({ send, activity }) => {
         console.log(`[MEETING_DETECTION] Detected as meeting: ${isMeetingChat}`);
 
         const greeting = isMeetingChat
-          ? `👋 **Missa The Translator** here! I've joined the meeting chat. 
+          ? `Hello, **Mela AI Meeting Assistant** here! I've joined the meeting chat. 
             
 I can help you with:
-• **Summarize** - Get a quick recap of the chat
-• **Minutes** - Generate formal meeting minutes
-• **Transcribe** - Get meeting transcript (if recording available)
+- **Summarize** - Get a quick recap of the chat
+- **Minutes** - Generate formal meeting minutes
+- **Transcribe** - Get meeting transcript (if recording available)
 
 Just ask me to summarize, get minutes, or transcribe!`
-          : `👋 **Missa The Translator** is ready to help! 
+          : `Hello, **Mela AI Meeting Assistant** is ready to help you!
 
-I can chat with you, summarize conversations, and more. How can I assist?`;
+I can quickly help with:
+- **Chat** - Ask questions and get instant support
+- **Summarize** - Turn long conversations into clear takeaways
+- **Minutes** - Generate structured meeting minutes
+- **Transcribe** - Retrieve meeting transcripts (when available)
+
+How can I assist?`;
 
         const greetingActivity = new MessageActivity(greeting).addAiGenerated();
         await send(greetingActivity);
@@ -2606,7 +2809,7 @@ I can chat with you, summarize conversations, and more. How can I assist?`;
                   });
                   console.log(`[AUTO_JOIN] Successfully initiated join for call ${callResult.id}`);
                   const autoJoinMsg = new MessageActivity(
-                    `🎙️ **Auto-joining the meeting call...**\n\nI'll connect automatically and start transcribing!`
+                    `??? **Auto-joining the meeting call...**\n\nI'll connect automatically and start transcribing!`
                   ).addAiGenerated();
                   await send(autoJoinMsg);
                 } else {
@@ -2654,7 +2857,7 @@ app.http.post('/api/calls', async (req: any, res: any) => {
     const body = req.body;
     const notifications = body?.value || [];
 
-    // Acknowledge immediately — Graph requires 200 within 5 seconds
+    // Acknowledge immediately � Graph requires 200 within 5 seconds
     res.status(200).json({});
 
     // Log the full raw body keys for debugging transcript events
@@ -2703,7 +2906,7 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         console.log(`[CALLS_WEBHOOK] Result info: code=${resultInfo.code}, subcode=${resultInfo.subcode}, message=${resultInfo.message}`);
       }
 
-      // Handle participant updates — check if all humans left
+      // Handle participant updates � check if all humans left
       if (isParticipantEvent && callId !== 'unknown') {
         // Check participants asynchronously to see if only the bot remains
         try {
@@ -2729,11 +2932,11 @@ app.http.post('/api/calls', async (req: any, res: any) => {
             const callEntry = activeCallMap.get(callId);
             const elapsed = callEntry?.establishedAt ? Date.now() - callEntry.establishedAt : 0;
             if (elapsed < 30_000) {
-              console.log(`[AUTO_LEAVE] Skipping — call only ${Math.round(elapsed / 1000)}s old (grace period: 30s)`);
+              console.log(`[AUTO_LEAVE] Skipping � call only ${Math.round(elapsed / 1000)}s old (grace period: 30s)`);
             } else if (callEntry?.leavingInProgress) {
-              console.log(`[AUTO_LEAVE] Already leaving — skipping duplicate`);
+              console.log(`[AUTO_LEAVE] Already leaving � skipping duplicate`);
             } else {
-              console.log(`[AUTO_LEAVE] No human participants remaining — hanging up`);
+              console.log(`[AUTO_LEAVE] No human participants remaining � hanging up`);
               if (callEntry) {
                 callEntry.leavingInProgress = true;
                 // Removed notification - user will get notified when transcript is ready
@@ -2756,7 +2959,7 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         const callEntry = activeCallMap.get(callId);
         // Guard: only process the FIRST established event per call (Teams sends duplicates)
         if (callEntry?.establishedAt) {
-          console.log(`[CALLS_WEBHOOK] Duplicate established event for callId=${callId} — ignoring`);
+          console.log(`[CALLS_WEBHOOK] Duplicate established event for callId=${callId} � ignoring`);
         } else if (callEntry) {
           console.log(`[CALLS_WEBHOOK] Call ESTABLISHED - bot is live in meeting. conversationId=${callEntry.conversationId}`);
           // Record establishment time and cancel any pending retries
@@ -2795,7 +2998,7 @@ app.http.post('/api/calls', async (req: any, res: any) => {
           await graphApiHelper.sendProactiveMessage(
             callEntry.serviceUrl,
             callEntry.conversationId,
-            `🎙️ **I'm now live in the meeting!**\n\nI’m auto-enabling Teams transcription now.\n\nAsk me to:\n• **Transcribe** — see the live transcript so far\n• **Summarize** — recap of the chat\n• **Minutes** — formal meeting minutes`
+            `??? **I'm now live in the meeting!**\n\nI�m auto-enabling Teams transcription now.\n\nAsk me to:\n� **Transcribe** � see the live transcript so far\n� **Summarize** � recap of the chat\n� **Minutes** � formal meeting minutes`
           );
         }
       } else if (callState === 'terminated') {
@@ -2813,7 +3016,7 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         console.log(`[CALLS_WEBHOOK] Call TERMINATED - bot left the meeting (duration: ${(callEndedAt - callStartedAt) / 1000}s)`);
 
         // Fetch the meeting transcript from Graph (Teams stores it server-side)
-        // Use retry logic — Teams may need time to finalize transcripts
+        // Use retry logic � Teams may need time to finalize transcripts
         if (callEntry?.organizerId && callEntry?.joinWebUrl && conversationId) {
           cacheMeetingContext(
             conversationId,
@@ -2841,7 +3044,7 @@ app.http.post('/api/calls', async (req: any, res: any) => {
                   console.log(`[POST_MEETING_TRANSCRIPT] Saved ${parsed.length} transcript entries`);
                   await graphApiHelper.sendProactiveMessage(
                     svcUrl, convId,
-                    `📝 **Meeting transcript is ready!** (${parsed.length} entries)\n\nSay **transcribe** to see it.`
+                    `?? **Meeting transcript is ready!** (${parsed.length} entries)\n\nSay **transcribe** to see it.`
                   );
                   return; // success
                 } else {
@@ -2856,10 +3059,10 @@ app.http.post('/api/calls', async (req: any, res: any) => {
                 console.log(`[POST_MEETING_TRANSCRIPT] Retrying in ${delayMs / 1000}s...`);
                 setTimeout(() => attemptFetch(attempt + 1, maxAttempts), delayMs);
               } else {
-                console.log(`[POST_MEETING_TRANSCRIPT] All ${maxAttempts} attempts exhausted — transcript not available`);
+                console.log(`[POST_MEETING_TRANSCRIPT] All ${maxAttempts} attempts exhausted � transcript not available`);
                 await graphApiHelper.sendProactiveMessage(
                   svcUrl, convId,
-                  `⚠️ **Could not retrieve meeting transcript.**\n\nTeams may not have generated one. Ensure transcription/recording was active during the meeting.`
+                  `?? **Could not retrieve meeting transcript.**\n\nTeams may not have generated one. Ensure transcription/recording was active during the meeting.`
                 );
               }
             } catch (err) {
@@ -2894,13 +3097,13 @@ app.http.post('/api/calls', async (req: any, res: any) => {
             await graphApiHelper.sendProactiveMessage(
               callEntry.serviceUrl,
               callEntry.conversationId,
-              `⚠️ **I couldn't join the meeting call.**\n\nThe live call is not currently active. Please start the meeting and ask me to join again.`
+              `?? **I couldn't join the meeting call.**\n\nThe live call is not currently active. Please start the meeting and ask me to join again.`
             );
           }
         }
       }
 
-      // ─── Transcription handling ───
+      // --- Transcription handling ---
       // Per Graph API docs, the field is `resourceData.transcription` (type callTranscription)
       // with properties: state (notStarted|active|inactive), lastModifiedDateTime
       const transcription = notification.resourceData?.transcription;

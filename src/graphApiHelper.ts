@@ -2,6 +2,61 @@ import axios, { AxiosInstance } from 'axios';
 import { ManagedIdentityCredential } from '@azure/identity';
 import config from './config';
 
+/**
+ * Convert markdown text to HTML for email formatting.
+ * Handles: headers, bold, italic, bullet points, numbered lists, links, code blocks.
+ */
+function markdownToHtml(markdown: string): string {
+  if (!markdown) return '';
+  
+  let html = markdown
+    // Escape HTML entities first
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    
+    // Headers (## Header → <h2>)
+    .replace(/^### (.+)$/gm, '<h3 style="color:#333;margin:16px 0 8px 0;">$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2 style="color:#333;margin:20px 0 10px 0;">$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1 style="color:#333;margin:24px 0 12px 0;">$1</h1>')
+    
+    // Bold and italic
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/___(.+?)___/g, '<strong><em>$1</em></strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    .replace(/_(.+?)_/g, '<em>$1</em>')
+    
+    // Inline code
+    .replace(/`([^`]+)`/g, '<code style="background:#f4f4f4;padding:2px 6px;border-radius:3px;font-family:monospace;">$1</code>')
+    
+    // Horizontal rules
+    .replace(/^---+$/gm, '<hr style="border:none;border-top:1px solid #ddd;margin:16px 0;">')
+    .replace(/^\*\*\*+$/gm, '<hr style="border:none;border-top:1px solid #ddd;margin:16px 0;">')
+    
+    // Bullet points (• or - or *)
+    .replace(/^[•\-\*]\s+(.+)$/gm, '<li style="margin:4px 0;">$1</li>')
+    
+    // Numbered lists
+    .replace(/^\d+\.\s+(.+)$/gm, '<li style="margin:4px 0;">$1</li>')
+    
+    // Line breaks
+    .replace(/\n\n/g, '</p><p style="margin:12px 0;">')
+    .replace(/\n/g, '<br>');
+  
+  // Wrap consecutive <li> items in <ul>
+  html = html.replace(/(<li[^>]*>.*?<\/li>)(\s*<br>\s*)?(<li[^>]*>)/g, '$1$3');
+  html = html.replace(/(<li[^>]*>.*?<\/li>)+/g, '<ul style="margin:8px 0;padding-left:24px;">$&</ul>');
+  
+  // Wrap in paragraph if not starting with block element
+  if (!html.startsWith('<h') && !html.startsWith('<ul') && !html.startsWith('<p')) {
+    html = '<p style="margin:12px 0;">' + html + '</p>';
+  }
+  
+  return `<div style="font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#333;">${html}</div>`;
+}
+
 interface UserInfo {
   id: string;
   displayName: string;
@@ -340,12 +395,71 @@ class GraphApiHelper {
       const members = response.data?.value || [];
       const names: string[] = members
         .map((m: any) => m.displayName)
-        .filter((n: string) => n && !n.toLowerCase().includes('bot') && !n.toLowerCase().includes('missa'));
+        .filter(
+          (n: string) =>
+            n &&
+            !n.toLowerCase().includes('bot') &&
+            !n.toLowerCase().includes('missa') &&
+            !n.toLowerCase().includes('mela')
+        );
       console.log(`[GRAPH_API] Found ${names.length} human members`);
       return names;
     } catch (error: any) {
       const status = error?.response?.status;
       console.warn(`[GRAPH_API] Could not fetch chat members (status=${status})`);
+      return [];
+    }
+  }
+
+  /**
+   * List user's recent chats and search by topic/name.
+   * GET /users/{userId}/chats
+   * Returns chats matching the search query (if provided) or all recent chats.
+   */
+  async getUserChats(userId: string, searchQuery?: string, limit: number = 50): Promise<{ id: string; topic: string; chatType: string; lastUpdated?: string }[]> {
+    try {
+      const token = await this.getTokenUsingClientCredentials();
+      if (!token) {
+        console.warn(`[GRAPH_API] No token available for getUserChats`);
+        return [];
+      }
+
+      console.log(`[GRAPH_API] Fetching chats for user ${userId}${searchQuery ? ` (searching: "${searchQuery}")` : ''}`);
+      
+      const response = await axios.get(
+        `https://graph.microsoft.com/v1.0/users/${userId}/chats?$top=${limit}&$expand=members&$orderby=lastUpdatedDateTime desc`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+        }
+      );
+
+      const chats = response.data?.value || [];
+      console.log(`[GRAPH_API] Found ${chats.length} chats for user`);
+
+      // Map to simpler structure
+      const mappedChats = chats.map((chat: any) => ({
+        id: chat.id,
+        topic: chat.topic || chat.members?.map((m: any) => m.displayName).filter((n: string) => n).join(', ') || 'Unnamed chat',
+        chatType: chat.chatType,
+        lastUpdated: chat.lastUpdatedDateTime,
+      }));
+
+      // If search query provided, filter by topic
+      if (searchQuery) {
+        const query = searchQuery.toLowerCase();
+        const filtered = mappedChats.filter((chat: any) => 
+          chat.topic?.toLowerCase().includes(query)
+        );
+        console.log(`[GRAPH_API] Filtered to ${filtered.length} chats matching "${searchQuery}"`);
+        return filtered;
+      }
+
+      return mappedChats;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const errMsg = error?.response?.data?.error?.message || error?.message || 'Unknown error';
+      console.error(`[GRAPH_API] Failed to fetch user chats: status=${status}, error=${errMsg}`);
       return [];
     }
   }
@@ -1112,7 +1226,8 @@ class GraphApiHelper {
   }
 
   /**
-   * Send an email on behalf of the user
+   * Send an email on behalf of the user.
+   * Body content can be markdown or plain text - it will be converted to HTML.
    */
   async sendEmail(userId: string, toEmail: string, subject: string, body: string): Promise<{ success: boolean; error?: string }> {
     try {
@@ -1124,12 +1239,15 @@ class GraphApiHelper {
       const url = `https://graph.microsoft.com/v1.0/users/${userId}/sendMail`;
       console.log(`[GRAPH_API] Sending email from ${userId} to ${toEmail}`);
 
+      // Convert markdown/plain text to properly formatted HTML
+      const htmlBody = markdownToHtml(body);
+
       await axios.post(url, {
         message: {
           subject: subject,
           body: {
             contentType: 'HTML',
-            content: body
+            content: htmlBody
           },
           toRecipients: [
             {
@@ -1162,18 +1280,74 @@ class GraphApiHelper {
    */
   async getCalendarEvents(userId: string, startDateTime?: string, endDateTime?: string): Promise<{ success: boolean; events?: any[]; error?: string }> {
     try {
+      console.log(`[CALENDAR_DEBUG] getCalendarEvents called with userId: '${userId}', start: '${startDateTime}', end: '${endDateTime}'`);
       const token = await this.getTokenUsingClientCredentials();
       if (!token) {
+        console.error(`[CALENDAR_DEBUG] Failed to acquire Graph token`);
         return { success: false, error: 'Failed to acquire Graph token' };
       }
 
-      // Default to today if no dates specified
-      const now = new Date();
-      const start = startDateTime || now.toISOString();
-      const end = endDateTime || new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days ahead
+      // Validate userId format - must be a valid GUID/AAD Object ID
+      if (!userId || userId.length < 10) {
+        console.error(`[CALENDAR_DEBUG] Invalid userId format: '${userId}'`);
+        return { success: false, error: 'Invalid user ID format' };
+      }
+
+      // Helper to normalize date strings to full ISO 8601 format
+      // Graph API requires full datetime, not just date
+      const normalizeDateTime = (dateStr: string | undefined, isEndDate: boolean): string => {
+        if (!dateStr) {
+          const now = new Date();
+          if (isEndDate) {
+            // Default end: 7 days from now at end of day
+            const end = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+            end.setHours(23, 59, 59, 999);
+            return end.toISOString();
+          } else {
+            // Default start: now
+            return now.toISOString();
+          }
+        }
+        
+        // If it's already a full ISO string with time, use it
+        if (dateStr.includes('T') && (dateStr.includes('Z') || dateStr.includes('+') || dateStr.includes('-', 10))) {
+          return dateStr;
+        }
+        
+        // Date-only format (e.g., "2026-03-06") - add time component
+        if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+          if (isEndDate) {
+            return `${dateStr}T23:59:59.999Z`; // End of day
+          } else {
+            return `${dateStr}T00:00:00.000Z`; // Start of day
+          }
+        }
+        
+        // Try to parse as date and convert
+        try {
+          const parsed = new Date(dateStr);
+          if (!isNaN(parsed.getTime())) {
+            if (isEndDate && parsed.getHours() === 0 && parsed.getMinutes() === 0) {
+              parsed.setHours(23, 59, 59, 999);
+            }
+            return parsed.toISOString();
+          }
+        } catch {
+          // Fall through
+        }
+        
+        // Fallback: treat as date-only
+        return isEndDate ? `${dateStr}T23:59:59.999Z` : `${dateStr}T00:00:00.000Z`;
+      };
+
+      const start = normalizeDateTime(startDateTime, false);
+      const end = normalizeDateTime(endDateTime, true);
+      
+      console.log(`[CALENDAR_DEBUG] Normalized dates - start: ${start}, end: ${end}`);
 
       const url = `https://graph.microsoft.com/v1.0/users/${userId}/calendarView?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=20&$select=subject,start,end,location,organizer,attendees,isAllDay`;
       console.log(`[GRAPH_API] Fetching calendar events for ${userId} from ${start} to ${end}`);
+      console.log(`[CALENDAR_DEBUG] Full URL: ${url}`);
 
       const response = await axios.get(url, {
         headers: {
@@ -1186,9 +1360,20 @@ class GraphApiHelper {
 
       const events = response.data?.value || [];
       console.log(`[GRAPH_API] Retrieved ${events.length} calendar events`);
+      if (events.length > 0) {
+        console.log(`[CALENDAR_DEBUG] First event: ${events[0].subject} at ${events[0].start?.dateTime}`);
+      }
       return { success: true, events };
     } catch (error: any) {
+      const status = error?.response?.status;
       const errMsg = error?.response?.data?.error?.message || error?.message || 'Unknown error';
+      const errCode = error?.response?.data?.error?.code || 'N/A';
+      console.error(`[CALENDAR_DEBUG] API Error: status=${status}, code=${errCode}, message=${errMsg}`);
+      if (status === 403) {
+        console.error(`[CALENDAR_DEBUG] 403 Forbidden - App likely missing Calendars.Read permission. Grant admin consent in Azure Portal.`);
+      } else if (status === 404) {
+        console.error(`[CALENDAR_DEBUG] 404 Not Found - User ID may not exist or mailbox not provisioned: ${errMsg}`);
+      }
       this.logGraphError('getCalendarEvents', error);
       return { success: false, error: errMsg };
     }

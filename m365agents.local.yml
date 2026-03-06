@@ -8,7 +8,7 @@ provision:
   - uses: teamsApp/create
     with:
       # app name
-      name: Missa The Translator${{APP_NAME_SUFFIX}}
+      name: Mela AI Meeting Assistant${{APP_NAME_SUFFIX}}
     # Write the information of created resources into environment file for
     # the specified environment variable(s).
     writeToEnvironmentFile:
@@ -22,7 +22,7 @@ provision:
   - uses: botFramework/create
     with:
       botId: ${{BOT_ID}}
-      name: Missa The Translator
+      name: Mela AI Meeting Assistant
       messagingEndpoint: ${{BOT_ENDPOINT}}/api/messages
       description: ""
       channels:

@@ -34,7 +34,10 @@ $permissions = @(
     "Calls.JoinGroupCall.All",
     "Calls.AccessMedia.All",
     "Calls.Initiate.All",
-    "CallRecords.Read.All"
+    "CallRecords.Read.All",
+    "Calendars.Read",
+    "Mail.Send",
+    "User.Read.All"
 )
 
 foreach ($permissionName in $permissions) {
