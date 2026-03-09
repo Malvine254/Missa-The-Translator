@@ -1033,7 +1033,8 @@ async function getTranscriptTextForConversation(conversationId: string): Promise
       meetingInfo.organizer.id,
       meetingInfo.joinWebUrl,
       transcriptWindow.min,
-      transcriptWindow.max
+      transcriptWindow.max,
+      conversationId // Match by conversation thread
     );
     if (vttContent) {
       const parsed = parseVttToEntries(vttContent);
@@ -1248,7 +1249,9 @@ async function pollLiveTranscript(state: LiveTranscriptPollingState) {
     const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
       state.organizerId,
       state.joinWebUrl,
-      state.callStartTime
+      state.callStartTime,
+      undefined,
+      state.conversationId // Match by conversation thread for Meet Now calls
     );
     if (!vttContent) {
       state.consecutiveEmptyPolls++;
@@ -1850,7 +1853,8 @@ Output valid JSON only.`,
               chatInfo.organizer.id,
               chatInfo.joinWebUrl,
               transcriptWindow.min,
-              transcriptWindow.max
+              transcriptWindow.max,
+              activity.conversation.id // Match by conversation thread
             );
             
             if (vttContent) {
@@ -1950,7 +1954,10 @@ Output valid JSON only.`,
           if (chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
             const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
               chatInfo.organizer.id,
-              chatInfo.joinWebUrl
+              chatInfo.joinWebUrl,
+              undefined,
+              undefined,
+              activity.conversation.id // Match by conversation thread
             );
             if (vttContent) {
               transcriptEntries = parseVttToEntries(vttContent);
@@ -2040,7 +2047,8 @@ Output valid JSON only.`,
             chatInfo.organizer.id,
             chatInfo.joinWebUrl,
             transcriptWindow.min,
-            transcriptWindow.max
+            transcriptWindow.max,
+            activity.conversation.id // Match by conversation thread
           );
           console.log(`[TRANSCRIBE_DEBUG] Step 8: fetchMeetingTranscriptText returned ${vttContent ? vttContent.length + ' chars' : 'null'}`);
           if (vttContent) {
@@ -2092,7 +2100,8 @@ Output valid JSON only.`,
                 meetingOnlineInfo.organizer.id,
                 meetingOnlineInfo.joinWebUrl,
                 transcriptWindow.min,
-                transcriptWindow.max
+                transcriptWindow.max,
+                activity.conversation.id // Match by conversation thread
               );
               if (vttContent) {
                 const parsed = parseVttToEntries(vttContent);
@@ -2118,15 +2127,21 @@ Output valid JSON only.`,
                 }
               } else {
                 const responseActivity = new MessageActivity(
-                  `No transcript available yet. Make sure recording/transcription was enabled during the meeting. ` +
-                  `If the meeting just ended, try again in a minute — Teams may still be processing it.`
+                  `No transcript available yet for this meeting.\n\n` +
+                  `**If you're in a Meet Now/instant call:**\n` +
+                  `• Say "**join the call**" and I'll start capturing live transcription\n\n` +
+                  `**If the meeting ended:**\n` +
+                  `• Wait 1-2 minutes for Teams to process the transcript, then try again`
                 ).addAiGenerated();
                 await send(responseActivity);
               }
             } else {
               const responseActivity = new MessageActivity(
-                `I couldn't find a transcript for this conversation yet. ` +
-                `Make sure transcription was enabled for the meeting and try again shortly after it ends.`
+                `I couldn't find a transcript for this meeting yet.\n\n` +
+                `**If this is a Meet Now/instant call:**\n` +
+                `• Say "**join the call**" so I can capture live transcription\n\n` +
+                `**If the meeting already ended:**\n` +
+                `• Transcripts take 1-2 minutes to appear after a meeting ends`
               ).addAiGenerated();
               await send(responseActivity);
             }
@@ -2170,8 +2185,11 @@ Output valid JSON only.`,
 
         if (!transcriptText) {
           const noTranscriptActivity = new MessageActivity(
-            `No transcript available yet for this conversation. ` +
-            `Make sure transcription was enabled and try again after the meeting ends.`
+            `No transcript available yet for this meeting.\n\n` +
+            `**If this is a Meet Now/instant call:**\n` +
+            `• Say "**join the call**" so I can capture live transcription\n\n` +
+            `**If the meeting already ended:**\n` +
+            `• Transcripts take 1-2 minutes to appear after a meeting ends`
           ).addAiGenerated();
           await send(noTranscriptActivity);
           storage.set(conversationKey, messages);
@@ -2212,6 +2230,141 @@ Output valid JSON only.`,
       try {
         console.log(`[DEBUG] Processing meeting minutes for user`);
 
+        // Analyze whether user asked for current meeting minutes or a past meeting by date
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+        const lastWeekStart = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+        const dateContext = `Today: ${today.toISOString().split('T')[0]} (${today.toLocaleDateString('en-US', { weekday: 'long' })})
+Yesterday: ${yesterday.toISOString().split('T')[0]} (${yesterday.toLocaleDateString('en-US', { weekday: 'long' })})
+Last week: ${lastWeekStart.toISOString().split('T')[0]} to ${today.toISOString().split('T')[0]}`;
+
+        const targetExtractPrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content: `Analyze this minutes request to determine what meeting the user wants.
+
+User request: "${cleanText || activity.text}"
+
+${dateContext}
+
+Determine:
+1. Is the user asking for the CURRENT meeting/conversation or a PAST meeting by date?
+2. If a past meeting by date (e.g., "last Friday", "yesterday", "last week on Friday"), extract the date
+3. If a meeting subject/title is mentioned, extract it
+
+Respond with JSON only:
+{
+  "target": "current" | "past_meeting",
+  "meeting_date": "ISO date string if past meeting by date, or null",
+  "meeting_subject": "meeting subject/title if mentioned, or null"
+}`
+            }
+          ],
+          instructions: `You are analyzing minutes requests.
+- If the user mentions a DATE reference ("yesterday", "last Friday", "last week", "Thursday's meeting"), return target="past_meeting" with meeting_date as ISO string.
+- If they ask generally for minutes of this meeting, return target="current".
+Output valid JSON only.`,
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21'
+          })
+        });
+
+        const targetResponse = await targetExtractPrompt.send('');
+        const targetJsonStr = (targetResponse.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        let targetInfo: { target: string; meeting_date: string | null; meeting_subject: string | null } = {
+          target: 'current', meeting_date: null, meeting_subject: null
+        };
+        try {
+          targetInfo = JSON.parse(targetJsonStr);
+        } catch {
+          console.warn(`[MINUTES] Could not parse target extraction, defaulting to current conversation`);
+        }
+
+        console.log(`[MINUTES] Target analysis: ${JSON.stringify(targetInfo)}`);
+
+        // Handle past meeting request by date
+        if (targetInfo.target === 'past_meeting' && targetInfo.meeting_date) {
+          console.log(`[MINUTES] Looking up past meeting from ${targetInfo.meeting_date}`);
+          const userId = activity.from.aadObjectId || activity.from.id;
+          const pastMeeting = await graphApiHelper.findPastMeeting(
+            userId,
+            targetInfo.meeting_date,
+            targetInfo.meeting_subject || undefined
+          );
+
+          if (pastMeeting.success && pastMeeting.meeting) {
+            console.log(`[MINUTES] Found past meeting: "${pastMeeting.meeting.subject}"`);
+            const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+              pastMeeting.meeting.organizerId,
+              pastMeeting.meeting.joinWebUrl,
+              pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
+              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined
+            );
+
+            if (vttContent) {
+              const parsed = parseVttToEntries(vttContent);
+              if (parsed.length > 0) {
+                generatedMinutes = await generateMinutesHtml(
+                  parsed,
+                  pastMeeting.meeting.subject,
+                  [],
+                  pastMeeting.meeting.start
+                );
+
+                await send(new MessageActivity(generatedMinutes).addAiGenerated().addFeedback());
+
+                lastBotResponseMap.set(activity.conversation.id, {
+                  content: generatedMinutes,
+                  contentType: 'minutes',
+                  subject: `Meeting Minutes: ${pastMeeting.meeting.subject}`,
+                  timestamp: Date.now()
+                });
+
+                if (emailRequest.wantsEmail && emailRequest.emailAddress) {
+                  const sendResult = await graphApiHelper.sendEmail(
+                    activity.from.aadObjectId || activity.from.id,
+                    emailRequest.emailAddress,
+                    `Meeting Minutes: ${pastMeeting.meeting.subject}`,
+                    generatedMinutes
+                  );
+                  if (sendResult.success) {
+                    await send(new MessageActivity(`Done! I've emailed these minutes to **${emailRequest.emailAddress}**.`).addAiGenerated());
+                  }
+                }
+
+                storage.set(conversationKey, messages);
+                storage.set(sharedConversationKey, sharedMessages);
+                storage.set(llmConversationKey, llmMessages);
+                return;
+              }
+            }
+
+            await send(new MessageActivity(
+              `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
+              `Transcription may not have been enabled for that meeting.`
+            ).addAiGenerated().addFeedback());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          }
+
+          await send(new MessageActivity(
+            `I couldn't find a Teams meeting on ${targetInfo.meeting_date}. ` +
+            `${pastMeeting.error || 'Please check the date and try again.'}`
+          ).addAiGenerated().addFeedback());
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+
         // First, try to get meeting transcript for minutes
         const liveEntries = liveTranscriptMap.get(activity.conversation.id);
         const transcriptEntries = liveEntries?.filter(e => e.isFinal) || [];
@@ -2245,7 +2398,8 @@ Output valid JSON only.`,
               chatInfo.organizer.id,
               chatInfo.joinWebUrl,
               transcriptWindow.min,
-              transcriptWindow.max
+              transcriptWindow.max,
+              activity.conversation.id // Match by conversation thread
             );
             
             if (vttContent) {
@@ -2611,7 +2765,8 @@ Output valid JSON only.`,
                 chatInfo.organizer.id,
                 chatInfo.joinWebUrl,
                 transcriptWindow.min,
-                transcriptWindow.max
+                transcriptWindow.max,
+                activity.conversation.id // Match by conversation thread
               );
               
               if (vttContent) {
@@ -2823,6 +2978,7 @@ Respond with JSON only: {"query_type": "view_events|check_availability|find_free
 
         // Let LLM generate a natural response based on calendar data
         const eventsJson = calendarResult.success ? JSON.stringify(calendarResult.events?.slice(0, 15) || [], null, 2) : 'No events retrieved';
+        const userTimezone = calendarResult.timezone || 'UTC';
         
         const responsePrompt = new ChatPrompt({
           messages: [
@@ -2833,6 +2989,7 @@ Respond with JSON only: {"query_type": "view_events|check_availability|find_free
 Their question: "${cleanText || activity.text}"
 Query date range: ${extracted.start_date || 'today'} to ${extracted.end_date || 'today'}
 Current date/time: ${new Date().toISOString()}
+User's timezone: ${userTimezone}
 API result: ${calendarResult.success ? 'SUCCESS' : 'FAILED'}
 ${calendarResult.error ? `Error: ${calendarResult.error}` : ''}
 ${otherPersonRequested ? `NOTE: User also asked about ${otherPersonName || 'another person'}'s calendar, but I can only access YOUR calendar.` : ''}
@@ -2840,35 +2997,34 @@ ${otherPersonRequested ? `NOTE: User also asked about ${otherPersonName || 'anot
 Calendar events (${userName}'s calendar ONLY):
 ${eventsJson}
 
-CRITICAL: Each event has its own "start" and "end" fields with the ACTUAL date/time of that meeting. USE THOSE DATES when describing meetings - do NOT substitute today's date or the query date.
+CRITICAL: The times in start.dateTime and end.dateTime are already in the user's LOCAL timezone (${userTimezone}). Display them directly - do NOT convert or add timezone offsets.
 
 Respond naturally to their question about their schedule.${otherPersonRequested ? ` Politely mention that you can only check their own calendar, not ${otherPersonName || 'other people'}'s.` : ''}`
             }
           ],
           instructions: `You are a friendly, conversational calendar assistant. Respond naturally like a helpful colleague would.
 
-CRITICAL DATE RULE: Each calendar event has "start.dateTime" and "end.dateTime" fields containing the ACTUAL meeting time. You MUST use these exact dates/times when describing meetings. NEVER substitute the current date or query date for actual event dates.
+CRITICAL TIMEZONE RULE: All times in the calendar data are already in the user's LOCAL timezone (${userTimezone}). Display times exactly as shown - do NOT convert or add UTC offsets. For example, if start.dateTime shows "2026-03-09T09:00:00.0000000", display it as "9am" (not "1pm" or any other conversion).
 
-IMPORTANT: You can ONLY see the current user's calendar. If they asked about someone else's calendar, politely explain you can only check THEIR schedule.
+CRITICAL DATE RULE: Each calendar event has "start.dateTime" and "end.dateTime" fields containing the ACTUAL meeting time in local time. You MUST use these exact dates/times when describing meetings.
 
 RESPONSE STYLE:
 - Be conversational and warm, not robotic or templated
 - Vary your language - don't use the same format every time
-- When mentioning meetings, include the ACTUAL date from the event's start.dateTime field
-- For past meetings, say things like "On March 3rd, you had **Project Sync**..." using the real date
+- When mentioning meetings, use the times EXACTLY as shown in the data
 - Use **bold** for meeting titles to help them stand out
 - Keep it brief and easy to scan
 - Sound like a helpful human, not a form or report
 
-DATE FORMAT: Use friendly formats like "March 3rd at 2pm" or "last Tuesday at 10am" - extracted from the actual event start.dateTime
+TIME FORMAT: Use simple formats like "9am", "2:30pm", "noon" - read directly from start.dateTime without any conversion.
 
 NEVER use rigid templates like "Active Meetings:" or "Canceled Meetings:" sections.
 NEVER use checkbox emojis or bullet point headers.
-NEVER use today's date when the event's actual date is different.
+NEVER convert times - use them as-is from the data.
 Just describe their schedule naturally in flowing prose or simple list format.
 
 Examples of good responses:
-- "Last week on March 3rd you had **Project Sync** at 2pm with 5 attendees."
+- "You've got a busy afternoon! **Project Sync** at 2pm, then **1:1 with Sarah** at 3:30pm."
 - "Looks like your Monday is clear - no meetings scheduled."
 - "On March 5th you had three meetings: **Standup** (9am), **Design Review** (11am), and **Team Lunch** (12:30pm)."`,
           model: new OpenAIChatModel({
@@ -3321,7 +3477,13 @@ app.http.post('/api/calls', async (req: any, res: any) => {
           const attemptFetch = async (attempt: number, maxAttempts: number) => {
             try {
               console.log(`[POST_MEETING_TRANSCRIPT] Attempt ${attempt}/${maxAttempts}...`);
-              const vttContent = await graphApiHelper.fetchMeetingTranscriptText(orgId, webUrl, callStartedAt, callEndedAt);
+              const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+                orgId,
+                webUrl,
+                callStartedAt,
+                callEndedAt,
+                convId
+              );
               if (vttContent) {
                 console.log(`[POST_MEETING_TRANSCRIPT] Got ${vttContent.length} chars of VTT content`);
                 const parsed = parseVttToEntries(vttContent);

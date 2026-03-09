@@ -327,6 +327,34 @@ class GraphApiHelper {
   }
 
   /**
+   * Get user's timezone from mailbox settings
+   */
+  async getUserTimezone(userId: string): Promise<string> {
+    try {
+      const token = await this.getTokenUsingClientCredentials();
+      if (!token) {
+        console.warn(`[TIMEZONE] No token available, defaulting to UTC`);
+        return 'UTC';
+      }
+      
+      const response = await axios.get(
+        `https://graph.microsoft.com/v1.0/users/${userId}/mailboxSettings`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS
+        }
+      );
+      
+      const timezone = response.data?.timeZone || 'UTC';
+      console.log(`[TIMEZONE] User ${userId} timezone: ${timezone}`);
+      return timezone;
+    } catch (error: any) {
+      console.warn(`[TIMEZONE] Could not fetch timezone for ${userId}, defaulting to UTC:`, error?.message);
+      return 'UTC';
+    }
+  }
+
+  /**
    * Read chat messages from a team chat
    */
   async getChatMessages(chatId: string, limit: number = 50): Promise<ChatMessage[]> {
@@ -1188,11 +1216,27 @@ class GraphApiHelper {
    * @param joinWebUrl - The meeting join URL
    * @param minCreatedTimestamp - Optional timestamp (ms since epoch) for earliest transcript to consider
    * @param maxCreatedTimestamp - Optional timestamp (ms since epoch) for latest transcript to consider (with 5min grace)
+   * @param conversationId - Optional conversation/thread ID to match transcripts against (for Meet Now calls)
    */
-  async fetchMeetingTranscriptText(organizerId: string, joinWebUrl: string, minCreatedTimestamp?: number, maxCreatedTimestamp?: number): Promise<string | null> {
+  async fetchMeetingTranscriptText(organizerId: string, joinWebUrl: string, minCreatedTimestamp?: number, maxCreatedTimestamp?: number, conversationId?: string): Promise<string | null> {
     try {
       let transcripts: any[] = [];
       let meetingId: string | null = null;
+      
+      // Helper to extract thread ID from base64-encoded meetingId
+      const extractThreadIdFromMeetingId = (encodedMeetingId: string): string | null => {
+        try {
+          const decoded = Buffer.from(encodedMeetingId, 'base64').toString('utf-8');
+          // Format: "1*{userId}*0**{threadId}" e.g., "1*ceb9...*0**19:meeting_xxx@thread.v2"
+          const threadMatch = decoded.match(/19:meeting_[^@]+@thread\.v2/);
+          if (threadMatch) {
+            return threadMatch[0];
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      };
       
       // Try primary approach: get meeting by joinWebUrl
       meetingId = await this.getOnlineMeetingId(organizerId, joinWebUrl);
@@ -1206,8 +1250,32 @@ class GraphApiHelper {
         const allTranscripts = await this.getAllTranscriptsForUser(organizerId, 20);
         
         if (allTranscripts.length > 0) {
-          // Use these transcripts directly - they include meetingId
-          transcripts = allTranscripts;
+          // If we have a conversationId, filter transcripts to match the current meeting thread
+          if (conversationId) {
+            console.log(`[GRAPH_API] Filtering transcripts by conversation thread: ${conversationId}`);
+            const matchingTranscripts = allTranscripts.filter((t: any) => {
+              if (!t.meetingId) return false;
+              const threadId = extractThreadIdFromMeetingId(t.meetingId);
+              const matches = threadId === conversationId;
+              if (matches) {
+                console.log(`[GRAPH_API] Found matching transcript for thread ${conversationId}`);
+              }
+              return matches;
+            });
+            
+            if (matchingTranscripts.length > 0) {
+              transcripts = matchingTranscripts;
+              console.log(`[GRAPH_API] Found ${matchingTranscripts.length} transcripts matching current conversation`);
+            } else {
+              console.log(`[GRAPH_API] No transcripts match current conversation thread - this may be a Meet Now call without transcription yet`);
+              // For Meet Now calls, transcripts may take time to appear in Graph API
+              // Don't fall back to unrelated transcripts - return empty
+              transcripts = [];
+            }
+          } else {
+            // No conversationId provided - use time-based filtering only
+            transcripts = allTranscripts;
+          }
         }
       }
       
@@ -1227,9 +1295,10 @@ class GraphApiHelper {
             return false;
           }
           
-          // Check maximum time (with 5-minute grace period for Teams processing)
+          // Check maximum time with a generous grace period.
+          // Meet Now transcripts can appear well after call end while Teams finalizes processing.
           if (maxCreatedTimestamp) {
-            const maxWithGrace = maxCreatedTimestamp + (5 * 60 * 1000);
+            const maxWithGrace = maxCreatedTimestamp + (60 * 60 * 1000);
             if (created > maxWithGrace) {
               return false;
             }
@@ -1239,7 +1308,7 @@ class GraphApiHelper {
         });
 
         const minDate = minCreatedTimestamp ? new Date(minCreatedTimestamp).toISOString() : 'N/A';
-        const maxDate = maxCreatedTimestamp ? new Date(maxCreatedTimestamp + (5 * 60 * 1000)).toISOString() : 'N/A';
+        const maxDate = maxCreatedTimestamp ? new Date(maxCreatedTimestamp + (60 * 60 * 1000)).toISOString() : 'N/A';
         console.log(`[GRAPH_API] Filtered ${transcripts.length} transcripts to ${filteredTranscripts.length} created between ${minDate} and ${maxDate}`);
         
         if (filteredTranscripts.length === 0) {
@@ -1355,7 +1424,7 @@ class GraphApiHelper {
   /**
    * Get calendar events for a user within a time range
    */
-  async getCalendarEvents(userId: string, startDateTime?: string, endDateTime?: string): Promise<{ success: boolean; events?: any[]; error?: string }> {
+  async getCalendarEvents(userId: string, startDateTime?: string, endDateTime?: string): Promise<{ success: boolean; events?: any[]; timezone?: string; error?: string }> {
     try {
       console.log(`[CALENDAR_DEBUG] getCalendarEvents called with userId: '${userId}', start: '${startDateTime}', end: '${endDateTime}'`);
       const token = await this.getTokenUsingClientCredentials();
@@ -1369,6 +1438,9 @@ class GraphApiHelper {
         console.error(`[CALENDAR_DEBUG] Invalid userId format: '${userId}'`);
         return { success: false, error: 'Invalid user ID format' };
       }
+
+      // Get user's timezone for accurate time display
+      const userTimezone = await this.getUserTimezone(userId);
 
       // Helper to normalize date strings to full ISO 8601 format
       // Graph API requires full datetime, not just date
@@ -1420,7 +1492,7 @@ class GraphApiHelper {
       const start = normalizeDateTime(startDateTime, false);
       const end = normalizeDateTime(endDateTime, true);
       
-      console.log(`[CALENDAR_DEBUG] Normalized dates - start: ${start}, end: ${end}`);
+      console.log(`[CALENDAR_DEBUG] Normalized dates - start: ${start}, end: ${end}, timezone: ${userTimezone}`);
 
       const url = `https://graph.microsoft.com/v1.0/users/${userId}/calendarView?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=20&$select=subject,start,end,location,organizer,attendees,isAllDay,onlineMeeting,onlineMeetingUrl,isCancelled`;
       console.log(`[GRAPH_API] Fetching calendar events for ${userId} from ${start} to ${end}`);
@@ -1430,17 +1502,17 @@ class GraphApiHelper {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
-          'Prefer': 'outlook.timezone="UTC"'
+          'Prefer': `outlook.timezone="${userTimezone}"`
         },
         timeout: GraphApiHelper.GRAPH_TIMEOUT_MS
       });
 
       const events = response.data?.value || [];
-      console.log(`[GRAPH_API] Retrieved ${events.length} calendar events`);
+      console.log(`[GRAPH_API] Retrieved ${events.length} calendar events in ${userTimezone} timezone`);
       if (events.length > 0) {
         console.log(`[CALENDAR_DEBUG] First event: ${events[0].subject} at ${events[0].start?.dateTime}`);
       }
-      return { success: true, events };
+      return { success: true, events, timezone: userTimezone };
     } catch (error: any) {
       const status = error?.response?.status;
       const errMsg = error?.response?.data?.error?.message || error?.message || 'Unknown error';
