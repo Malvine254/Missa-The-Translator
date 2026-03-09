@@ -399,8 +399,7 @@ class GraphApiHelper {
           (n: string) =>
             n &&
             !n.toLowerCase().includes('bot') &&
-            !n.toLowerCase().includes('missa') &&
-            !n.toLowerCase().includes('mela')
+            n.toLowerCase() !== 'assistant'
         );
       console.log(`[GRAPH_API] Found ${names.length} human members`);
       return names;
@@ -409,6 +408,76 @@ class GraphApiHelper {
       console.warn(`[GRAPH_API] Could not fetch chat members (status=${status})`);
       return [];
     }
+  }
+
+  /**
+   * Get members of a chat with emails.
+   * GET /chats/{chatId}/members
+   * Returns array of member objects with displayName and email (excluding bots).
+   */
+  async getChatMembersDetailed(chatId: string): Promise<{ displayName: string; email: string; userId?: string }[]> {
+    try {
+      if (!this.tokenFactory) return [];
+      console.log(`[GRAPH_API] Fetching detailed chat members for: ${chatId}`);
+      const response = await this.graphGetWithClientCredentials(`/chats/${chatId}/members`);
+      const members = response.data?.value || [];
+      const detailed = members
+        .filter((m: any) => {
+          const name = (m.displayName || '').toLowerCase();
+          return name && !name.includes('bot') && name !== 'assistant';
+        })
+        .map((m: any) => ({
+          displayName: m.displayName || 'Unknown',
+          email: m.email || m.microsoft?.graph?.user?.mail || '',
+          userId: m.userId || m.id?.split("'")[1] || ''
+        }));
+      console.log(`[GRAPH_API] Found ${detailed.length} detailed members`);
+      return detailed;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      console.warn(`[GRAPH_API] Could not fetch detailed chat members (status=${status})`);
+      return [];
+    }
+  }
+
+  /**
+   * Find a member's email by partial name match (case-insensitive).
+   * Returns the best match or null if no match found.
+   */
+  async findMemberEmailByName(chatId: string, searchName: string): Promise<{ displayName: string; email: string } | null> {
+    const members = await this.getChatMembersDetailed(chatId);
+    if (members.length === 0) return null;
+
+    const searchLower = searchName.toLowerCase().trim();
+    
+    // First try exact match
+    let match = members.find(m => m.displayName.toLowerCase() === searchLower);
+    
+    // Then try starts with (first name match)
+    if (!match) {
+      match = members.find(m => m.displayName.toLowerCase().startsWith(searchLower));
+    }
+    
+    // Then try contains
+    if (!match) {
+      match = members.find(m => m.displayName.toLowerCase().includes(searchLower));
+    }
+    
+    // Finally try fuzzy - first word of display name matches search
+    if (!match) {
+      match = members.find(m => {
+        const firstName = m.displayName.split(' ')[0].toLowerCase();
+        return firstName === searchLower || searchLower.includes(firstName) || firstName.includes(searchLower);
+      });
+    }
+
+    if (match && match.email) {
+      console.log(`[GRAPH_API] Found member "${match.displayName}" with email "${match.email}" for search "${searchName}"`);
+      return { displayName: match.displayName, email: match.email };
+    }
+    
+    console.log(`[GRAPH_API] No email found for member "${searchName}"`);
+    return null;
   }
 
   /**
@@ -545,6 +614,14 @@ class GraphApiHelper {
             console.log(`[GRAPH_API] Online meeting found but no joinMeetingId (id=${onlineMeeting.id})`);
           } else {
             console.warn(`[GRAPH_API] No online meeting found via joinWebUrl filter`);
+          }
+          // Capture meeting start/end dates for accurate timestamping in summaries
+          if (onlineMeeting?.startDateTime) {
+            baseInfo.startDateTime = onlineMeeting.startDateTime;
+            console.log(`[GRAPH_API] Got startDateTime: ${baseInfo.startDateTime}`);
+          }
+          if (onlineMeeting?.endDateTime) {
+            baseInfo.endDateTime = onlineMeeting.endDateTime;
           }
         } catch (enrichErr: any) {
           const status = enrichErr?.response?.status;
@@ -1345,7 +1422,7 @@ class GraphApiHelper {
       
       console.log(`[CALENDAR_DEBUG] Normalized dates - start: ${start}, end: ${end}`);
 
-      const url = `https://graph.microsoft.com/v1.0/users/${userId}/calendarView?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=20&$select=subject,start,end,location,organizer,attendees,isAllDay`;
+      const url = `https://graph.microsoft.com/v1.0/users/${userId}/calendarView?startDateTime=${encodeURIComponent(start)}&endDateTime=${encodeURIComponent(end)}&$orderby=start/dateTime&$top=20&$select=subject,start,end,location,organizer,attendees,isAllDay,onlineMeeting,onlineMeetingUrl,isCancelled`;
       console.log(`[GRAPH_API] Fetching calendar events for ${userId} from ${start} to ${end}`);
       console.log(`[CALENDAR_DEBUG] Full URL: ${url}`);
 
@@ -1376,6 +1453,77 @@ class GraphApiHelper {
       }
       this.logGraphError('getCalendarEvents', error);
       return { success: false, error: errMsg };
+    }
+  }
+
+  /**
+   * Find a past Teams meeting from calendar by date or subject.
+   * Returns meeting info needed to fetch transcripts.
+   */
+  async findPastMeeting(
+    userId: string,
+    searchDate?: string,
+    searchSubject?: string
+  ): Promise<{ success: boolean; meeting?: { subject: string; joinWebUrl: string; organizerId: string; start: string; end: string }; error?: string }> {
+    try {
+      console.log(`[CALENDAR] Looking for past meeting: date=${searchDate}, subject=${searchSubject}`);
+      
+      // Get calendar events for the specified date range
+      let startDate = searchDate;
+      let endDate = searchDate;
+      
+      if (!startDate) {
+        // Default: look back 7 days
+        const now = new Date();
+        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        startDate = weekAgo.toISOString().split('T')[0];
+        endDate = now.toISOString().split('T')[0];
+      }
+      
+      const result = await this.getCalendarEvents(userId, startDate, endDate);
+      if (!result.success || !result.events?.length) {
+        return { success: false, error: result.error || 'No meetings found in that time range' };
+      }
+      
+      // Filter to Teams meetings only (have onlineMeeting info)
+      const teamsMeetings = result.events.filter((evt: any) => 
+        evt.onlineMeeting?.joinUrl || evt.onlineMeetingUrl
+      );
+      
+      if (teamsMeetings.length === 0) {
+        return { success: false, error: 'No Teams meetings found in that time range' };
+      }
+      
+      // If subject provided, try to match
+      let targetMeeting = teamsMeetings[0]; // default to first/most recent
+      if (searchSubject) {
+        const subjectLower = searchSubject.toLowerCase();
+        const matched = teamsMeetings.find((evt: any) => 
+          evt.subject?.toLowerCase().includes(subjectLower)
+        );
+        if (matched) {
+          targetMeeting = matched;
+        }
+      }
+      
+      const joinWebUrl = targetMeeting.onlineMeeting?.joinUrl || targetMeeting.onlineMeetingUrl;
+      const organizerId = targetMeeting.organizer?.emailAddress?.address || userId;
+      
+      console.log(`[CALENDAR] Found meeting: "${targetMeeting.subject}" with joinUrl`);
+      
+      return {
+        success: true,
+        meeting: {
+          subject: targetMeeting.subject,
+          joinWebUrl,
+          organizerId,
+          start: targetMeeting.start?.dateTime,
+          end: targetMeeting.end?.dateTime
+        }
+      };
+    } catch (error: any) {
+      console.error(`[CALENDAR_ERROR] findPastMeeting failed:`, error);
+      return { success: false, error: error?.message || 'Failed to find meeting' };
     }
   }
 

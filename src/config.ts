@@ -11,6 +11,8 @@ const config = {
   graphApiEndpoint: process.env.GRAPH_API_ENDPOINT || 'https://graph.microsoft.com/v1.0',
   cognitiveServicesEndpoint: process.env.COGNITIVE_SERVICES_ENDPOINT,
   cognitiveServicesKey: process.env.COGNITIVE_SERVICES_KEY,
+  // Bot identity - configurable name for branding
+  botDisplayName: process.env.BOT_DISPLAY_NAME || 'Mela AI Meeting Assistant',
 };
 
 export default config;
