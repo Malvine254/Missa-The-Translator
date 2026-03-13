@@ -922,6 +922,16 @@ class GraphApiHelper {
   }
 
   /**
+   * Public getter for bot credentials token.
+   * Used by external modules (like autoTranscription) that need to call Graph APIs
+   * that require the bot app identity (e.g., Communications Calls API).
+   */
+  async getBotToken(): Promise<string | null> {
+    const token = await this.getTokenUsingBotCredentials();
+    return token || null;
+  }
+
+  /**
    * Join a Teams meeting as a bot participant using the Graph Communications Calls API.
    * Requires Calls.JoinGroupCall.All application permission on the BOT app (CLIENT_ID).
    * The bot will appear in the meeting participant list.

@@ -20,6 +20,12 @@ import {
   summarizeInboxMessages,
 } from "./emailCapabilities";
 
+// Import the new modular auto-transcription system (Graph Beta API)
+import * as autoTranscription from './autoTranscription';
+
+// Feature flag: Use the new auto-transcription module vs legacy inline code
+const USE_NEW_AUTO_TRANSCRIPTION = (process.env.USE_NEW_AUTO_TRANSCRIPTION || 'true').toLowerCase() === 'true';
+
 const ENABLE_VERBOSE_CONSOLE = (process.env.ENABLE_VERBOSE_CONSOLE || 'false').toLowerCase() === 'true';
 const baseConsoleLog = console.log.bind(console);
 
@@ -3530,6 +3536,28 @@ startTranscriptBackgroundWorker();
     return scopeFactory('https://graph.microsoft.com/.default');
   };
   graphApiHelper.setTokenFactory(graphTokenFactory);
+}
+
+// Initialize the new modular auto-transcription system
+if (USE_NEW_AUTO_TRANSCRIPTION) {
+  console.log('[INIT] Initializing new auto-transcription module (Graph Beta API)');
+  autoTranscription.initAutoTranscription(
+    // Token getter - use the public bot token method
+    async () => graphApiHelper.getBotToken(),
+    // Message sender - use proactive message sending
+    async (serviceUrl: string, conversationId: string, message: string) => {
+      await graphApiHelper.sendProactiveMessage(serviceUrl, conversationId, message);
+    },
+    // Optional config overrides
+    {
+      enabled: true,
+      defaultLanguage: 'en-US',
+      notifyUsers: true,
+      logLevel: 'info',
+    }
+  );
+} else {
+  console.log('[INIT] Using legacy auto-transcription (inline code)');
 }
 
 // Helper to send typing indicator
@@ -8372,7 +8400,18 @@ app.http.post('/api/calls', async (req: any, res: any) => {
           if (humanParticipants.length > 0) {
             const callEntry = activeCallMap.get(callId);
             if (callEntry?.establishedAt) {
-              void attemptAutoStartTranscription(callId, 'participants', callEntry);
+              if (USE_NEW_AUTO_TRANSCRIPTION) {
+                // New module handles its own retry logic, just trigger if not already active
+                if (!autoTranscription.isTranscriptionActive(callId)) {
+                  void autoTranscription.autoStartTranscription(
+                    callId,
+                    callEntry.conversationId,
+                    callEntry.serviceUrl
+                  );
+                }
+              } else {
+                void attemptAutoStartTranscription(callId, 'participants', callEntry);
+              }
             }
           }
 
@@ -8441,7 +8480,15 @@ app.http.post('/api/calls', async (req: any, res: any) => {
             liveTranscriptMap.set(callEntry.conversationId, []);
           }
           // Auto-start transcription with retries (Teams can reject very early requests)
-          void attemptAutoStartTranscription(callId, 'established', callEntry);
+          if (USE_NEW_AUTO_TRANSCRIPTION) {
+            void autoTranscription.autoStartTranscription(
+              callId,
+              callEntry.conversationId,
+              callEntry.serviceUrl
+            );
+          } else {
+            void attemptAutoStartTranscription(callId, 'established', callEntry);
+          }
           
           // Start live polling for transcript updates (every 10 seconds while call is active)
           if (callEntry.organizerId && callEntry.joinWebUrl) {
@@ -8468,6 +8515,11 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         const conversationId = callToConversationMap.get(callId);
         clearPendingTranscriptionStart(callId);
         stopLiveTranscriptPolling(callId);
+        
+        // Cleanup new auto-transcription module state
+        if (USE_NEW_AUTO_TRANSCRIPTION) {
+          autoTranscription.cleanupCall(callId);
+        }
         
         // End the live transcript session for this conversation
         if (conversationId) {
