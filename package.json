@@ -15,7 +15,7 @@
         "dev:teamsfx": "env-cmd --silent -f .localConfigs npm run dev",
         "dev:teamsfx:testtool": "env-cmd --silent -f .localConfigs.playground npm run dev",
         "dev:teamsfx:launch-testtool": "env-cmd --silent -f env/.env.playground agentsplayground start",
-        "dev": "nodemon --exec node --inspect=9239 --signal SIGINT -r ts-node/register ./src/index.ts",
+        "dev": "nodemon --watch src --ext ts,txt --ignore transcripts/** --ignore admin_data/** --exec node --inspect=9239 --signal SIGINT -r ts-node/register ./src/index.ts",
         "build": "tsc --build && shx cp ./src/app/*.txt ./lib/src/app",
         "start": "node ./lib/src/index.js",
         "test": "echo \"Error: no test specified\" && exit 1",
@@ -32,7 +32,8 @@
         "@microsoft/teams.apps": "^2.0.0",
         "@microsoft/teams.common": "^2.0.0",
         "@microsoft/teams.openai": "^2.0.0",
-        "axios": "^1.6.0"
+        "axios": "^1.6.0",
+        "pdfkit": "^0.17.2"
     },
     "devDependencies": {
         "@types/node": "^20.19.35",

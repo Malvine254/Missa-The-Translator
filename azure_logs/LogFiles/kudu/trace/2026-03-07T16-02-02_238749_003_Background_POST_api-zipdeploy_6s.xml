@@ -1,0 +1,37 @@
+<step title="BackgroundTrace" date="2026-03-07T16:02:02.001" instance="238749" url="/api/zipdeploy" method="POST" >
+  <step title="Updating shutdown sentinel last write time" date="2026-03-07T16:02:02.068" SemaphoreCount="7" /><!-- duration: 11ms -->
+  <step title="LockFile &apos;C:\home\site\locks\deployments.lock&apos; acquired" date="2026-03-07T16:02:02.112" /><!-- duration: 60ms -->
+  <step title="Creating temporary deployment" date="2026-03-07T16:02:02.192" /><!-- duration: 574ms -->
+  <step title="Performing fetch based deployment" date="2026-03-07T16:02:02.798" >
+    <step title="Fetching changes." date="2026-03-07T16:02:03.688" /><!-- duration: 16ms -->
+    <step title="Starting LocalZipHandler" date="2026-03-07T16:02:03.720" /><!-- duration: 16ms -->
+    <step title="Starting ExtractTriggers" date="2026-03-07T16:02:03.798" /><!-- duration: 0ms -->
+    <step title="Before sending BuildRequestReceived status to /api/updatedeploystatus" date="2026-03-07T16:02:05.393" /><!-- duration: 20ms -->
+    <step title="DeploymentManager.Deploy(id:a4288158420c43b7baa7efd95c5fd837)" date="2026-03-07T16:02:05.423" >
+      <step title="Collecting changeset information" date="2026-03-07T16:02:05.438" /><!-- duration: 235ms -->
+      <step title="Updating submodules" date="2026-03-07T16:02:05.709" >
+        <step title="Updating submodules." date="2026-03-07T16:02:05.799" /><!-- duration: 15ms -->
+      </step><!-- duration: 120ms -->
+      <step title="Preparing deployment for commit id &apos;a428815842&apos;." date="2026-03-07T16:02:06.360" /><!-- duration: 16ms -->
+      <step title="Determining deployment builder" date="2026-03-07T16:02:06.407" >
+        <step title="Builder is RunFromZipSiteBuilder" date="2026-03-07T16:02:06.423" /><!-- duration: 16ms -->
+      </step><!-- duration: 31ms -->
+      <step title="Copying SSH keys" date="2026-03-07T16:02:06.470" /><!-- duration: 16ms -->
+      <step title="Building" date="2026-03-07T16:02:06.486" >
+        <step title="Skipping build. Project type: Run-From-Zip" date="2026-03-07T16:02:06.532" /><!-- duration: 0ms -->
+        <step title="Skipping post build. Project type: Run-From-Zip" date="2026-03-07T16:02:06.579" /><!-- duration: 16ms -->
+        <step title="Triggering recycle (preview mode disabled)." date="2026-03-07T16:02:06.673" /><!-- duration: 16ms -->
+        <step title="Ignoring FS watcher based recycle request as this is a classic Windows app." date="2026-03-07T16:02:06.706" /><!-- duration: 0ms -->
+        <step title="Deployment successful. DEPLOYMENTINFO: deploymentPath = ZipDeploy. Run from package., deployer = ZipDeploy, os = windows, sku = Basic, siteName = botf4cce4, siteHostName = botf4cce4.azurewebsites.net, deploymentStatus = Success" date="2026-03-07T16:02:06.751" /><!-- duration: 16ms -->
+        <step title="Purge deployment items" date="2026-03-07T16:02:07.190" >
+          <step title="Remove 19af14271, Success, received at 3/7/2026 1:04:13 PM" date="2026-03-07T16:02:07.282" /><!-- duration: 0ms -->
+        </step><!-- duration: 108ms -->
+      </step><!-- duration: 861ms -->
+    </step><!-- duration: 1924ms -->
+    <step title="Cleaning up temp files" date="2026-03-07T16:02:07.360" /><!-- duration: 0ms -->
+    <step title="Updating C:\home\data\SitePackages\packagename.txt with deployment 20260307160159.zip" date="2026-03-07T16:02:07.377" /><!-- duration: 93ms -->
+    <step title="Skip function trigger and logicapp sync because function is not enabled." date="2026-03-07T16:02:07.485" /><!-- duration: 0ms -->
+  </step><!-- duration: 4719ms -->
+  <step title="LockFile &apos;C:\home\site\locks\deployments.lock&apos; released" date="2026-03-07T16:02:07.532" /><!-- duration: 0ms -->
+  <step title="Deleting shutdown sentinel file" date="2026-03-07T16:02:07.532" SemaphoreCount="8" /><!-- duration: 16ms -->
+</step><!-- duration: 5563ms -->

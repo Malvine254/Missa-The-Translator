@@ -1,0 +1,36 @@
+{
+  "19:meeting_MDAyMmY1OTAtOTdlYi00ZGNkLWE1NWUtMjk3MjFkNjZlMGYy@thread.v2": {
+    "organizerId": "ceb9c46a-a785-4538-9abe-e8580dd4a58b",
+    "joinWebUrl": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MDAyMmY1OTAtOTdlYi00ZGNkLWE1NWUtMjk3MjFkNjZlMGYy%40thread.v2/0?context=%7b%22Tid%22%3a%22588cadf4-9902-4465-86c0-8bcf04f4f102%22%2c%22Oid%22%3a%22ceb9c46a-a785-4538-9abe-e8580dd4a58b%22%7d",
+    "subject": "Test Agent V2",
+    "updatedAt": 1773403497924,
+    "callStartedAt": 1773348203620,
+    "callId": "31003880-9bff-4f85-a90a-68a705794c7d"
+  },
+  "19:meeting_ZTdmYjVkOTAtNWE0MS00YjAyLWFmM2EtOGVjNGJkYWU2ZDUx@thread.v2": {
+    "organizerId": "ceb9c46a-a785-4538-9abe-e8580dd4a58b",
+    "joinWebUrl": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_ZTdmYjVkOTAtNWE0MS00YjAyLWFmM2EtOGVjNGJkYWU2ZDUx%40thread.v2/0?context=%7b%22Tid%22%3a%22588cadf4-9902-4465-86c0-8bcf04f4f102%22%2c%22Oid%22%3a%22ceb9c46a-a785-4538-9abe-e8580dd4a58b%22%7d",
+    "subject": "Meeting with Malvine Owuor",
+    "updatedAt": 1773345787447,
+    "callStartedAt": 1773345787447,
+    "callId": "1f003b80-aa26-4ab2-8be2-582b61d373df"
+  },
+  "19:meeting_M2ZiYjgxOGItZWJiYy00ZjBjLTg1YWYtYzczOTMzMTZmOWFm@thread.v2": {
+    "organizerId": "ceb9c46a-a785-4538-9abe-e8580dd4a58b",
+    "joinWebUrl": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_M2ZiYjgxOGItZWJiYy00ZjBjLTg1YWYtYzczOTMzMTZmOWFm%40thread.v2/0?context=%7b%22Tid%22%3a%22588cadf4-9902-4465-86c0-8bcf04f4f102%22%2c%22Oid%22%3a%22ceb9c46a-a785-4538-9abe-e8580dd4a58b%22%7d",
+    "subject": "Test Mela with Edgar",
+    "updatedAt": 1773350955449,
+    "callStartedAt": 1773350765241,
+    "callEndedAt": 1773350955445,
+    "callId": "01003a80-8f9f-4aa6-a001-51580afc61d7"
+  },
+  "19:meeting_ODQ0M2YwYmYtOTQ4YS00MWNlLWI4ZDQtYjgwNzQ1ZjlmOWQz@thread.v2": {
+    "organizerId": "ceb9c46a-a785-4538-9abe-e8580dd4a58b",
+    "joinWebUrl": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_ODQ0M2YwYmYtOTQ4YS00MWNlLWI4ZDQtYjgwNzQ1ZjlmOWQz%40thread.v2/0?context=%7b%22Tid%22%3a%22588cadf4-9902-4465-86c0-8bcf04f4f102%22%2c%22Oid%22%3a%22ceb9c46a-a785-4538-9abe-e8580dd4a58b%22%7d",
+    "subject": "Test Agent New",
+    "updatedAt": 1773396407159,
+    "callStartedAt": 1773394164813,
+    "callEndedAt": 1773394482058,
+    "callId": "02003a80-e5cf-47ee-915d-3c5eadcf329f"
+  }
+}

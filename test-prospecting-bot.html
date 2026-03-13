@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Armely Prospecting Bot - Test UI</title>
+  <!-- React & ReactDOM from CDN -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <!-- Babel for JSX transformation -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #060c18; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef } = React;
+
+    const ARMELY_CONTEXT = `
+You are a B2B sales prospecting assistant for Armely LLC (www.armely.com), a digital excellence company based in Dallas, TX (+1 972 460 0643, info@armely.com).
+
+ARMELY'S SERVICES:
+- AI Services: AI Consulting, AI Advisory, Generative AI, AI PoC Starter
+- Data Services: Microsoft Fabric, Data Science & Analytics, Data Strategy, Databricks, Snowflake, SQL & Data Warehousing
+- Digital Transformation: Microsoft Power Platform (PowerApps, Power Automate, Power BI, Power Pages, Power Virtual Agents), Microsoft Dynamics 365, SharePoint Online, RPA, API Data Access
+- Managed Services: SQL Server Support, Applications Support
+
+IDEAL CUSTOMERS (based on real clients):
+- Healthcare organizations (hospitals, FQHCs, health systems)
+- Education institutions (school districts, universities)
+- Energy companies (oil & gas, utilities)
+- Transportation & logistics companies
+- Government agencies (cities, counties)
+- Nonprofits & community services
+- High-tech companies
+
+VALUE PROPS:
+- End-to-end from strategy to AI deployment
+- Deep Microsoft ecosystem expertise (Fabric, Power Platform, Dynamics)
+- Proven ROI: case studies with UNMC, Swope Health, BNSF Railway, Plano ISD, City of Frisco
+- 72% customer retention rate, 82% customer satisfaction
+- Won Best AI Application at Global Hackathon (Smart Waste Management AI)
+- "Your Trusted Source for Digital Excellence"
+`;
+
+    const TABS = ["Prospect Input", "Qualification Score", "Outreach Messages", "Follow-up Tracker"];
+
+    const industries = [
+      "Healthcare", "Education", "Energy / Utilities", "Transportation & Logistics",
+      "Government / Public Sector", "Nonprofit", "Financial Services",
+      "Manufacturing", "Retail", "High-Tech / SaaS", "Other"
+    ];
+
+    const companySizes = ["1-50", "51-200", "201-1000", "1001-5000", "5000+"];
+
+    const EMPTY_PROSPECT = {
+      firstName: "", lastName: "", title: "", email: "", linkedin: "", phone: "",
+      company: "", industry: "", size: "", website: "", location: "",
+      techStack: "", painPoints: "", recentNews: "", notes: ""
+    };
+
+    const EMPTY_TRACKER = [];
+
+    function ScoreBar({ score }) {
+      const color = score >= 75 ? "#00c48c" : score >= 50 ? "#f59e0b" : "#ef4444";
+      return (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+            <span style={{ fontSize: 13, color: "#94a3b8" }}>Fit Score</span>
+            <span style={{ fontSize: 15, fontWeight: 700, color }}>{score}/100</span>
+          </div>
+          <div style={{ height: 8, background: "#1e293b", borderRadius: 4, overflow: "hidden" }}>
+            <div style={{ width: `${score}%`, height: "100%", background: color, borderRadius: 4, transition: "width 1s ease" }} />
+          </div>
+        </div>
+      );
+    }
+
+    function Spinner() {
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, color: "#64748b", fontSize: 14 }}>
+          <div style={{
+            width: 18, height: 18, border: "2px solid #1e293b",
+            borderTop: "2px solid #3b82f6", borderRadius: "50%",
+            animation: "spin 0.7s linear infinite"
+          }} />
+          Armely AI is thinking...
+        </div>
+      );
+    }
+
+    function CopyBtn({ text }) {
+      const [copied, setCopied] = useState(false);
+      return (
+        <button
+          onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+          style={{
+            background: copied ? "#00c48c22" : "#1e293b", border: `1px solid ${copied ? "#00c48c" : "#334155"}`,
+            color: copied ? "#00c48c" : "#94a3b8", borderRadius: 6, padding: "4px 12px",
+            fontSize: 12, cursor: "pointer", transition: "all 0.2s"
+          }}
+        >{copied ? "Copied!" : "Copy"}</button>
+      );
+    }
+
+    function ProspectingBot() {
+      const [tab, setTab] = useState(0);
+      const [prospect, setProspect] = useState(EMPTY_PROSPECT);
+      const [qualification, setQualification] = useState(null);
+      const [outreach, setOutreach] = useState(null);
+      const [loading, setLoading] = useState({ qualify: false, outreach: false });
+      const [tracker, setTracker] = useState(EMPTY_TRACKER);
+      const [newNote, setNewNote] = useState({ channel: "Email", message: "", status: "Sent", date: "" });
+      const [activeMsg, setActiveMsg] = useState("email");
+      const [apiKey, setApiKey] = useState("");
+      const [showApiKeyInput, setShowApiKeyInput] = useState(true);
+
+      const set = (field) => (e) => setProspect(p => ({ ...p, [field]: e.target.value }));
+
+      async function callClaude(prompt) {
+        if (!apiKey) {
+          alert("Please enter your Anthropic API key first!");
+          return null;
+        }
+        try {
+          const res = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { 
+              "Content-Type": "application/json",
+              "x-api-key": apiKey,
+              "anthropic-version": "2023-06-01",
+              "anthropic-dangerous-direct-browser-access": "true"
+            },
+            body: JSON.stringify({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              messages: [{ role: "user", content: `${ARMELY_CONTEXT}\n\n${prompt}` }]
+            })
+          });
+          const data = await res.json();
+          if (data.error) {
+            console.error("API Error:", data.error);
+            alert(`API Error: ${data.error.message || JSON.stringify(data.error)}`);
+            return null;
+          }
+          return data.content?.map(b => b.text || "").join("") || "";
+        } catch (err) {
+          console.error("Fetch error:", err);
+          alert(`Network error: ${err.message}`);
+          return null;
+        }
+      }
+
+      async function qualify() {
+        if (!prospect.company) return;
+        setLoading(l => ({ ...l, qualify: true }));
+        setQualification(null);
+        const prompt = `Analyze this B2B prospect for Armely and respond ONLY with valid JSON (no markdown, no backticks):
+{
+  "score": <0-100 integer>,
+  "tier": "<Hot/Warm/Cold>",
+  "summary": "<2-3 sentence executive summary of fit>",
+  "strengths": ["<reason1>", "<reason2>", "<reason3>"],
+  "risks": ["<risk1>", "<risk2>"],
+  "recommended_services": ["<service1>", "<service2>"],
+  "best_angle": "<one sentence on the strongest hook for Armely to lead with>",
+  "next_step": "<specific recommended action>"
+}
+
+PROSPECT:
+Name: ${prospect.firstName} ${prospect.lastName}
+Title: ${prospect.title}
+Company: ${prospect.company}
+Industry: ${prospect.industry}
+Size: ${prospect.size} employees
+Location: ${prospect.location}
+Tech Stack: ${prospect.techStack}
+Pain Points: ${prospect.painPoints}
+Recent News: ${prospect.recentNews}
+Notes: ${prospect.notes}`;
+
+        try {
+          const raw = await callClaude(prompt);
+          if (!raw) {
+            setLoading(l => ({ ...l, qualify: false }));
+            return;
+          }
+          const clean = raw.replace(/```json|```/g, "").trim();
+          setQualification(JSON.parse(clean));
+          setTab(1);
+        } catch (e) {
+          console.error("Parse error:", e);
+          setQualification({ score: 0, tier: "Error", summary: "Could not parse response. Try again.", strengths: [], risks: [], recommended_services: [], best_angle: "", next_step: "" });
+        }
+        setLoading(l => ({ ...l, qualify: false }));
+      }
+
+      async function generateOutreach() {
+        if (!prospect.company) return;
+        setLoading(l => ({ ...l, outreach: true }));
+        setOutreach(null);
+        const prompt = `Write B2B outreach for Armely targeting this prospect. Respond ONLY with valid JSON (no markdown, no backticks):
+{
+  "email": {
+    "subject": "<compelling subject line>",
+    "body": "<professional email, 150-200 words, personalized, ends with soft CTA to book a call>"
+  },
+  "linkedin": "<LinkedIn message under 300 chars, conversational, references their specific context>",
+  "phone_script": "<30-second cold call opening script, natural and confident>",
+  "follow_up_email": "<follow-up email for no-reply after 5 days, 80-100 words>"
+}
+
+PROSPECT:
+Name: ${prospect.firstName} ${prospect.lastName}
+Title: ${prospect.title}
+Company: ${prospect.company}
+Industry: ${prospect.industry}
+Size: ${prospect.size} employees
+Pain Points: ${prospect.painPoints}
+Recent News: ${prospect.recentNews}
+Recommended Services: ${qualification?.recommended_services?.join(", ") || ""}
+Best Angle: ${qualification?.best_angle || ""}`;
+
+        try {
+          const raw = await callClaude(prompt);
+          if (!raw) {
+            setLoading(l => ({ ...l, outreach: false }));
+            return;
+          }
+          const clean = raw.replace(/```json|```/g, "").trim();
+          setOutreach(JSON.parse(clean));
+          setTab(2);
+        } catch (e) {
+          console.error("Parse error:", e);
+          setOutreach({ error: "Could not generate messages. Please try again." });
+        }
+        setLoading(l => ({ ...l, outreach: false }));
+      }
+
+      function addToTracker() {
+        if (!newNote.message) return;
+        setTracker(t => [{
+          ...newNote,
+          date: newNote.date || new Date().toISOString().split("T")[0],
+          prospect: `${prospect.firstName} ${prospect.lastName} @ ${prospect.company}`,
+          id: Date.now()
+        }, ...t]);
+        setNewNote({ channel: "Email", message: "", status: "Sent", date: "" });
+      }
+
+      const tierColor = { Hot: "#ef4444", Warm: "#f59e0b", Cold: "#64748b" };
+      const statusColor = { Sent: "#3b82f6", Replied: "#00c48c", "No Reply": "#64748b", Bounced: "#ef4444", "Meeting Booked": "#a855f7" };
+
+      const inputStyle = {
+        width: "100%", background: "#0f172a", border: "1px solid #1e293b",
+        borderRadius: 8, color: "#e2e8f0", padding: "9px 12px", fontSize: 13,
+        outline: "none", boxSizing: "border-box", fontFamily: "inherit"
+      };
+      const labelStyle = { fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4, display: "block" };
+
+      return (
+        <div style={{
+          minHeight: "100vh", background: "#060c18",
+          fontFamily: "'DM Sans', 'Sora', system-ui, sans-serif",
+          color: "#e2e8f0"
+        }}>
+          <style>{`
+            @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Sora:wght@600;700&display=swap');
+            @keyframes spin { to { transform: rotate(360deg); } }
+            @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+            textarea { resize: vertical; }
+            select option { background: #0f172a; }
+            ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #0f172a; } ::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+          `}</style>
+
+          {/* Header */}
+          <div style={{ borderBottom: "1px solid #0f172a", padding: "18px 32px", display: "flex", alignItems: "center", gap: 14, background: "#080e1c" }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: 8, background: "linear-gradient(135deg, #3b82f6, #6366f1)",
+              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, color: "#fff",
+              fontFamily: "Sora, sans-serif"
+            }}>A</div>
+            <div>
+              <div style={{ fontFamily: "Sora, sans-serif", fontWeight: 700, fontSize: 15, color: "#f1f5f9" }}>Armely Prospecting Bot</div>
+              <div style={{ fontSize: 11, color: "#475569" }}>AI-powered B2B sales assistant</div>
+            </div>
+            {prospect.company && (
+              <div style={{ marginLeft: "auto", background: "#0f172a", border: "1px solid #1e293b", borderRadius: 20, padding: "5px 14px", fontSize: 12, color: "#64748b" }}>
+                🎯 <span style={{ color: "#e2e8f0" }}>{prospect.firstName} {prospect.lastName}</span>{prospect.company ? ` @ ${prospect.company}` : ""}
+              </div>
+            )}
+          </div>
+
+          {/* API Key Banner */}
+          {showApiKeyInput && (
+            <div style={{ background: "#1e293b", padding: "12px 32px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid #334155" }}>
+              <span style={{ fontSize: 13, color: "#94a3b8" }}>🔑 Anthropic API Key:</span>
+              <input 
+                type="password" 
+                value={apiKey} 
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="sk-ant-..." 
+                style={{ ...inputStyle, width: 300 }}
+              />
+              <button 
+                onClick={() => apiKey && setShowApiKeyInput(false)}
+                style={{
+                  background: apiKey ? "#00c48c" : "#334155",
+                  border: "none", borderRadius: 6, padding: "8px 16px",
+                  color: "#fff", fontSize: 12, cursor: apiKey ? "pointer" : "not-allowed"
+                }}
+              >{apiKey ? "Save & Hide" : "Enter Key"}</button>
+              <span style={{ fontSize: 11, color: "#64748b", marginLeft: "auto" }}>
+                Note: Key stays in browser only. Get one at <a href="https://console.anthropic.com" target="_blank" style={{ color: "#3b82f6" }}>console.anthropic.com</a>
+              </span>
+            </div>
+          )}
+          {!showApiKeyInput && (
+            <div style={{ background: "#0f2030", padding: "8px 32px", display: "flex", alignItems: "center", gap: 8, borderBottom: "1px solid #1e3a50" }}>
+              <span style={{ fontSize: 12, color: "#00c48c" }}>✓ API Key configured</span>
+              <button 
+                onClick={() => setShowApiKeyInput(true)}
+                style={{ background: "none", border: "none", color: "#64748b", fontSize: 11, cursor: "pointer", marginLeft: 8 }}
+              >(change)</button>
+            </div>
+          )}
+
+          {/* Tabs */}
+          <div style={{ display: "flex", borderBottom: "1px solid #0f172a", padding: "0 32px", background: "#080e1c" }}>
+            {TABS.map((t, i) => (
+              <button key={t} onClick={() => setTab(i)} style={{
+                background: "none", border: "none", borderBottom: tab === i ? "2px solid #3b82f6" : "2px solid transparent",
+                color: tab === i ? "#3b82f6" : "#475569", padding: "12px 18px", fontSize: 13,
+                fontWeight: tab === i ? 600 : 400, cursor: "pointer", fontFamily: "inherit",
+                transition: "all 0.2s", marginBottom: -1
+              }}>{t}</button>
+            ))}
+          </div>
+
+          <div style={{ maxWidth: 820, margin: "0 auto", padding: "28px 24px" }}>
+
+            {/* TAB 0: PROSPECT INPUT */}
+            {tab === 0 && (
+              <div style={{ animation: "fadeIn 0.3s ease" }}>
+                <div style={{ marginBottom: 24 }}>
+                  <div style={{ fontFamily: "Sora, sans-serif", fontSize: 20, fontWeight: 700, marginBottom: 4 }}>Add Prospect</div>
+                  <div style={{ color: "#475569", fontSize: 13 }}>Fill in what you know — the more detail, the sharper the AI analysis.</div>
+                </div>
+
+                {/* Contact */}
+                <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 20, marginBottom: 16 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "#3b82f6", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 16 }}>Contact Info</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                    {[["firstName","First Name"],["lastName","Last Name"],["title","Job Title"],["email","Work Email"],["linkedin","LinkedIn URL"],["phone","Phone"]].map(([f,l]) => (
+                      <div key={f}>
+                        <label style={labelStyle}>{l}</label>
+                        <input style={inputStyle} value={prospect[f]} onChange={set(f)} placeholder={l} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Company */}
+                <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 20, marginBottom: 16 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6366f1", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 16 }}>Company Info</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                    <div>
+                      <label style={labelStyle}>Company Name</label>
+                      <input style={inputStyle} value={prospect.company} onChange={set("company")} placeholder="Acme Corp" />
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Website</label>
+                      <input style={inputStyle} value={prospect.website} onChange={set("website")} placeholder="www.acme.com" />
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Industry</label>
+                      <select style={inputStyle} value={prospect.industry} onChange={set("industry")}>
+                        <option value="">Select industry...</option>
+                        {industries.map(i => <option key={i}>{i}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Company Size</label>
+                      <select style={inputStyle} value={prospect.size} onChange={set("size")}>
+                        <option value="">Select size...</option>
+                        {companySizes.map(s => <option key={s}>{s} employees</option>)}
+                      </select>
+                    </div>
+                    <div style={{ gridColumn: "span 2" }}>
+                      <label style={labelStyle}>Location</label>
+                      <input style={inputStyle} value={prospect.location} onChange={set("location")} placeholder="Dallas, TX" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Intelligence */}
+                <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 20, marginBottom: 20 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "#00c48c", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 16 }}>Sales Intelligence</div>
+                  <div style={{ display: "grid", gap: 14 }}>
+                    <div>
+                      <label style={labelStyle}>Current Tech Stack</label>
+                      <input style={inputStyle} value={prospect.techStack} onChange={set("techStack")} placeholder="e.g. Salesforce, Azure, legacy SQL Server, Excel-heavy reporting" />
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Known Pain Points</label>
+                      <textarea rows={2} style={inputStyle} value={prospect.painPoints} onChange={set("painPoints")} placeholder="e.g. Siloed data, manual reporting, no AI strategy, struggling with digital transformation" />
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Recent News / Triggers</label>
+                      <textarea rows={2} style={inputStyle} value={prospect.recentNews} onChange={set("recentNews")} placeholder="e.g. Just raised Series B, hired new CTO, announced digital transformation initiative" />
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Additional Notes</label>
+                      <textarea rows={2} style={inputStyle} value={prospect.notes} onChange={set("notes")} placeholder="Any other context..." />
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button onClick={qualify} disabled={!prospect.company || loading.qualify || !apiKey} style={{
+                    flex: 1, background: loading.qualify ? "#1e293b" : "linear-gradient(135deg, #3b82f6, #6366f1)",
+                    border: "none", borderRadius: 10, padding: "13px 24px", color: "#fff",
+                    fontSize: 14, fontWeight: 600, cursor: (prospect.company && apiKey) ? "pointer" : "not-allowed",
+                    fontFamily: "inherit", opacity: (!prospect.company || !apiKey) ? 0.5 : 1
+                  }}>
+                    {loading.qualify ? "Qualifying..." : "⚡ Qualify & Score Prospect"}
+                  </button>
+                  <button onClick={() => setProspect(EMPTY_PROSPECT)} style={{
+                    background: "#0f172a", border: "1px solid #1e293b", borderRadius: 10,
+                    padding: "13px 18px", color: "#64748b", fontSize: 13, cursor: "pointer", fontFamily: "inherit"
+                  }}>Clear</button>
+                </div>
+                {!apiKey && <div style={{ marginTop: 10, color: "#f59e0b", fontSize: 12 }}>⚠️ Enter your Anthropic API key above to enable AI features</div>}
+                {loading.qualify && <div style={{ marginTop: 14 }}><Spinner /></div>}
+              </div>
+            )}
+
+            {/* TAB 1: QUALIFICATION */}
+            {tab === 1 && (
+              <div style={{ animation: "fadeIn 0.3s ease" }}>
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontFamily: "Sora, sans-serif", fontSize: 20, fontWeight: 700, marginBottom: 4 }}>Qualification Analysis</div>
+                  <div style={{ color: "#475569", fontSize: 13 }}>AI-powered fit scoring for Armely's services.</div>
+                </div>
+
+                {!qualification && !loading.qualify && (
+                  <div style={{ textAlign: "center", padding: "60px 0", color: "#334155" }}>
+                    <div style={{ fontSize: 40, marginBottom: 12 }}>⚡</div>
+                    <div>Go to <b style={{ color: "#475569" }}>Prospect Input</b> and click <b style={{ color: "#3b82f6" }}>Qualify & Score</b> first.</div>
+                  </div>
+                )}
+                {loading.qualify && <div style={{ padding: "60px 0", textAlign: "center" }}><Spinner /></div>}
+
+                {qualification && !loading.qualify && (
+                  <div style={{ display: "grid", gap: 16 }}>
+                    {/* Score card */}
+                    <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 22 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+                        <div>
+                          <div style={{ fontFamily: "Sora, sans-serif", fontSize: 17, fontWeight: 700 }}>{prospect.firstName} {prospect.lastName}</div>
+                          <div style={{ color: "#64748b", fontSize: 13 }}>{prospect.title} @ {prospect.company}</div>
+                        </div>
+                        <div style={{
+                          background: `${tierColor[qualification.tier]}22`, border: `1px solid ${tierColor[qualification.tier]}44`,
+                          color: tierColor[qualification.tier], borderRadius: 20, padding: "5px 14px", fontSize: 12, fontWeight: 600
+                        }}>{qualification.tier} Lead</div>
+                      </div>
+                      <ScoreBar score={qualification.score} />
+                      <p style={{ color: "#94a3b8", fontSize: 14, lineHeight: 1.7, marginTop: 14, marginBottom: 0 }}>{qualification.summary}</p>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                      {/* Strengths */}
+                      <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 18 }}>
+                        <div style={{ fontSize: 11, color: "#00c48c", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 12 }}>✓ Strengths</div>
+                        {qualification.strengths?.map((s, i) => (
+                          <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, fontSize: 13, color: "#cbd5e1", alignItems: "flex-start" }}>
+                            <span style={{ color: "#00c48c", marginTop: 1 }}>•</span>{s}
+                          </div>
+                        ))}
+                      </div>
+                      {/* Risks */}
+                      <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 18 }}>
+                        <div style={{ fontSize: 11, color: "#ef4444", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 12 }}>⚠ Risks</div>
+                        {qualification.risks?.map((r, i) => (
+                          <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, fontSize: 13, color: "#cbd5e1", alignItems: "flex-start" }}>
+                            <span style={{ color: "#ef4444", marginTop: 1 }}>•</span>{r}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Services + angle */}
+                    <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 18 }}>
+                      <div style={{ fontSize: 11, color: "#6366f1", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 12 }}>Recommended Armely Services</div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                        {qualification.recommended_services?.map((s, i) => (
+                          <span key={i} style={{ background: "#6366f122", border: "1px solid #6366f133", color: "#a5b4fc", borderRadius: 6, padding: "4px 12px", fontSize: 12 }}>{s}</span>
+                        ))}
+                      </div>
+                      <div style={{ borderTop: "1px solid #0f172a", paddingTop: 14 }}>
+                        <div style={{ fontSize: 11, color: "#3b82f6", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>Best Hook</div>
+                        <div style={{ fontSize: 13, color: "#94a3b8", fontStyle: "italic" }}>"{qualification.best_angle}"</div>
+                      </div>
+                    </div>
+
+                    {/* Next step */}
+                    <div style={{ background: "#0f2030", border: "1px solid #1e3a50", borderRadius: 12, padding: 18, display: "flex", alignItems: "center", gap: 14 }}>
+                      <div style={{ fontSize: 24 }}>→</div>
+                      <div>
+                        <div style={{ fontSize: 11, color: "#3b82f6", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Recommended Next Step</div>
+                        <div style={{ fontSize: 14, color: "#e2e8f0" }}>{qualification.next_step}</div>
+                      </div>
+                    </div>
+
+                    <button onClick={generateOutreach} disabled={loading.outreach || !apiKey} style={{
+                      background: loading.outreach ? "#1e293b" : "linear-gradient(135deg, #6366f1, #3b82f6)",
+                      border: "none", borderRadius: 10, padding: "13px 24px", color: "#fff",
+                      fontSize: 14, fontWeight: 600, cursor: apiKey ? "pointer" : "not-allowed", fontFamily: "inherit",
+                      opacity: !apiKey ? 0.5 : 1
+                    }}>
+                      {loading.outreach ? "Generating..." : "✍️ Generate Outreach Messages"}
+                    </button>
+                    {loading.outreach && <Spinner />}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: OUTREACH */}
+            {tab === 2 && (
+              <div style={{ animation: "fadeIn 0.3s ease" }}>
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontFamily: "Sora, sans-serif", fontSize: 20, fontWeight: 700, marginBottom: 4 }}>Outreach Messages</div>
+                  <div style={{ color: "#475569", fontSize: 13 }}>Personalized, ready-to-send messages across every channel.</div>
+                </div>
+
+                {!outreach && !loading.outreach && (
+                  <div style={{ textAlign: "center", padding: "60px 0", color: "#334155" }}>
+                    <div style={{ fontSize: 40, marginBottom: 12 }}>✍️</div>
+                    <div>Qualify your prospect first, then click <b style={{ color: "#6366f1" }}>Generate Outreach Messages</b>.</div>
+                  </div>
+                )}
+                {loading.outreach && <div style={{ padding: "60px 0", textAlign: "center" }}><Spinner /></div>}
+
+                {outreach && !outreach.error && !loading.outreach && (
+                  <div>
+                    {/* Channel tabs */}
+                    <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+                      {[["email","📧 Email"],["linkedin","💼 LinkedIn"],["phone_script","📞 Cold Call"],["follow_up_email","🔁 Follow-up"]].map(([k,l]) => (
+                        <button key={k} onClick={() => setActiveMsg(k)} style={{
+                          background: activeMsg === k ? "#3b82f622" : "#0a1020",
+                          border: `1px solid ${activeMsg === k ? "#3b82f6" : "#1e293b"}`,
+                          color: activeMsg === k ? "#3b82f6" : "#64748b",
+                          borderRadius: 8, padding: "8px 16px", fontSize: 13, cursor: "pointer", fontFamily: "inherit", fontWeight: activeMsg === k ? 600 : 400
+                        }}>{l}</button>
+                      ))}
+                    </div>
+
+                    {activeMsg === "email" && outreach.email && (
+                      <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 22 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                          <div style={{ fontSize: 11, color: "#3b82f6", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em" }}>Email</div>
+                          <CopyBtn text={`Subject: ${outreach.email.subject}\n\n${outreach.email.body}`} />
+                        </div>
+                        <div style={{ background: "#0f172a", borderRadius: 8, padding: 16, marginBottom: 14 }}>
+                          <div style={{ fontSize: 11, color: "#475569", marginBottom: 4 }}>SUBJECT</div>
+                          <div style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 600 }}>{outreach.email.subject}</div>
+                        </div>
+                        <div style={{ fontSize: 14, color: "#cbd5e1", lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{outreach.email.body}</div>
+                      </div>
+                    )}
+
+                    {activeMsg === "linkedin" && (
+                      <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 22 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                          <div style={{ fontSize: 11, color: "#3b82f6", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em" }}>LinkedIn Message</div>
+                          <CopyBtn text={outreach.linkedin} />
+                        </div>
+                        <div style={{ fontSize: 14, color: "#cbd5e1", lineHeight: 1.8 }}>{outreach.linkedin}</div>
+                        <div style={{ marginTop: 12, fontSize: 11, color: "#475569" }}>{outreach.linkedin?.length || 0} / 300 characters</div>
+                      </div>
+                    )}
+
+                    {activeMsg === "phone_script" && (
+                      <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 22 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                          <div style={{ fontSize: 11, color: "#3b82f6", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em" }}>Cold Call Script (~30 sec)</div>
+                          <CopyBtn text={outreach.phone_script} />
+                        </div>
+                        <div style={{ fontSize: 14, color: "#cbd5e1", lineHeight: 1.9, whiteSpace: "pre-wrap" }}>{outreach.phone_script}</div>
+                      </div>
+                    )}
+
+                    {activeMsg === "follow_up_email" && outreach.follow_up_email && (
+                      <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 22 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                          <div style={{ fontSize: 11, color: "#3b82f6", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em" }}>Follow-up Email (Day 5)</div>
+                          <CopyBtn text={outreach.follow_up_email} />
+                        </div>
+                        <div style={{ fontSize: 14, color: "#cbd5e1", lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{outreach.follow_up_email}</div>
+                      </div>
+                    )}
+
+                    <button onClick={() => { setTab(3); }} style={{
+                      marginTop: 18, background: "#0a1020", border: "1px solid #1e293b",
+                      borderRadius: 10, padding: "11px 20px", color: "#64748b",
+                      fontSize: 13, cursor: "pointer", fontFamily: "inherit"
+                    }}>📋 Log Touchpoint in Tracker →</button>
+                  </div>
+                )}
+                {outreach?.error && <div style={{ color: "#ef4444", padding: 20 }}>{outreach.error}</div>}
+              </div>
+            )}
+
+            {/* TAB 3: TRACKER */}
+            {tab === 3 && (
+              <div style={{ animation: "fadeIn 0.3s ease" }}>
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontFamily: "Sora, sans-serif", fontSize: 20, fontWeight: 700, marginBottom: 4 }}>Follow-up Tracker</div>
+                  <div style={{ color: "#475569", fontSize: 13 }}>Log touchpoints and track conversation status.</div>
+                </div>
+
+                {/* Add touchpoint */}
+                <div style={{ background: "#0a1020", border: "1px solid #0f172a", borderRadius: 12, padding: 20, marginBottom: 20 }}>
+                  <div style={{ fontSize: 11, color: "#3b82f6", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 16 }}>Log Touchpoint</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
+                    <div>
+                      <label style={labelStyle}>Channel</label>
+                      <select style={inputStyle} value={newNote.channel} onChange={e => setNewNote(n => ({ ...n, channel: e.target.value }))}>
+                        {["Email","LinkedIn","Phone","Other"].map(c => <option key={c}>{c}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Status</label>
+                      <select style={inputStyle} value={newNote.status} onChange={e => setNewNote(n => ({ ...n, status: e.target.value }))}>
+                        {["Sent","Replied","No Reply","Bounced","Meeting Booked"].map(s => <option key={s}>{s}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Date</label>
+                      <input type="date" style={inputStyle} value={newNote.date} onChange={e => setNewNote(n => ({ ...n, date: e.target.value }))} />
+                    </div>
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <label style={labelStyle}>Notes / Message Summary</label>
+                    <textarea rows={2} style={inputStyle} value={newNote.message} onChange={e => setNewNote(n => ({ ...n, message: e.target.value }))} placeholder="e.g. Sent intro email about AI consulting, awaiting reply..." />
+                  </div>
+                  <button onClick={addToTracker} disabled={!newNote.message} style={{
+                    background: newNote.message ? "linear-gradient(135deg, #3b82f6, #6366f1)" : "#1e293b",
+                    border: "none", borderRadius: 8, padding: "10px 20px", color: "#fff",
+                    fontSize: 13, fontWeight: 600, cursor: newNote.message ? "pointer" : "not-allowed", fontFamily: "inherit"
+                  }}>+ Log Touchpoint</button>
+                </div>
+
+                {/* Timeline */}
+                {tracker.length === 0 ? (
+                  <div style={{ textAlign: "center", padding: "40px 0", color: "#334155" }}>
+                    <div style={{ fontSize: 32, marginBottom: 10 }}>📋</div>
+                    <div>No touchpoints yet. Log your first outreach above.</div>
+                  </div>
+                ) : (
+                  <div>
+                    {tracker.map((t, i) => (
+                      <div key={t.id} style={{
+                        display: "flex", gap: 16, marginBottom: 12,
+                        background: "#0a1020", border: "1px solid #0f172a",
+                        borderRadius: 12, padding: 16, animation: "fadeIn 0.3s ease"
+                      }}>
+                        <div style={{ width: 36, height: 36, borderRadius: 8, background: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>
+                          {t.channel === "Email" ? "📧" : t.channel === "LinkedIn" ? "💼" : t.channel === "Phone" ? "📞" : "📌"}
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{t.prospect || `${prospect.firstName} ${prospect.lastName} @ ${prospect.company}`}</div>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <span style={{
+                                background: `${statusColor[t.status]}22`, border: `1px solid ${statusColor[t.status]}33`,
+                                color: statusColor[t.status], borderRadius: 6, padding: "2px 10px", fontSize: 11, fontWeight: 600
+                              }}>{t.status}</span>
+                              <span style={{ fontSize: 11, color: "#475569" }}>{t.date}</span>
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 13, color: "#64748b" }}>{t.channel} · {t.message}</div>
+                        </div>
+                        <button onClick={() => setTracker(tr => tr.filter(x => x.id !== t.id))} style={{
+                          background: "none", border: "none", color: "#334155", cursor: "pointer", fontSize: 16, alignSelf: "flex-start"
+                        }}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // Render the app
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<ProspectingBot />);
+  </script>
+</body>
+</html>

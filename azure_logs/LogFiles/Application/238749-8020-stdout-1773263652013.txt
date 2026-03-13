@@ -1,0 +1,11 @@
+[GRAPH_AUTH] Client credentials detected, setting up OAuth token factory
+[STARTUP] Transcripts directory set to: C:\home\site\wwwroot\lib\src\transcripts
+[STARTUP] Admin data directory set to: C:\home\site\wwwroot\lib\src\admin_data
+[36m[1m[INFO] @teams/app/http[0m[22m listening on port \\.\pipe\87c60a49-79a3-4870-80ab-b6b839a7e030 🚀
+
+Agent started, app listening to \\.\pipe\87c60a49-79a3-4870-80ab-b6b839a7e030
+
+[CALLS_CONFIG] ⚠️  Calling webhook URL for this session:
+[CALLS_CONFIG]    https://botf4cce4.azurewebsites.net/api/calls
+[CALLS_CONFIG]    Update this in Azure Portal → Bot Services → Channels → Microsoft Teams → Calling tab
+[CALLS_CONFIG]    if it differs from the last registered value.

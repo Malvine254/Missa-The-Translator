@@ -1,0 +1,162 @@
+{
+  "startedAt": 1773336372603,
+  "lastUpdatedAt": 1773403502760,
+  "totalMessages": 101,
+  "totalMeetingsJoined": 4,
+  "maxUsers": 200,
+  "freeTierMonthlyMeetingLimit": 5,
+  "enforceGlobalLimits": false,
+  "modelInputCostPer1kUsd": 0.00015,
+  "modelOutputCostPer1kUsd": 0.0006,
+  "totalEstimatedInputTokens": 33456,
+  "totalEstimatedOutputTokens": 21633,
+  "totalEstimatedTokens": 55089,
+  "totalEstimatedCostUsd": 0.01799819999999999,
+  "users": {
+    "ceb9c46a-a785-4538-9abe-e8580dd4a58b": {
+      "userId": "ceb9c46a-a785-4538-9abe-e8580dd4a58b",
+      "displayName": "Malvine Owuor",
+      "tenantId": "588cadf4-9902-4465-86c0-8bcf04f4f102",
+      "totalMessages": 101,
+      "meetingJoinRequests": 14,
+      "monthlyMeetingsJoined": {
+        "2026-03": 12
+      },
+      "monthlyMeetingLimitOverride": null,
+      "tokenPolicy": "unlimited",
+      "tokenLimit": null,
+      "estimatedInputTokens": 33456,
+      "estimatedOutputTokens": 21633,
+      "estimatedTotalTokens": 55089,
+      "estimatedCostUsd": 0.01799819999999999,
+      "firstSeenAt": 1773336372606,
+      "lastSeenAt": 1773403502760,
+      "blocked": false,
+      "blockReason": ""
+    }
+  },
+  "meetings": {
+    "19:meeting_MDAyMmY1OTAtOTdlYi00ZGNkLWE1NWUtMjk3MjFkNjZlMGYy@thread.v2": {
+      "meetingId": "19:meeting_MDAyMmY1OTAtOTdlYi00ZGNkLWE1NWUtMjk3MjFkNjZlMGYy@thread.v2",
+      "meetingName": "Test Agent V2",
+      "firstSeenAt": 1773337745230,
+      "lastSeenAt": 1773403502760,
+      "joinRequests": 3,
+      "estimatedInputTokens": 3308,
+      "estimatedOutputTokens": 6375,
+      "estimatedTotalTokens": 9683,
+      "estimatedCostUsd": 0.004321200000000001,
+      "users": [
+        "ceb9c46a-a785-4538-9abe-e8580dd4a58b"
+      ]
+    },
+    "19:meeting_ZTdmYjVkOTAtNWE0MS00YjAyLWFmM2EtOGVjNGJkYWU2ZDUx@thread.v2": {
+      "meetingId": "19:meeting_ZTdmYjVkOTAtNWE0MS00YjAyLWFmM2EtOGVjNGJkYWU2ZDUx@thread.v2",
+      "meetingName": "Meeting with Malvine Owuor",
+      "firstSeenAt": 1773342512028,
+      "lastSeenAt": 1773345784338,
+      "joinRequests": 4,
+      "estimatedInputTokens": 185,
+      "estimatedOutputTokens": 739,
+      "estimatedTotalTokens": 924,
+      "estimatedCostUsd": 0.00047115,
+      "users": [
+        "ceb9c46a-a785-4538-9abe-e8580dd4a58b"
+      ]
+    },
+    "19:meeting_M2ZiYjgxOGItZWJiYy00ZjBjLTg1YWYtYzczOTMzMTZmOWFm@thread.v2": {
+      "meetingId": "19:meeting_M2ZiYjgxOGItZWJiYy00ZjBjLTg1YWYtYzczOTMzMTZmOWFm@thread.v2",
+      "meetingName": "Test Mela with Edgar",
+      "firstSeenAt": 1773350765217,
+      "lastSeenAt": 1773350908570,
+      "joinRequests": 0,
+      "estimatedInputTokens": 169,
+      "estimatedOutputTokens": 154,
+      "estimatedTotalTokens": 323,
+      "estimatedCostUsd": 0.00011774999999999999,
+      "users": [
+        "ceb9c46a-a785-4538-9abe-e8580dd4a58b"
+      ]
+    },
+    "19:926b0fe1-cf51-40ad-bfb3-f941e758e4f0_ceb9c46a-a785-4538-9abe-e8580dd4a58b@unq.gbl.spaces": {
+      "meetingId": "19:926b0fe1-cf51-40ad-bfb3-f941e758e4f0_ceb9c46a-a785-4538-9abe-e8580dd4a58b@unq.gbl.spaces",
+      "meetingName": "Meeting",
+      "firstSeenAt": 1773387086212,
+      "lastSeenAt": 1773387164363,
+      "joinRequests": 0,
+      "estimatedInputTokens": 5,
+      "estimatedOutputTokens": 119,
+      "estimatedTotalTokens": 124,
+      "estimatedCostUsd": 0.00007214999999999999,
+      "users": [
+        "ceb9c46a-a785-4538-9abe-e8580dd4a58b"
+      ]
+    },
+    "19:meeting_ODQ0M2YwYmYtOTQ4YS00MWNlLWI4ZDQtYjgwNzQ1ZjlmOWQz@thread.v2": {
+      "meetingId": "19:meeting_ODQ0M2YwYmYtOTQ4YS00MWNlLWI4ZDQtYjgwNzQ1ZjlmOWQz@thread.v2",
+      "meetingName": "Test Agent New",
+      "firstSeenAt": 1773387414632,
+      "lastSeenAt": 1773396419073,
+      "joinRequests": 5,
+      "estimatedInputTokens": 7272,
+      "estimatedOutputTokens": 7520,
+      "estimatedTotalTokens": 14792,
+      "estimatedCostUsd": 0.0056028000000000015,
+      "users": [
+        "ceb9c46a-a785-4538-9abe-e8580dd4a58b"
+      ]
+    }
+  },
+  "dailyUsage": {
+    "2026-03-12": {
+      "day": "2026-03-12",
+      "messages": 53,
+      "meetingsJoined": 7,
+      "inputTokens": 20991,
+      "outputTokens": 8966,
+      "totalTokens": 29957,
+      "costUsd": 0.00852825
+    },
+    "2026-03-13": {
+      "day": "2026-03-13",
+      "messages": 48,
+      "meetingsJoined": 5,
+      "inputTokens": 12465,
+      "outputTokens": 12667,
+      "totalTokens": 25132,
+      "costUsd": 0.009469950000000003
+    }
+  },
+  "perUserDailyUsage": {
+    "ceb9c46a-a785-4538-9abe-e8580dd4a58b": {
+      "2026-03-12": {
+        "day": "2026-03-12",
+        "messages": 53,
+        "meetingsJoined": 7,
+        "inputTokens": 20991,
+        "outputTokens": 8966,
+        "totalTokens": 29957,
+        "costUsd": 0.00852825
+      },
+      "2026-03-13": {
+        "day": "2026-03-13",
+        "messages": 48,
+        "meetingsJoined": 5,
+        "inputTokens": 12465,
+        "outputTokens": 12667,
+        "totalTokens": 25132,
+        "costUsd": 0.009469950000000003
+      }
+    }
+  },
+  "activeMeetingConversationIds": [
+    "19:meeting_ZTdmYjVkOTAtNWE0MS00YjAyLWFmM2EtOGVjNGJkYWU2ZDUx@thread.v2",
+    "19:meeting_MDAyMmY1OTAtOTdlYi00ZGNkLWE1NWUtMjk3MjFkNjZlMGYy@thread.v2"
+  ],
+  "meetingConversationHistory": [
+    "19:meeting_ZTdmYjVkOTAtNWE0MS00YjAyLWFmM2EtOGVjNGJkYWU2ZDUx@thread.v2",
+    "19:meeting_MDAyMmY1OTAtOTdlYi00ZGNkLWE1NWUtMjk3MjFkNjZlMGYy@thread.v2",
+    "19:meeting_M2ZiYjgxOGItZWJiYy00ZjBjLTg1YWYtYzczOTMzMTZmOWFm@thread.v2",
+    "19:meeting_ODQ0M2YwYmYtOTQ4YS00MWNlLWI4ZDQtYjgwNzQ1ZjlmOWQz@thread.v2"
+  ]
+}

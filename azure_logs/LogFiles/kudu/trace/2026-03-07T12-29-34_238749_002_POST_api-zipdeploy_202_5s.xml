@@ -1,0 +1,18 @@
+<step title="Incoming Request" date="2026-03-07T12:29:34.166" instance="238749" url="/api/zipdeploy?isAsync=true" method="POST" type="request" pid="5316,2,11" Cache-Control="no-cache" Transfer-Encoding="chunked" Content-Type="application/octet-stream" Accept="application/json, text/plain, */*" Accept-Encoding="gzip, compress, deflate, br" Authorization="Bea..." Host="botf4cce4.scm.azurewebsites.net" User-Agent="axios/1.8.3" X-ARR-LOG-ID="5b5f44ac-d21d-43af-bb58-719551f1c2b1" CLIENT-IP="105.161.96.97:1947" X-SITE-DEPLOYMENT-ID="botf4cce4" WAS-DEFAULT-HOSTNAME="botf4cce4.scm.azurewebsites.net" X-Forwarded-Proto="https" X-AppService-Proto="https" X-Forwarded-TlsVersion="1.3" X-WAWS-Unencoded-URL="/api/zipdeploy?isAsync=true" >
+  <step title="Cleanup Xml Logs" date="2026-03-07T12:29:34.166" /><!-- duration: 31ms -->
+  <step title="ZipPushDeploy" date="2026-03-07T12:29:37.075" >
+    <step title="ZipDeploy. Run from package." date="2026-03-07T12:29:37.104" /><!-- duration: 14ms -->
+    <step title="Starting PushDeployAsync" date="2026-03-07T12:29:37.134" /><!-- duration: 19ms -->
+    <step title="Updating shutdown sentinel last write time" date="2026-03-07T12:29:37.525" SemaphoreCount="7" /><!-- duration: 20ms -->
+    <step title="LockFile &apos;C:\home\site\locks\deployments.lock&apos; acquired" date="2026-03-07T12:29:37.556" /><!-- duration: 0ms -->
+    <step title="Deleting outdated zip file C:\home\data\SitePackages\20260307103836.zip" date="2026-03-07T12:29:37.587" /><!-- duration: 16ms -->
+    <step title="Saving request content to C:\home\data\SitePackages\20260307122937.zip" date="2026-03-07T12:29:37.619" >
+      <step title="Total 7,792,971 bytes written to C:\home\data\SitePackages\20260307122937.zip" date="2026-03-07T12:29:38.181" /><!-- duration: 34ms -->
+    </step><!-- duration: 625ms -->
+    <step title="LockFile &apos;C:\home\site\locks\deployments.lock&apos; released" date="2026-03-07T12:29:38.259" /><!-- duration: 0ms -->
+    <step title="Deleting shutdown sentinel file" date="2026-03-07T12:29:38.276" SemaphoreCount="8" /><!-- duration: 0ms -->
+    <step title="Starting FetchDeploy" date="2026-03-07T12:29:38.291" /><!-- duration: 16ms -->
+    <step title="Start deployment in the background" date="2026-03-07T12:29:38.306" /><!-- duration: 251ms -->
+  </step><!-- duration: 1497ms -->
+  <step title="Outgoing response" date="2026-03-07T12:29:38.806" type="response" statusCode="202" statusText="Accepted" Server="Microsoft-IIS/10.0" x-ms-request-id="5b5f44ac-d21d-43af-bb58-719551f1c2b1" Retry-After="30" Cache-Control="private" X-AspNet-Version="4.0.30319" Location="https://botf4cce4.scm.azurewebsites.net/api/deployments/latest?deployer=ZipDeploy&amp;time=2026-03-07_12-29-38Z" /><!-- duration: 19ms -->
+</step><!-- duration: 4672ms -->

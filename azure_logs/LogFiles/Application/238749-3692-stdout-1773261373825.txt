@@ -1,0 +1,728 @@
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 11)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 12)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 13)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 14)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 15)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 16)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 17)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 18)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 19)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 20)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 21)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 22)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 23)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 24)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 25)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 26)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 27)
+[CALLS_WEBHOOK_DEBUG] notification keys=[@odata.type,changeType,resource,resourceUrl,resourceData], resourceData keys=[0,1,2,3,4,5], resource="/app/calls/61006980-7e8a-4a56-9f44-70047f1d55c3/participants"
+[CALLS_WEBHOOK_RAW] resource="/app/calls/61006980-7e8a-4a56-9f44-70047f1d55c3/participants", resourceData.id="undefined", resourceData['@odata.id']="undefined"
+[CALLS_WEBHOOK] Call event: type=updated, callId=61006980-7e8a-4a56-9f44-70047f1d55c3, state=unknown [participant-update]
+[CALLS_AUTH] Requesting bot app token for Calls API (app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434)
+[CALLS_AUTH] Bot app token obtained (expires in 3599s)
+[PARTICIPANTS] Total: 6, Humans: 4, CallId: 61006980-7e8a-4a56-9f44-70047f1d55c3
+[TRANSCRIPTION_AUTO] Attempt 1/6 for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (source=participants)
+[CALLS_AUTH] Requesting bot app token for Calls API (app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434)
+[CALLS_AUTH] Bot app token obtained (expires in 3599s)
+[TRANSCRIPTION] Starting transcription on call: 61006980-7e8a-4a56-9f44-70047f1d55c3
+[TRANSCRIPTION] Transcription started on call: 61006980-7e8a-4a56-9f44-70047f1d55c3
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 28)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 29)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 30)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 31)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 32)
+[CALLS_WEBHOOK_DEBUG] notification keys=[@odata.type,changeType,resource,resourceUrl,resourceData], resourceData keys=[0,1,2,3,4,5], resource="/app/calls/61006980-7e8a-4a56-9f44-70047f1d55c3/participants"
+[CALLS_WEBHOOK_RAW] resource="/app/calls/61006980-7e8a-4a56-9f44-70047f1d55c3/participants", resourceData.id="undefined", resourceData['@odata.id']="undefined"
+[CALLS_WEBHOOK] Call event: type=updated, callId=61006980-7e8a-4a56-9f44-70047f1d55c3, state=unknown [participant-update]
+[CALLS_AUTH] Requesting bot app token for Calls API (app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434)
+[CALLS_AUTH] Bot app token obtained (expires in 3599s)
+[PARTICIPANTS] Total: 6, Humans: 4, CallId: 61006980-7e8a-4a56-9f44-70047f1d55c3
+[TRANSCRIPTION_AUTO] Attempt 1/6 for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (source=participants)
+[CALLS_AUTH] Requesting bot app token for Calls API (app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[CALLS_AUTH] Bot app token obtained (expires in 3599s)
+[TRANSCRIPTION] Starting transcription on call: 61006980-7e8a-4a56-9f44-70047f1d55c3
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[TRANSCRIPTION] Transcription started on call: 61006980-7e8a-4a56-9f44-70047f1d55c3
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 33)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 34)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 35)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 36)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 37)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 38)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 39)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 40)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 41)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 42)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 43)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 44)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 45)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 46)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Getting all transcripts for user a23b9519-60c6-4cbe-9be1-d5757bca989b, limit=20
+[GRAPH_API] Found 2 transcript(s) across all meetings
+[GRAPH_API]   Transcript: id=MSMjMCMjZWRiZWQ2N2UtNjkxOS00OWVkLWE0OGEtODkxODZjODI1OTVk, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19OVFkxTm1FeU1UTXRPR1V3TXkwME5USXpMVGswTmpFdE9UWmxNRGxpWmpCbU56UmpAdGhyZWFkLnYy, created=2026-03-11T20:33:27.3490108Z
+[GRAPH_API]   Transcript: id=MiMjMWEyM2I5NTE5LTYwYzYtNGNiZS05YmUxLWQ1NzU3YmNhOTg5YjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDAwMDAwMDBhMzliMDJlNGQ2YTFkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwNzJjZDBiYmZhMzg0MjA0NDk4ZTBkZTE4MGVkY2YzYjQjIzZlOTYyOGI1LTQwYTAtNDU2Zi04YmUxLWNhNzMxYjMzMzBhZA==, meetingId=MSphMjNiOTUxOS02MGM2LTRjYmUtOWJlMS1kNTc1N2JjYTk4OWIqMCoqMTk6bWVldGluZ19ObUprTkRnd1lqUXRZek13TUMwME5EVTRMV0UxTnpjdE1HUTFObUUyTkRneU9HVTJAdGhyZWFkLnYy, created=2026-03-05T17:06:11.1588199Z
+[GRAPH_API] Filtering transcripts by conversation thread: 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found matching transcript for thread 19:meeting_NTY1NmEyMTMtOGUwMy00NTIzLTk0NjEtOTZlMDliZjBmNzRj@thread.v2
+[GRAPH_API] Found 1 transcripts matching current conversation
+[GRAPH_API] Filtered 1 transcripts to 0 created between 2026-03-11T20:34:19.640Z and N/A
+[GRAPH_API] No transcripts found in the specified time window
+[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=61006980-7e8a-4a56-9f44-70047f1d55c3 (empty polls: 47)
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All
+[GRAPH_TOKEN_SCOPES] Token app: 7ed650f2-28d9-4c03-b660-2fe0bbb98434, tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan
+[GRAPH_AUTH] Requesting token using client credentials for tenant: 588cadf4-9902-4465-86c0-8bcf04f4f102
+[GRAPH_AUTH] Successfully obtained access token (expires in 3599 seconds)
+[GRAPH_TOKEN_SCOPES] Token roles: Calls.JoinGroupCall.All, OnlineMeetings.Read.All, Mail.ReadWrite, OnlineMeetingAiInsight.Read.Chat, OnlineMeetings.ReadWrite.All, OnlineMeetingRecording.Read.All, Calendars.Read, Calls.InitiateGroupCall.All, Calls.JoinGroupCallAsGuest.All, Sites.Read.All, Sites.ReadWrite.All, Group.ReadWrite.All, User.Read.All, OnlineMeetingTranscript.Read.All, Tasks.Read.All, Calendars.ReadBasic.All, GroupMember.Read.All, OnlineMeetingAiInsight.Read.All, Files.Read.All, Mail.Read, Chat.Read.All, ChannelMessage.Read.All, Mail.Send, Tasks.ReadWrite.All, Calls.AccessMedia.All, Calls.Initiate.All

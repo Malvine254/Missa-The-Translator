@@ -5,15 +5,87 @@ import { OpenAIChatModel } from "@microsoft/teams.openai";
 import { MessageActivity, TokenCredentials, ClientCredentials } from '@microsoft/teams.api';
 import { ManagedIdentityCredential } from '@azure/identity';
 import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import * as path from 'path';
+const PDFDocument = require('pdfkit');
 import config from "../config";
-import graphApiHelper from "../graphApiHelper";
+import graphApiHelper, { type MailMessageSummary } from "../graphApiHelper";
 import summarizationHelper from "../summarizationHelper";
+import {
+  analyzeEmailRequest,
+  draftReplyFromInboxThread,
+  formatEmailResult,
+  formatRecipientDisplay,
+  parseInboxRequest,
+  summarizeInboxMessages,
+} from "./emailCapabilities";
+
+const ENABLE_VERBOSE_CONSOLE = (process.env.ENABLE_VERBOSE_CONSOLE || 'false').toLowerCase() === 'true';
+const baseConsoleLog = console.log.bind(console);
+
+const ESSENTIAL_LOG_PREFIXES = [
+  '[MESSAGE]',
+  '[MODEL_RESPONSE]',
+  '[TRANSCRIPT]',
+  '[TEAMS_SEND_OK]',
+  '[TEAMS_SEND_FAIL]',
+];
+
+function shouldKeepConsoleLog(args: any[]): boolean {
+  const first = args?.[0];
+  if (typeof first !== 'string') {
+    return true;
+  }
+  if (!first.startsWith('[')) {
+    return true;
+  }
+  return ESSENTIAL_LOG_PREFIXES.some((prefix) => first.startsWith(prefix));
+}
+
+function getTruncatedLogPreview(text: string, maxChars = 260): string {
+  const normalized = (text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '(empty)';
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars)}... [truncated]`;
+}
+
+function toInlineScriptJson(value: unknown): string {
+  // Prevent inline <script> parsing issues from user/content data.
+  return JSON.stringify(value ?? {})
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+function extractModelResponseText(response: any): string {
+  if (!response) return '';
+  if (typeof response === 'string') return response;
+  if (typeof response.content === 'string' && response.content.trim()) return response.content;
+  if (typeof response.text === 'string' && response.text.trim()) return response.text;
+  if (typeof response.message === 'string' && response.message.trim()) return response.message;
+  if (typeof response.output === 'string' && response.output.trim()) return response.output;
+  if (Array.isArray(response.output)) {
+    const joined = response.output.map((x: any) => (typeof x === 'string' ? x : (x?.text || ''))).join(' ').trim();
+    if (joined) return joined;
+  }
+  return '';
+}
+
+// Keep runtime logs concise by default; set ENABLE_VERBOSE_CONSOLE=true for deep debugging.
+if (!ENABLE_VERBOSE_CONSOLE) {
+  console.log = (...args: any[]) => {
+    if (!shouldKeepConsoleLog(args)) {
+      return;
+    }
+    baseConsoleLog(...args);
+  };
+}
 
 // Create storage for conversation history
 const storage = new LocalStorage();
 
-// Track last bot response for each conversation - used for contextual follow-ups like "send it to my email"
+// Track last bot responses for each conversation - used for contextual follow-ups like "send it to my email"
+// Keep up to 5 recent responses for better context resolution
 interface LastBotResponse {
   content: string;
   contentType: 'calendar' | 'summary' | 'minutes' | 'transcript' | 'meeting_overview' | 'insights' | 'general';
@@ -21,6 +93,154 @@ interface LastBotResponse {
   timestamp: number;
 }
 const lastBotResponseMap = new Map<string, LastBotResponse>();
+const botResponseHistoryMap = new Map<string, LastBotResponse[]>(); // Keep last 5 responses per conversation
+const MAX_RESPONSE_HISTORY = 5;
+
+interface InboxContact {
+  displayName: string;
+  email: string;
+}
+
+interface InboxContext {
+  updatedAt: number;
+  mailboxUserId?: string;
+  lastMatchedMessageId?: string;
+  lastMatchedSenderName?: string;
+  lastMatchedSenderEmail?: string;
+  lastMessages: MailMessageSummary[];
+  contacts: InboxContact[];
+}
+
+const inboxContextMap = new Map<string, InboxContext>();
+
+function normalizeRecipientName(value: string): string {
+  return (value || '')
+    .toLowerCase()
+    .replace(/'s$/i, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isPronounRecipient(value: string): boolean {
+  return ['him', 'her', 'them', 'that person', 'that guy', 'that lady'].includes(normalizeRecipientName(value));
+}
+
+function cacheInboxContext(conversationId: string, messages: MailMessageSummary[]) {
+  const contactsMap = new Map<string, InboxContact>();
+  for (const message of messages) {
+    const email = (message.fromAddress || '').trim();
+    if (!email) continue;
+    const key = email.toLowerCase();
+    contactsMap.set(key, {
+      displayName: (message.fromName || email).trim(),
+      email,
+    });
+  }
+
+  inboxContextMap.set(conversationId, {
+    updatedAt: Date.now(),
+    lastMessages: messages,
+    contacts: [...contactsMap.values()],
+  });
+}
+
+function rememberMatchedInboxThread(
+  conversationId: string,
+  mailboxUserId: string,
+  message?: MailMessageSummary
+) {
+  const current = inboxContextMap.get(conversationId) || {
+    updatedAt: Date.now(),
+    lastMessages: [],
+    contacts: [],
+  };
+
+  inboxContextMap.set(conversationId, {
+    ...current,
+    updatedAt: Date.now(),
+    mailboxUserId,
+    lastMatchedMessageId: message?.id || current.lastMatchedMessageId,
+    lastMatchedSenderName: message?.fromName || current.lastMatchedSenderName,
+    lastMatchedSenderEmail: message?.fromAddress || current.lastMatchedSenderEmail,
+  });
+}
+
+function extractSuggestedReplyBody(content: string): string {
+  const raw = (content || '').trim();
+  if (!raw) return '';
+
+  const withoutHeader = raw
+    .replace(/^##\s*Suggested Reply\s*/i, '')
+    .replace(/^\*\*Subject:\*\*.*$/im, '')
+    .trim();
+
+  const rationaleMatch = withoutHeader.match(/\n##\s*Rationale\b/i);
+  const replySection = rationaleMatch
+    ? withoutHeader.slice(0, rationaleMatch.index).trim()
+    : withoutHeader;
+
+  return replySection.trim();
+}
+
+function resolveRecipientFromInboxContext(conversationId: string, rawName: string): InboxContact | null {
+  const context = inboxContextMap.get(conversationId);
+  if (!context) return null;
+  if ((Date.now() - context.updatedAt) > 30 * 60 * 1000) return null;
+
+  const normalizedQuery = normalizeRecipientName(rawName);
+  if (!normalizedQuery) return null;
+
+  if (isPronounRecipient(normalizedQuery)) {
+    const latest = context.lastMessages.find((message) => !!message.fromAddress);
+    if (!latest?.fromAddress) return null;
+    return {
+      displayName: latest.fromName || latest.fromAddress,
+      email: latest.fromAddress,
+    };
+  }
+
+  for (const contact of context.contacts) {
+    const contactName = normalizeRecipientName(contact.displayName);
+    const contactEmail = normalizeRecipientName(contact.email.split('@')[0] || '');
+    if (
+      contactName.includes(normalizedQuery) ||
+      normalizedQuery.includes(contactName) ||
+      contactEmail.includes(normalizedQuery) ||
+      normalizedQuery.includes(contactEmail)
+    ) {
+      return contact;
+    }
+  }
+
+  return null;
+}
+
+// Helper to add response to history
+function recordBotResponse(conversationId: string, response: LastBotResponse) {
+  lastBotResponseMap.set(conversationId, response);
+  const history = botResponseHistoryMap.get(conversationId) || [];
+  history.push(response);
+  // Keep only last N responses
+  while (history.length > MAX_RESPONSE_HISTORY) {
+    history.shift();
+  }
+  botResponseHistoryMap.set(conversationId, history);
+}
+
+// Get recent response by type (useful for "send the summary" when multiple responses exist)
+function getRecentResponseByType(conversationId: string, contentType: string, maxAgeMs = 30 * 60 * 1000): LastBotResponse | null {
+  const history = botResponseHistoryMap.get(conversationId) || [];
+  const now = Date.now();
+  // Search from newest to oldest
+  for (let i = history.length - 1; i >= 0; i--) {
+    const resp = history[i];
+    if ((now - resp.timestamp) < maxAgeMs && resp.contentType === contentType) {
+      return resp;
+    }
+  }
+  return null;
+}
 
 // Track active call IDs -> { conversationId, serviceUrl, organizerId, joinWebUrl } for webhook handling
 interface ActiveCall {
@@ -28,6 +248,7 @@ interface ActiveCall {
   serviceUrl: string;
   organizerId?: string;
   joinWebUrl?: string;
+  onlineMeetingId?: string;
   establishedAt?: number;   // timestamp when call was established
   terminatedAt?: number;    // timestamp when call was terminated
   leavingInProgress?: boolean; // prevent duplicate hang-up
@@ -46,24 +267,632 @@ const liveTranscriptMap = new Map<string, TranscriptEntry[]>();
 // Map callId -> conversationId for transcript event routing
 const callToConversationMap = new Map<string, string>();
 
-// Directory for persisted transcript files - use Azure's writable temp directory if available
-const TRANSCRIPTS_DIR = process.env.TEMP || process.env.HOME 
-  ? path.join(process.env.TEMP || process.env.HOME || '', 'mela_transcripts')
-  : path.join(__dirname, '..', '..', 'transcripts');
-const MEETING_CONTEXT_FILE = path.join(TRANSCRIPTS_DIR, 'meeting_context.json');
+// Directory for persisted transcript and tracking files.
+// On Azure App Service with WEBSITE_RUN_FROM_PACKAGE=1, wwwroot is read-only.
+// Persist to HOME/data instead; keep process.cwd() for local development.
+const IS_RUNNING_ON_AZURE =
+  process.env.RUNNING_ON_AZURE === '1' ||
+  !!process.env.WEBSITE_SITE_NAME ||
+  !!process.env.WEBSITE_INSTANCE_ID;
+const AZURE_HOME_DIR = process.env.HOME || process.env.HOME_EXPANDED || '';
+const PERSISTENCE_ROOT = (IS_RUNNING_ON_AZURE && AZURE_HOME_DIR)
+  ? path.join(AZURE_HOME_DIR, 'data', 'missa-translator')
+  : process.cwd();
 
+const TRANSCRIPTS_DIR = path.resolve(PERSISTENCE_ROOT, 'transcripts');
+const ADMIN_DATA_DIR = path.resolve(PERSISTENCE_ROOT, 'admin_data');
+const MEETING_CONTEXT_FILE = path.join(ADMIN_DATA_DIR, 'meeting_context.json');
+
+console.log(`[STARTUP] Running on Azure: ${IS_RUNNING_ON_AZURE ? 'yes' : 'no'}`);
+console.log(`[STARTUP] Persistence root set to: ${PERSISTENCE_ROOT}`);
 console.log(`[STARTUP] Transcripts directory set to: ${TRANSCRIPTS_DIR}`);
+console.log(`[STARTUP] Admin data directory set to: ${ADMIN_DATA_DIR}`);
 
 interface MeetingContextEntry {
   organizerId: string;
   joinWebUrl: string;
+  onlineMeetingId?: string;
   subject?: string;
   updatedAt: number;
   callStartedAt?: number;
   callEndedAt?: number;
+  callId?: string;
 }
 
 const meetingContextMap = new Map<string, MeetingContextEntry>();
+
+// Meeting history tracking - stores top 5 most recent meetings per conversation
+const MEETING_HISTORY_FILE = path.join(ADMIN_DATA_DIR, 'meeting_history.json');
+const MAX_MEETING_HISTORY = 5;
+
+interface MeetingHistoryEntry {
+  meetingId: string; // Unique identifier for this meeting instance
+  subject: string;
+  startTime: number;
+  endTime?: number;
+  transcriptFilePath?: string;
+  participantCount: number;
+  entryCount: number;
+  organizerId?: string;
+  joinWebUrl?: string;
+  callId?: string;
+}
+
+// Map from conversationId to array of meeting history entries (most recent first)
+const meetingHistoryMap = new Map<string, MeetingHistoryEntry[]>();
+
+interface UserStatsEntry {
+  userId: string;
+  displayName: string;
+  tenantId?: string;
+  totalMessages: number;
+  meetingJoinRequests: number;
+  monthlyMeetingsJoined: Record<string, number>;
+  monthlyMeetingLimitOverride: number | null;
+  tokenPolicy: 'unlimited' | 'limited';
+  tokenLimit: number | null;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  estimatedTotalTokens: number;
+  estimatedCostUsd: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  blocked: boolean;
+  blockReason?: string;
+  blockedAt?: number;
+}
+
+interface MeetingUsageEntry {
+  meetingId: string;
+  meetingName: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  joinRequests: number;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  estimatedTotalTokens: number;
+  estimatedCostUsd: number;
+  users: string[];
+}
+
+interface DailyUsageEntry {
+  day: string;
+  messages: number;
+  meetingsJoined: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+interface BotAdminStats {
+  startedAt: number;
+  lastUpdatedAt: number;
+  totalMessages: number;
+  totalMeetingsJoined: number;
+  maxUsers: number;
+  freeTierMonthlyMeetingLimit: number;
+  enforceGlobalLimits: boolean;
+  modelInputCostPer1kUsd: number;
+  modelOutputCostPer1kUsd: number;
+  totalEstimatedInputTokens: number;
+  totalEstimatedOutputTokens: number;
+  totalEstimatedTokens: number;
+  totalEstimatedCostUsd: number;
+  users: Record<string, UserStatsEntry>;
+  meetings: Record<string, MeetingUsageEntry>;
+  dailyUsage: Record<string, DailyUsageEntry>;
+  perUserDailyUsage: Record<string, Record<string, DailyUsageEntry>>;
+  activeMeetingConversationIds: string[];
+  meetingConversationHistory: string[];
+}
+
+const BOT_ADMIN_STATS_FILE = path.join(ADMIN_DATA_DIR, 'bot_admin_stats.json');
+const BOT_ADMIN_STATS_BACKUP_FILE = path.join(ADMIN_DATA_DIR, 'bot_admin_stats.backup.json');
+const DEFAULT_MAX_USERS = Number(process.env.BOT_MAX_USERS || process.env.MAX_USERS || 200);
+const DEFAULT_FREE_TIER_MONTHLY_MEETINGS = Number(process.env.FREE_TIER_MAX_MEETINGS_PER_MONTH || 5);
+const DEFAULT_INPUT_COST_PER_1K_USD = Number(process.env.MODEL_INPUT_COST_PER_1K_USD || 0.00015);
+const DEFAULT_OUTPUT_COST_PER_1K_USD = Number(process.env.MODEL_OUTPUT_COST_PER_1K_USD || 0.0006);
+const AUTO_BLOCK_ON_POLICY_BREACH = (process.env.AUTO_BLOCK_ON_POLICY_BREACH || 'true').toLowerCase() === 'true';
+let botAdminStats: BotAdminStats | null = null;
+
+interface ModelUsageTracking {
+  userId: string;
+  displayName: string;
+  tenantId?: string;
+  meetingId: string;
+  meetingName?: string;
+  inputText: string;
+  outputText: string;
+}
+
+function defaultBotAdminStats(): BotAdminStats {
+  return {
+    startedAt: Date.now(),
+    lastUpdatedAt: Date.now(),
+    totalMessages: 0,
+    totalMeetingsJoined: 0,
+    maxUsers: Number.isFinite(DEFAULT_MAX_USERS) ? DEFAULT_MAX_USERS : 200,
+    freeTierMonthlyMeetingLimit: Number.isFinite(DEFAULT_FREE_TIER_MONTHLY_MEETINGS) ? DEFAULT_FREE_TIER_MONTHLY_MEETINGS : 5,
+    enforceGlobalLimits: false,
+    modelInputCostPer1kUsd: Number.isFinite(DEFAULT_INPUT_COST_PER_1K_USD) ? DEFAULT_INPUT_COST_PER_1K_USD : 0.00015,
+    modelOutputCostPer1kUsd: Number.isFinite(DEFAULT_OUTPUT_COST_PER_1K_USD) ? DEFAULT_OUTPUT_COST_PER_1K_USD : 0.0006,
+    totalEstimatedInputTokens: 0,
+    totalEstimatedOutputTokens: 0,
+    totalEstimatedTokens: 0,
+    totalEstimatedCostUsd: 0,
+    users: {},
+    meetings: {},
+    dailyUsage: {},
+    perUserDailyUsage: {},
+    activeMeetingConversationIds: [],
+    meetingConversationHistory: [],
+  };
+}
+
+let adminDataMigrationAttempted = false;
+
+function ensureAdminDataDir() {
+  if (!fs.existsSync(ADMIN_DATA_DIR)) {
+    fs.mkdirSync(ADMIN_DATA_DIR, { recursive: true });
+  }
+  if (adminDataMigrationAttempted) {
+    return;
+  }
+  adminDataMigrationAttempted = true;
+
+  // Migrate legacy admin JSON files previously stored in transcripts/.
+  const legacyToCurrent: Array<{ from: string; to: string }> = [
+    { from: path.join(TRANSCRIPTS_DIR, 'bot_admin_stats.json'), to: BOT_ADMIN_STATS_FILE },
+    { from: path.join(TRANSCRIPTS_DIR, 'bot_admin_stats.backup.json'), to: BOT_ADMIN_STATS_BACKUP_FILE },
+    { from: path.join(TRANSCRIPTS_DIR, 'meeting_context.json'), to: MEETING_CONTEXT_FILE },
+    { from: path.join(TRANSCRIPTS_DIR, 'admin_error_logs.json'), to: path.join(ADMIN_DATA_DIR, 'admin_error_logs.json') },
+  ];
+
+  for (const pair of legacyToCurrent) {
+    try {
+      if (!fs.existsSync(pair.from) || fs.existsSync(pair.to)) {
+        continue;
+      }
+      fs.copyFileSync(pair.from, pair.to);
+      fs.rmSync(pair.from, { force: true });
+      console.log(`[ADMIN_DATA] Migrated ${path.basename(pair.from)} -> ${ADMIN_DATA_DIR}`);
+    } catch (error) {
+      console.warn(`[ADMIN_DATA] Failed to migrate ${pair.from}:`, error);
+    }
+  }
+}
+
+function saveBotAdminStats() {
+  if (!botAdminStats) return;
+  ensureAdminDataDir();
+  botAdminStats.lastUpdatedAt = Date.now();
+  const payload = JSON.stringify(botAdminStats, null, 2);
+  const tempFile = `${BOT_ADMIN_STATS_FILE}.tmp`;
+
+  // Write to a temp file first to avoid partially-written JSON files.
+  fs.writeFileSync(tempFile, payload, 'utf-8');
+  if (fs.existsSync(BOT_ADMIN_STATS_FILE)) {
+    fs.rmSync(BOT_ADMIN_STATS_FILE, { force: true });
+  }
+  fs.renameSync(tempFile, BOT_ADMIN_STATS_FILE);
+
+  // Keep a recovery snapshot for parse/IO failures on startup.
+  fs.writeFileSync(BOT_ADMIN_STATS_BACKUP_FILE, payload, 'utf-8');
+}
+
+function loadBotAdminStats(): BotAdminStats {
+  if (botAdminStats) return botAdminStats;
+  try {
+    ensureAdminDataDir();
+    if (fs.existsSync(BOT_ADMIN_STATS_FILE)) {
+      const raw = fs.readFileSync(BOT_ADMIN_STATS_FILE, 'utf-8');
+      const parsed = JSON.parse(raw) as BotAdminStats;
+      botAdminStats = {
+        ...defaultBotAdminStats(),
+        ...parsed,
+        users: parsed.users || {},
+        meetings: parsed.meetings || {},
+        dailyUsage: parsed.dailyUsage || {},
+        perUserDailyUsage: parsed.perUserDailyUsage || {},
+        activeMeetingConversationIds: parsed.activeMeetingConversationIds || [],
+        meetingConversationHistory: parsed.meetingConversationHistory || [],
+      };
+
+      // Backfill newly added user-policy fields for older persisted files.
+      for (const user of Object.values(botAdminStats.users || {})) {
+        if (typeof user.monthlyMeetingLimitOverride === 'undefined') {
+          user.monthlyMeetingLimitOverride = null;
+        }
+        if (user.tokenPolicy !== 'limited' && user.tokenPolicy !== 'unlimited') {
+          user.tokenPolicy = 'unlimited';
+        }
+        if (typeof user.tokenLimit === 'undefined') {
+          user.tokenLimit = null;
+        }
+        if (typeof user.tenantId !== 'string') {
+          user.tenantId = '';
+        }
+      }
+      if (typeof botAdminStats.enforceGlobalLimits !== 'boolean') {
+        botAdminStats.enforceGlobalLimits = false;
+      }
+      return botAdminStats;
+    }
+  } catch (error) {
+    console.warn('[ADMIN_STATS] Failed to load primary stats file, attempting backup recovery:', error);
+    try {
+      if (fs.existsSync(BOT_ADMIN_STATS_BACKUP_FILE)) {
+        const backupRaw = fs.readFileSync(BOT_ADMIN_STATS_BACKUP_FILE, 'utf-8');
+        const backupParsed = JSON.parse(backupRaw) as BotAdminStats;
+        botAdminStats = {
+          ...defaultBotAdminStats(),
+          ...backupParsed,
+          users: backupParsed.users || {},
+          meetings: backupParsed.meetings || {},
+          dailyUsage: backupParsed.dailyUsage || {},
+          perUserDailyUsage: backupParsed.perUserDailyUsage || {},
+          activeMeetingConversationIds: backupParsed.activeMeetingConversationIds || [],
+          meetingConversationHistory: backupParsed.meetingConversationHistory || [],
+        };
+        saveBotAdminStats();
+        console.warn('[ADMIN_STATS] Recovered stats from backup snapshot');
+        return botAdminStats;
+      }
+    } catch (backupError) {
+      console.warn('[ADMIN_STATS] Backup recovery failed, using defaults:', backupError);
+    }
+  }
+  botAdminStats = defaultBotAdminStats();
+  saveBotAdminStats();
+  return botAdminStats;
+}
+
+function upsertUserStats(userId: string, displayName: string, tenantId?: string): UserStatsEntry {
+  const stats = loadBotAdminStats();
+  const existing = stats.users[userId];
+  if (existing) {
+    existing.displayName = displayName || existing.displayName;
+    if (tenantId && tenantId.trim()) {
+      existing.tenantId = tenantId.trim();
+    }
+    existing.lastSeenAt = Date.now();
+    return existing;
+  }
+  const entry: UserStatsEntry = {
+    userId,
+    displayName: displayName || userId,
+    tenantId: (tenantId || '').trim(),
+    totalMessages: 0,
+    meetingJoinRequests: 0,
+    monthlyMeetingsJoined: {},
+    monthlyMeetingLimitOverride: null,
+    tokenPolicy: 'unlimited',
+    tokenLimit: null,
+    estimatedInputTokens: 0,
+    estimatedOutputTokens: 0,
+    estimatedTotalTokens: 0,
+    estimatedCostUsd: 0,
+    firstSeenAt: Date.now(),
+    lastSeenAt: Date.now(),
+    blocked: false,
+    blockReason: '',
+    blockedAt: undefined,
+  };
+  stats.users[userId] = entry;
+  saveBotAdminStats();
+  return entry;
+}
+
+function getNonBlockedUserCount(): number {
+  const stats = loadBotAdminStats();
+  return Object.values(stats.users).filter((u) => !u.blocked).length;
+}
+
+function normalizeTenantId(tenantId?: string): string {
+  const normalized = (tenantId || '').trim();
+  return normalized || 'unknown-tenant';
+}
+
+function canUserAccess(userId: string): { allowed: boolean; reason?: string } {
+  const stats = loadBotAdminStats();
+  const user = stats.users[userId];
+  if (user?.blocked) {
+    return { allowed: false, reason: 'blocked' };
+  }
+  if (!stats.enforceGlobalLimits) {
+    return { allowed: true };
+  }
+  if (!user) {
+    const activeUsers = getNonBlockedUserCount();
+    if (activeUsers >= stats.maxUsers) {
+      return { allowed: false, reason: 'limit_reached' };
+    }
+  }
+  return { allowed: true };
+}
+
+function recordUserMessage(userId: string, displayName: string, tenantId?: string) {
+  const stats = loadBotAdminStats();
+  const user = upsertUserStats(userId, displayName, tenantId);
+  user.totalMessages += 1;
+  user.lastSeenAt = Date.now();
+  stats.totalMessages += 1;
+  recordDailyMetrics(userId, { messages: 1 });
+  saveBotAdminStats();
+}
+
+function recordMeetingJoinRequest(userId: string, displayName: string, tenantId?: string) {
+  const user = upsertUserStats(userId, displayName, tenantId);
+  user.meetingJoinRequests += 1;
+  user.lastSeenAt = Date.now();
+  saveBotAdminStats();
+}
+
+function getMonthKey(date = new Date()): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function getDayKey(date = new Date()): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
+function ensureDailyUsageEntry(target: Record<string, DailyUsageEntry>, dayKey: string): DailyUsageEntry {
+  if (!target[dayKey]) {
+    target[dayKey] = {
+      day: dayKey,
+      messages: 0,
+      meetingsJoined: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+    };
+  }
+  return target[dayKey];
+}
+
+function recordDailyMetrics(
+  userId: string,
+  delta: Partial<Pick<DailyUsageEntry, 'messages' | 'meetingsJoined' | 'inputTokens' | 'outputTokens' | 'totalTokens' | 'costUsd'>>
+) {
+  const stats = loadBotAdminStats();
+  const dayKey = getDayKey();
+
+  const globalEntry = ensureDailyUsageEntry(stats.dailyUsage, dayKey);
+  globalEntry.messages += delta.messages || 0;
+  globalEntry.meetingsJoined += delta.meetingsJoined || 0;
+  globalEntry.inputTokens += delta.inputTokens || 0;
+  globalEntry.outputTokens += delta.outputTokens || 0;
+  globalEntry.totalTokens += delta.totalTokens || 0;
+  globalEntry.costUsd += delta.costUsd || 0;
+
+  if (!stats.perUserDailyUsage[userId]) {
+    stats.perUserDailyUsage[userId] = {};
+  }
+  const userEntry = ensureDailyUsageEntry(stats.perUserDailyUsage[userId], dayKey);
+  userEntry.messages += delta.messages || 0;
+  userEntry.meetingsJoined += delta.meetingsJoined || 0;
+  userEntry.inputTokens += delta.inputTokens || 0;
+  userEntry.outputTokens += delta.outputTokens || 0;
+  userEntry.totalTokens += delta.totalTokens || 0;
+  userEntry.costUsd += delta.costUsd || 0;
+}
+
+function estimateTokensFromText(text: string): number {
+  const normalized = (text || '').trim();
+  if (!normalized) return 0;
+  return Math.max(1, Math.ceil(normalized.length / 4));
+}
+
+function isMeetingConversationId(conversationId: string): boolean {
+  const normalized = (conversationId || '').toLowerCase();
+  return normalized.includes('meeting_') || normalized.includes('meeting') || normalized.includes('spaces');
+}
+
+function getOrCreateMeetingUsage(meetingId: string, meetingName?: string): MeetingUsageEntry {
+  const stats = loadBotAdminStats();
+  if (!stats.meetings[meetingId]) {
+    stats.meetings[meetingId] = {
+      meetingId,
+      meetingName: meetingName || 'Meeting',
+      firstSeenAt: Date.now(),
+      lastSeenAt: Date.now(),
+      joinRequests: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      estimatedTotalTokens: 0,
+      estimatedCostUsd: 0,
+      users: [],
+    };
+  }
+  if (meetingName && meetingName.trim()) {
+    stats.meetings[meetingId].meetingName = meetingName;
+  }
+  return stats.meetings[meetingId];
+}
+
+function recordMeetingJoinForQuota(userId: string, displayName: string, meetingId: string, meetingName?: string, tenantId?: string) {
+  const stats = loadBotAdminStats();
+  const user = upsertUserStats(userId, displayName, tenantId);
+  const monthKey = getMonthKey();
+  user.monthlyMeetingsJoined[monthKey] = (user.monthlyMeetingsJoined[monthKey] || 0) + 1;
+  user.lastSeenAt = Date.now();
+
+  const meetingUsage = getOrCreateMeetingUsage(meetingId, meetingName);
+  meetingUsage.joinRequests += 1;
+  meetingUsage.lastSeenAt = Date.now();
+  if (!meetingUsage.users.includes(userId)) {
+    meetingUsage.users.push(userId);
+  }
+
+  recordDailyMetrics(userId, { meetingsJoined: 1 });
+
+  saveBotAdminStats();
+}
+
+function getUserMonthlyMeetingLimit(userId: string): number {
+  const stats = loadBotAdminStats();
+  const user = stats.users[userId];
+  if (user?.monthlyMeetingLimitOverride && user.monthlyMeetingLimitOverride > 0) {
+    return user.monthlyMeetingLimitOverride;
+  }
+  return stats.freeTierMonthlyMeetingLimit;
+}
+
+function autoBlockUser(userId: string, reason: string) {
+  if (!AUTO_BLOCK_ON_POLICY_BREACH) return;
+  const stats = loadBotAdminStats();
+  const user = stats.users[userId];
+  if (!user || user.blocked) return;
+  user.blocked = true;
+  user.blockReason = reason;
+  user.blockedAt = Date.now();
+  user.lastSeenAt = Date.now();
+  saveBotAdminStats();
+}
+
+function canUserJoinMeetingThisMonth(userId: string): { allowed: boolean; used: number; limit: number; remaining: number } {
+  const stats = loadBotAdminStats();
+  const user = stats.users[userId];
+  const limit = getUserMonthlyMeetingLimit(userId);
+  const used = user?.monthlyMeetingsJoined?.[getMonthKey()] || 0;
+
+  if (!stats.enforceGlobalLimits) {
+    return {
+      allowed: true,
+      used,
+      limit,
+      remaining: Number.MAX_SAFE_INTEGER,
+    };
+  }
+
+  const remaining = Math.max(limit - used, 0);
+  if (used >= limit && user?.monthlyMeetingLimitOverride && user.monthlyMeetingLimitOverride > 0) {
+    autoBlockUser(userId, 'monthly_meeting_limit_exceeded');
+  }
+  return {
+    allowed: used < limit,
+    used,
+    limit,
+    remaining,
+  };
+}
+
+function canUserUseTokens(userId: string): { allowed: boolean; used: number; limit?: number } {
+  const stats = loadBotAdminStats();
+  const user = stats.users[userId];
+  if (!user) {
+    return { allowed: true, used: 0 };
+  }
+  const used = user.estimatedTotalTokens || 0;
+  if (user.tokenPolicy === 'limited' && user.tokenLimit && user.tokenLimit > 0) {
+    if (used >= user.tokenLimit) {
+      autoBlockUser(userId, 'token_limit_exceeded');
+    }
+    return {
+      allowed: used < user.tokenLimit,
+      used,
+      limit: user.tokenLimit,
+    };
+  }
+  return { allowed: true, used };
+}
+
+function recordEstimatedModelUsage(entry: ModelUsageTracking) {
+  const stats = loadBotAdminStats();
+  const user = upsertUserStats(entry.userId, entry.displayName, entry.tenantId);
+  const meetingId = entry.meetingId || '';
+  const shouldAggregateMeeting = !!meetingId && isMeetingConversationId(meetingId);
+
+  const inputTokens = estimateTokensFromText(entry.inputText);
+  const outputTokens = estimateTokensFromText(entry.outputText);
+  const totalTokens = inputTokens + outputTokens;
+  const costUsd =
+    (inputTokens / 1000) * stats.modelInputCostPer1kUsd +
+    (outputTokens / 1000) * stats.modelOutputCostPer1kUsd;
+
+  user.estimatedInputTokens += inputTokens;
+  user.estimatedOutputTokens += outputTokens;
+  user.estimatedTotalTokens += totalTokens;
+  user.estimatedCostUsd += costUsd;
+  user.lastSeenAt = Date.now();
+
+  if (shouldAggregateMeeting) {
+    const cachedMeetingName = getCachedMeetingContext(meetingId)?.subject;
+    const meetingUsage = getOrCreateMeetingUsage(meetingId, entry.meetingName || cachedMeetingName);
+    meetingUsage.estimatedInputTokens += inputTokens;
+    meetingUsage.estimatedOutputTokens += outputTokens;
+    meetingUsage.estimatedTotalTokens += totalTokens;
+    meetingUsage.estimatedCostUsd += costUsd;
+    meetingUsage.lastSeenAt = Date.now();
+    if (!meetingUsage.users.includes(entry.userId)) {
+      meetingUsage.users.push(entry.userId);
+    }
+  }
+
+  stats.totalEstimatedInputTokens += inputTokens;
+  stats.totalEstimatedOutputTokens += outputTokens;
+  stats.totalEstimatedTokens += totalTokens;
+  stats.totalEstimatedCostUsd += costUsd;
+
+  recordDailyMetrics(entry.userId, {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    costUsd,
+  });
+
+  saveBotAdminStats();
+}
+
+async function sendPromptWithTracking(
+  prompt: ChatPrompt,
+  input: string,
+  tracking?: {
+    userId: string;
+    displayName: string;
+    tenantId?: string;
+    meetingId: string;
+    estimatedInputText: string;
+  }
+) {
+  const response = await prompt.send(input);
+  const responseText = extractModelResponseText(response);
+  if (tracking) {
+    recordEstimatedModelUsage({
+      userId: tracking.userId,
+      displayName: tracking.displayName,
+      tenantId: tracking.tenantId,
+      meetingId: tracking.meetingId,
+      inputText: tracking.estimatedInputText,
+      outputText: responseText,
+    });
+  }
+  return response;
+}
+
+function recordMeetingEstablished(conversationId: string, meetingName?: string) {
+  const stats = loadBotAdminStats();
+  if (!stats.meetingConversationHistory.includes(conversationId)) {
+    stats.meetingConversationHistory.push(conversationId);
+    stats.totalMeetingsJoined += 1;
+  }
+  if (isMeetingConversationId(conversationId)) {
+    const cachedMeetingName = getCachedMeetingContext(conversationId)?.subject;
+    getOrCreateMeetingUsage(conversationId, meetingName || cachedMeetingName);
+  }
+  if (!stats.activeMeetingConversationIds.includes(conversationId)) {
+    stats.activeMeetingConversationIds.push(conversationId);
+  }
+  saveBotAdminStats();
+}
+
+function recordMeetingTerminated(conversationId: string) {
+  const stats = loadBotAdminStats();
+  stats.activeMeetingConversationIds = stats.activeMeetingConversationIds.filter((id) => id !== conversationId);
+  saveBotAdminStats();
+}
 
 function isBotMentioned(activity: any): boolean {
   const entities = activity?.entities;
@@ -93,6 +922,16 @@ function isBotMentioned(activity: any): boolean {
   }
 
   return false;
+}
+
+function getActivityTenantId(activity: any): string | undefined {
+  return (
+    activity?.conversation?.tenantId ||
+    activity?.channelData?.tenant?.id ||
+    activity?.channelData?.tenantId ||
+    activity?.value?.tenantId ||
+    undefined
+  );
 }
 
 function removeAtMentions(text: string): string {
@@ -207,7 +1046,8 @@ async function buildTranscriptHtml(
   meetingTitle: string,
   members: string[],
   totalEntries: number,
-  showingPartial: boolean
+  showingPartial: boolean,
+  tracking?: { userId: string; displayName: string; meetingId: string }
 ): Promise<string> {
   try {
     const instructionsPath = path.join(__dirname, 'transcriptFormatInstructions.txt');
@@ -259,7 +1099,10 @@ async function buildTranscriptHtml(
       }),
     });
 
-    const response = await prompt.send('');
+    const response = await sendPromptWithTracking(prompt, '', tracking ? {
+      ...tracking,
+      estimatedInputText: `${meetingTitle}\n${participantNames.join(', ')}\n${JSON.stringify(transcriptData)}`,
+    } : undefined);
     return response.content || 'Could not generate transcript. Please try again.';
   } catch (error) {
     console.error(`[TRANSCRIPT_FORMAT_ERROR]`, error);
@@ -335,23 +1178,112 @@ function buildTranscriptMarkdown(
   return md;
 }
 
-/** Save the current transcript for a conversation to a .txt file (Teams-like format). */
+/**
+ * Poll for transcript availability from Graph API.
+ * Retries multiple times with increasing delays until transcript is ready or timeout.
+ * @param organizerId - Meeting organizer's user ID
+ * @param joinWebUrl - Meeting join URL
+ * @param startTime - Optional meeting start time for filtering
+ * @param endTime - Optional meeting end time for filtering
+ * @param maxAttempts - Maximum number of retry attempts (default: 6)
+ * @param initialDelayMs - Initial delay between retries (default: 5000ms)
+ * @returns Object with success status, vttContent, and attempt count
+ */
+async function pollForTranscriptReady(
+  organizerId: string,
+  joinWebUrl: string,
+  startTime?: number,
+  endTime?: number,
+  maxAttempts: number = 6,
+  initialDelayMs: number = 5000,
+  conversationId?: string,
+  targetCallId?: string
+): Promise<{ success: boolean; vttContent: string | null; attempts: number; error?: string }> {
+  let attempts = 0;
+  let delayMs = initialDelayMs;
+
+  while (attempts < maxAttempts) {
+    attempts++;
+    console.log(`[TRANSCRIPT_POLL] Attempt ${attempts}/${maxAttempts} to fetch transcript (conversationId=${conversationId || 'N/A'}, callId=${targetCallId || 'N/A'})...`);
+
+    try {
+      const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+        organizerId,
+        joinWebUrl,
+        startTime,
+        endTime,
+        conversationId,  // Pass conversationId to enable RSC Strategy 0
+        undefined,       // knownMeetingId
+        targetCallId,    // Pass callId to filter to correct transcript
+        true             // force=true to bypass cooldown (explicit user request)
+      );
+
+      if (vttContent) {
+        const parsed = parseVttToEntries(vttContent);
+        if (parsed.length > 0) {
+          console.log(`[TRANSCRIPT_POLL] Transcript ready! ${parsed.length} entries found on attempt ${attempts}`);
+          return { success: true, vttContent, attempts };
+        }
+      }
+
+      // Transcript not ready yet, wait and retry
+      if (attempts < maxAttempts) {
+        console.log(`[TRANSCRIPT_POLL] Transcript not ready, waiting ${delayMs / 1000}s before retry...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        // Increase delay for next attempt (exponential backoff, capped at 30s)
+        delayMs = Math.min(delayMs * 1.5, 30000);
+      }
+    } catch (error: any) {
+      console.warn(`[TRANSCRIPT_POLL] Attempt ${attempts} failed:`, error?.message);
+      if (attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        delayMs = Math.min(delayMs * 1.5, 30000);
+      }
+    }
+  }
+
+  return { 
+    success: false, 
+    vttContent: null, 
+    attempts,
+    error: `Transcript not available after ${attempts} attempts. It may still be processing.`
+  };
+}
+
+/** Save the current transcript for a conversation to a .txt file (Teams-like format). Non-blocking. */
 function saveTranscriptToFile(conversationId: string) {
+  // Fire-and-forget async save
+  void saveTranscriptToFileAsync(conversationId);
+}
+
+/** Async implementation of transcript saving - non-blocking I/O */
+async function saveTranscriptToFileAsync(conversationId: string): Promise<void> {
   try {
     const entries = liveTranscriptMap.get(conversationId);
     const finalEntries = entries?.filter(e => e.isFinal) || [];
     if (finalEntries.length === 0) return;
 
     // Ensure transcripts directory exists
-    if (!fs.existsSync(TRANSCRIPTS_DIR)) {
-      fs.mkdirSync(TRANSCRIPTS_DIR, { recursive: true });
-    }
+    await fsPromises.mkdir(TRANSCRIPTS_DIR, { recursive: true });
 
-    // Build a clean filename from conversation ID + date
+    // Get meeting context for metadata
+    const meetingContext = getCachedMeetingContext(conversationId);
+    const liveSession = getLiveTranscriptSession(conversationId);
+    const isLive = liveSession !== null;
+    const meetingSubject = liveSession?.meetingSubject || meetingContext?.subject || 'Meeting';
+
+    // Generate unique meeting ID based on call start time or current time
+    const meetingStartTime = meetingContext?.callStartedAt || (liveSession ? Date.now() : Date.now());
+    const meetingId = generateMeetingId(conversationId, meetingStartTime);
+
+    // Build a clean filename from meeting ID + conversation ID + date
     const safeId = conversationId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
     const now = new Date();
     const dateStr = now.toISOString().slice(0, 10);
-    const filePath = path.join(TRANSCRIPTS_DIR, `transcript_${dateStr}_${safeId}.txt`);
+    const hourStr = String(now.getHours()).padStart(2, '0');
+    const prefix = isLive ? 'live_transcript' : 'transcript';
+    // Include hour to make filename more unique for multiple meetings on same day
+    const filePath = path.join(TRANSCRIPTS_DIR, `${prefix}_${dateStr}_${hourStr}_${safeId}.txt`);
 
     // Calculate approximate meeting duration from last timestamp
     const lastTimestamp = finalEntries[finalEntries.length - 1]?.timestamp || '';
@@ -362,14 +1294,19 @@ function saveTranscriptToFile(conversationId: string) {
       hour: 'numeric', minute: '2-digit'
     });
 
-    // -- Header --
+    // -- Header with meeting context --
     let content = '';
     content += `MEETING TRANSCRIPT\n`;
     content += `==================\n\n`;
-    content += `Title: Meeting\n`;
+    content += `Title: ${meetingSubject}\n`;
     content += `Date: ${formattedDate}\n`;
     content += `Time: ${formattedTime}\n`;
     if (lastTimestamp) content += `Duration: ~${formatVttTimestamp(lastTimestamp)}\n`;
+    content += `Entries: ${finalEntries.length}\n`;
+    content += `Status: ${isLive ? 'LIVE (in progress)' : 'Historical'}\n`;
+    if (liveSession?.callId) content += `Call ID: ${liveSession.callId}\n`;
+    if (meetingContext?.onlineMeetingId) content += `Meeting ID: ${meetingContext.onlineMeetingId}\n`;
+    content += `Conversation: ${conversationId}\n`;
     content += `\n`;
     content += `TRANSCRIPT\n`;
     content += `----------\n\n`;
@@ -397,8 +1334,35 @@ function saveTranscriptToFile(conversationId: string) {
       content += `${entry.text}\n`;
     }
 
-    fs.writeFileSync(filePath, content, 'utf-8');
+    await fsPromises.writeFile(filePath, content, 'utf-8');
     console.log(`[TRANSCRIPT_FILE] Saved ${finalEntries.length} entries to ${filePath}`);
+    
+    // Update cache with the file path
+    if (liveSession?.callId) {
+      const liveCacheKey = `live:${conversationId}:${liveSession.callId}`;
+      const cached = transcriptMetaCache.get(liveCacheKey);
+      if (cached) {
+        cached.filePath = filePath;
+        cached.fetchedAt = Date.now();
+        cached.entryCount = finalEntries.length;
+        cached.charCount = content.length;
+      }
+    }
+    
+    // Add to meeting history (top 5 meetings per conversation)
+    const uniqueSpeakers = new Set(finalEntries.map(e => e.speaker));
+    addMeetingToHistory(conversationId, {
+      meetingId,
+      subject: meetingSubject,
+      startTime: meetingStartTime,
+      endTime: meetingContext?.callEndedAt,
+      transcriptFilePath: filePath,
+      participantCount: uniqueSpeakers.size,
+      entryCount: finalEntries.length,
+      organizerId: meetingContext?.organizerId,
+      joinWebUrl: meetingContext?.joinWebUrl,
+      callId: liveSession?.callId || meetingContext?.callId,
+    });
   } catch (err) {
     console.error(`[TRANSCRIPT_FILE_ERROR] Failed to save transcript:`, err);
   }
@@ -415,9 +1379,13 @@ function findLatestTranscriptFilePath(conversationId: string): string | null {
     }
 
     const safeId = getSafeConversationId(conversationId);
+    // Look for both regular and live transcript files
     const matches = fs
       .readdirSync(TRANSCRIPTS_DIR)
-      .filter((name) => name.startsWith('transcript_') && name.endsWith(`_${safeId}.txt`))
+      .filter((name) => 
+        (name.startsWith('transcript_') || name.startsWith('live_transcript_')) && 
+        name.endsWith(`_${safeId}.txt`)
+      )
       .map((name) => path.join(TRANSCRIPTS_DIR, name));
 
     if (matches.length === 0) {
@@ -448,6 +1416,437 @@ function loadCachedTranscriptText(conversationId: string): string | null {
   }
 }
 
+/**
+ * Get all available transcripts for a conversation from meeting history.
+ * Returns array of { index, subject, startTime, content } sorted by most recent first.
+ */
+function getAllTranscriptsForConversation(conversationId: string): Array<{
+  index: number;
+  subject: string;
+  startTime: number;
+  meetingId: string;
+  content: string;
+}> {
+  const history = getMeetingHistory(conversationId);
+  const results: Array<{
+    index: number;
+    subject: string;
+    startTime: number;
+    meetingId: string;
+    content: string;
+  }> = [];
+  
+  for (let i = 0; i < history.length; i++) {
+    const entry = history[i];
+    const content = loadTranscriptFromHistoryEntry(entry);
+    if (content) {
+      results.push({
+        index: i + 1, // 1-indexed for user display
+        subject: entry.subject,
+        startTime: entry.startTime,
+        meetingId: entry.meetingId,
+        content,
+      });
+    }
+  }
+  
+  console.log(`[MEETING_HISTORY] Found ${results.length} transcripts for conversation ${conversationId}`);
+  return results;
+}
+
+// ============================================================================
+// BACKGROUND TRANSCRIPT WORKER - Fetches and caches last 5 meeting transcripts
+// ============================================================================
+
+interface CachedTranscriptMeta {
+  transcriptId: string;
+  meetingId: string;
+  organizerId: string;
+  createdDateTime: string;
+  filePath: string;
+  fetchedAt: number;
+  charCount: number;
+  meetingSubject?: string;
+  conversationId?: string;
+  callId?: string;
+  entryCount: number;
+  isLive: boolean; // True if this is from an active call
+}
+
+// In-memory cache of fetched transcripts metadata
+const transcriptMetaCache = new Map<string, CachedTranscriptMeta>();
+
+// Track known organizers for background fetching
+const knownOrganizers = new Set<string>();
+
+// --- MEETING CACHE: Store recent meetings per user for fast lookup ---
+interface CachedMeeting {
+  id: string;
+  subject: string;
+  joinWebUrl: string;
+  organizerId: string;
+  start: string;
+  end: string;
+  hasTranscript?: boolean;
+}
+interface UserMeetingCache {
+  meetings: CachedMeeting[];
+  fetchedAt: number;
+}
+const userMeetingCache = new Map<string, UserMeetingCache>();
+const MEETING_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MEETING_CACHE_MAX_PER_USER = 10;
+
+/**
+ * Get cached meetings for a user, or fetch from calendar if stale/missing.
+ */
+async function getCachedUserMeetings(userId: string, forceFresh = false): Promise<CachedMeeting[]> {
+  const cached = userMeetingCache.get(userId);
+  const now = Date.now();
+  
+  if (!forceFresh && cached && (now - cached.fetchedAt) < MEETING_CACHE_TTL_MS) {
+    console.log(`[MEETING_CACHE] Returning ${cached.meetings.length} cached meetings for user ${userId}`);
+    return cached.meetings;
+  }
+  
+  // Fetch from calendar - look back 7 days
+  console.log(`[MEETING_CACHE] Fetching fresh meetings for user ${userId}`);
+  const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+  const today = new Date();
+  
+  const result = await graphApiHelper.getCalendarEvents(
+    userId,
+    weekAgo.toISOString().split('T')[0],
+    today.toISOString().split('T')[0]
+  );
+  
+  if (!result.success || !result.events) {
+    console.log(`[MEETING_CACHE] Failed to fetch calendar: ${result.error}`);
+    return cached?.meetings || [];
+  }
+  
+  // Filter to Teams meetings and map to our format
+  const teamsMeetings: CachedMeeting[] = result.events
+    .filter((evt: any) => evt.onlineMeeting?.joinUrl || evt.onlineMeetingUrl)
+    .slice(0, MEETING_CACHE_MAX_PER_USER)
+    .map((evt: any) => ({
+      id: evt.id,
+      subject: evt.subject || 'Untitled Meeting',
+      joinWebUrl: evt.onlineMeeting?.joinUrl || evt.onlineMeetingUrl,
+      organizerId: userId, // Will be resolved when needed
+      start: evt.start?.dateTime,
+      end: evt.end?.dateTime,
+    }));
+  
+  userMeetingCache.set(userId, { meetings: teamsMeetings, fetchedAt: now });
+  console.log(`[MEETING_CACHE] Cached ${teamsMeetings.length} meetings for user ${userId}`);
+  
+  return teamsMeetings;
+}
+
+/**
+ * Find a meeting from cache by date and/or subject.
+ */
+async function findMeetingFromCache(
+  userId: string,
+  date?: string,
+  subject?: string
+): Promise<CachedMeeting | null> {
+  const meetings = await getCachedUserMeetings(userId);
+  
+  let candidates = meetings;
+  
+  // Filter by date if provided
+  if (date) {
+    candidates = candidates.filter(m => m.start?.startsWith(date));
+  }
+  
+  // Filter by subject if provided
+  if (subject && candidates.length > 1) {
+    const subjectLower = subject.toLowerCase();
+    const matched = candidates.filter(m => 
+      m.subject.toLowerCase().includes(subjectLower)
+    );
+    if (matched.length > 0) {
+      candidates = matched;
+    }
+  }
+  
+  // Return most recent match
+  return candidates.length > 0 ? candidates[0] : null;
+}
+
+// Track active live transcripts (conversationId -> { callId, startTime })
+interface LiveTranscriptSession {
+  callId: string;
+  startTime: number;
+  conversationId: string;
+  meetingSubject?: string;
+  lastUpdateTime: number;
+}
+const liveTranscriptSessions = new Map<string, LiveTranscriptSession>();
+
+// Background worker state
+let transcriptWorkerTimerId: ReturnType<typeof setTimeout> | undefined;
+let transcriptWorkerRunning = false;
+const TRANSCRIPT_WORKER_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const TRANSCRIPT_WORKER_INITIAL_DELAY_MS = 30_000; // 30 seconds after startup
+const MAX_TRANSCRIPTS_TO_CACHE = 5;
+const TRANSCRIPT_CACHE_FRESHNESS_MS = 30 * 60 * 1000; // 30 minutes - skip re-fetch if recent
+
+/**
+ * Check if a conversation has an active live transcript session.
+ */
+function hasActiveLiveTranscript(conversationId: string): boolean {
+  const session = liveTranscriptSessions.get(conversationId);
+  if (!session) return false;
+  // Consider session active if updated within the last 5 minutes
+  return (Date.now() - session.lastUpdateTime) < 5 * 60 * 1000;
+}
+
+/**
+ * Get the active live transcript session for a conversation.
+ */
+function getLiveTranscriptSession(conversationId: string): LiveTranscriptSession | null {
+  const session = liveTranscriptSessions.get(conversationId);
+  if (!session) return null;
+  if ((Date.now() - session.lastUpdateTime) >= 5 * 60 * 1000) {
+    // Session is stale
+    return null;
+  }
+  return session;
+}
+
+/**
+ * Register or update a live transcript session.
+ */
+function registerLiveTranscriptSession(
+  conversationId: string,
+  callId: string,
+  meetingSubject?: string
+) {
+  const existing = liveTranscriptSessions.get(conversationId);
+  const now = Date.now();
+  
+  if (existing && existing.callId === callId) {
+    existing.lastUpdateTime = now;
+    if (meetingSubject) existing.meetingSubject = meetingSubject;
+  } else {
+    liveTranscriptSessions.set(conversationId, {
+      callId,
+      startTime: now,
+      conversationId,
+      meetingSubject,
+      lastUpdateTime: now,
+    });
+    console.log(`[LIVE_SESSION] Registered live transcript session for conversation=${conversationId}, callId=${callId}`);
+  }
+}
+
+/**
+ * End a live transcript session (call ended).
+ */
+function endLiveTranscriptSession(conversationId: string, callId?: string) {
+  const existing = liveTranscriptSessions.get(conversationId);
+  if (existing && (!callId || existing.callId === callId)) {
+    liveTranscriptSessions.delete(conversationId);
+    console.log(`[LIVE_SESSION] Ended live transcript session for conversation=${conversationId}`);
+  }
+}
+
+/**
+ * Register an organizer ID for background transcript fetching.
+ * Called when we discover meeting organizers from calls/chats.
+ */
+function registerOrganizerForBackgroundFetch(organizerId: string) {
+  if (organizerId && !knownOrganizers.has(organizerId)) {
+    knownOrganizers.add(organizerId);
+    console.log(`[TRANSCRIPT_WORKER] Registered organizer for background fetch: ${organizerId}`);
+  }
+}
+
+/**
+ * Save a transcript to file asynchronously (non-blocking).
+ * Returns the file path on success, null on failure.
+ */
+async function saveTranscriptToFileFromVtt(
+  vttContent: string,
+  meetingId: string,
+  transcriptId: string,
+  createdDateTime: string
+): Promise<string | null> {
+  try {
+    await fsPromises.mkdir(TRANSCRIPTS_DIR, { recursive: true });
+
+    // Parse the VTT to get entries
+    const entries = parseVttToEntries(vttContent);
+    if (entries.length === 0) {
+      console.log(`[TRANSCRIPT_WORKER] No entries parsed from VTT for transcript ${transcriptId}`);
+      return null;
+    }
+
+    // Build filename from meeting ID and date
+    const safeMeetingId = meetingId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+    const dateStr = createdDateTime ? createdDateTime.slice(0, 10) : new Date().toISOString().slice(0, 10);
+    const filePath = path.join(TRANSCRIPTS_DIR, `cached_${dateStr}_${safeMeetingId}.txt`);
+
+    // Format the transcript
+    const createdDate = new Date(createdDateTime || Date.now());
+    const formattedDate = createdDate.toLocaleDateString('en-US', {
+      year: 'numeric', month: 'long', day: 'numeric'
+    });
+    const formattedTime = createdDate.toLocaleTimeString('en-US', {
+      hour: 'numeric', minute: '2-digit'
+    });
+
+    let content = '';
+    content += `CACHED MEETING TRANSCRIPT\n`;
+    content += `=========================\n\n`;
+    content += `Meeting ID: ${meetingId}\n`;
+    content += `Transcript ID: ${transcriptId}\n`;
+    content += `Date: ${formattedDate}\n`;
+    content += `Time: ${formattedTime}\n`;
+    content += `Entries: ${entries.length}\n`;
+    content += `\n`;
+    content += `TRANSCRIPT\n`;
+    content += `----------\n\n`;
+
+    let lastSpeaker = '';
+    let lastTime = '';
+    for (const entry of entries) {
+      const time = formatVttTimestamp(entry.timestamp);
+      const speakerChanged = entry.speaker !== lastSpeaker;
+      const timeChanged = time !== lastTime;
+
+      if (speakerChanged || timeChanged) {
+        if (content.length > 0 && !content.endsWith('\n\n')) {
+          content += '\n';
+        }
+        content += `${entry.speaker} (${time})\n`;
+        content += `  - `;
+        lastSpeaker = entry.speaker;
+        lastTime = time;
+      } else {
+        content += `  - `;
+      }
+      content += `${entry.text}\n`;
+    }
+
+    await fsPromises.writeFile(filePath, content, 'utf-8');
+    console.log(`[TRANSCRIPT_WORKER] Cached transcript to ${filePath} (${entries.length} entries, ${content.length} chars)`);
+    return filePath;
+  } catch (err) {
+    console.error(`[TRANSCRIPT_WORKER] Failed to save cached transcript:`, err);
+    return null;
+  }
+}
+
+/**
+ * Background worker: Fetch and cache the last N transcripts for known organizers.
+ * NOTE: This worker uses /users/{userId}/onlineMeetings/getAllTranscripts which requires
+ * Application Access Policy. Since we only have RSC permissions, this worker is disabled.
+ * Live transcripts still work via /chats/{chatId}/transcripts endpoint.
+ * 
+ * To enable: Configure Application Access Policy in Teams Admin PowerShell:
+ *   New-CsApplicationAccessPolicy -Identity "MissaPolicy" -AppIds "678e7c4e-9b4b-402b-a6c3-f6892cb50674"
+ *   Grant-CsApplicationAccessPolicy -PolicyName "MissaPolicy" -Global
+ */
+async function runTranscriptBackgroundWorker(): Promise<void> {
+  console.log(`[TRANSCRIPT_WORKER] Background worker disabled - requires Application Access Policy`);
+  console.log(`[TRANSCRIPT_WORKER] Live transcripts work via RSC (/chats/{chatId}/transcripts)`);
+  // Worker is disabled - live transcript polling via /chats endpoint still works
+}
+
+/**
+ * Schedule the next background worker run.
+ */
+function scheduleTranscriptWorker(delayMs: number = TRANSCRIPT_WORKER_INTERVAL_MS) {
+  if (transcriptWorkerTimerId) {
+    clearTimeout(transcriptWorkerTimerId);
+  }
+
+  transcriptWorkerTimerId = setTimeout(() => {
+    void runTranscriptBackgroundWorker().finally(() => {
+      // Re-schedule after completion
+      scheduleTranscriptWorker();
+    });
+  }, delayMs);
+
+  console.log(`[TRANSCRIPT_WORKER] Next run scheduled in ${Math.round(delayMs / 1000)}s`);
+}
+
+/**
+ * Start the background transcript worker.
+ * Called once at app startup.
+ */
+function startTranscriptBackgroundWorker() {
+  console.log(`[TRANSCRIPT_WORKER] Initializing background worker (first run in ${TRANSCRIPT_WORKER_INITIAL_DELAY_MS / 1000}s)`);
+  
+  // Load all organizers from the meeting context store on startup
+  try {
+    const store = readMeetingContextStore();
+    const organizerIds = new Set<string>();
+    for (const entry of Object.values(store)) {
+      if (entry.organizerId) {
+        organizerIds.add(entry.organizerId);
+      }
+    }
+    for (const organizerId of organizerIds) {
+      knownOrganizers.add(organizerId);
+    }
+    console.log(`[TRANSCRIPT_WORKER] Loaded ${organizerIds.size} organizers from meeting context store`);
+  } catch (err) {
+    console.warn(`[TRANSCRIPT_WORKER] Failed to load organizers from meeting context:`, err);
+  }
+  
+  scheduleTranscriptWorker(TRANSCRIPT_WORKER_INITIAL_DELAY_MS);
+}
+
+/**
+ * Get cached transcript metadata (for quick lookups).
+ */
+function getCachedTranscriptMeta(meetingId: string): CachedTranscriptMeta[] {
+  const results: CachedTranscriptMeta[] = [];
+  for (const [key, meta] of transcriptMetaCache) {
+    if (key.startsWith(meetingId + ':') || meta.meetingId === meetingId) {
+      results.push(meta);
+    }
+  }
+  return results;
+}
+
+/**
+ * Get all cached transcript metadata sorted by date (newest first).
+ */
+function getAllCachedTranscriptMeta(): CachedTranscriptMeta[] {
+  return Array.from(transcriptMetaCache.values())
+    .sort((a, b) => new Date(b.createdDateTime).getTime() - new Date(a.createdDateTime).getTime());
+}
+
+/**
+ * Load a cached transcript file content by meeting ID.
+ */
+async function loadCachedTranscriptByMeetingId(meetingId: string): Promise<string | null> {
+  const metas = getCachedTranscriptMeta(meetingId);
+  if (metas.length === 0) return null;
+
+  // Use the most recent
+  const latest = metas.sort((a, b) => new Date(b.createdDateTime).getTime() - new Date(a.createdDateTime).getTime())[0];
+
+  try {
+    const content = await fsPromises.readFile(latest.filePath, 'utf-8');
+    console.log(`[TRANSCRIPT_CACHE] Loaded cached transcript for meeting ${meetingId} from ${latest.filePath}`);
+    return content;
+  } catch (err) {
+    console.warn(`[TRANSCRIPT_CACHE] Failed to load cached file ${latest.filePath}:`, err);
+    return null;
+  }
+}
+
+// ============================================================================
+// END BACKGROUND TRANSCRIPT WORKER
+// ============================================================================
+
 function readMeetingContextStore(): Record<string, MeetingContextEntry> {
   try {
     if (!fs.existsSync(MEETING_CONTEXT_FILE)) {
@@ -465,11 +1864,8 @@ function readMeetingContextStore(): Record<string, MeetingContextEntry> {
 
 function writeMeetingContextStore(store: Record<string, MeetingContextEntry>) {
   try {
-    console.log(`[CACHE_DEBUG] writeMeetingContextStore starting, dir: ${TRANSCRIPTS_DIR}`);
-    if (!fs.existsSync(TRANSCRIPTS_DIR)) {
-      console.log(`[CACHE_DEBUG] Creating directory: ${TRANSCRIPTS_DIR}`);
-      fs.mkdirSync(TRANSCRIPTS_DIR, { recursive: true });
-    }
+    console.log(`[CACHE_DEBUG] writeMeetingContextStore starting, dir: ${ADMIN_DATA_DIR}`);
+    ensureAdminDataDir();
     console.log(`[CACHE_DEBUG] Writing to: ${MEETING_CONTEXT_FILE}`);
     fs.writeFileSync(MEETING_CONTEXT_FILE, JSON.stringify(store, null, 2), 'utf-8');
     console.log(`[CACHE_DEBUG] Write successful`);
@@ -479,12 +1875,125 @@ function writeMeetingContextStore(store: Record<string, MeetingContextEntry>) {
   }
 }
 
+// ============================================================================
+// MEETING HISTORY - Track top 5 most recent meetings per conversation
+// ============================================================================
+
+function readMeetingHistoryStore(): Record<string, MeetingHistoryEntry[]> {
+  try {
+    if (!fs.existsSync(MEETING_HISTORY_FILE)) {
+      return {};
+    }
+    const raw = fs.readFileSync(MEETING_HISTORY_FILE, 'utf-8').trim();
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, MeetingHistoryEntry[]>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    console.warn(`[MEETING_HISTORY] Failed to read history store:`, error);
+    return {};
+  }
+}
+
+function writeMeetingHistoryStore(store: Record<string, MeetingHistoryEntry[]>) {
+  try {
+    ensureAdminDataDir();
+    fs.writeFileSync(MEETING_HISTORY_FILE, JSON.stringify(store, null, 2), 'utf-8');
+  } catch (error) {
+    console.warn(`[MEETING_HISTORY] Failed to write history store (non-fatal):`, error);
+  }
+}
+
+function loadMeetingHistoryIntoMemory() {
+  const store = readMeetingHistoryStore();
+  for (const [conversationId, entries] of Object.entries(store)) {
+    meetingHistoryMap.set(conversationId, entries);
+  }
+  console.log(`[MEETING_HISTORY] Loaded history for ${Object.keys(store).length} conversations`);
+}
+
+function getMeetingHistory(conversationId: string): MeetingHistoryEntry[] {
+  // Check memory first
+  const memoryEntries = meetingHistoryMap.get(conversationId);
+  if (memoryEntries) {
+    return memoryEntries;
+  }
+  
+  // Fallback to disk
+  const store = readMeetingHistoryStore();
+  const diskEntries = store[conversationId] || [];
+  if (diskEntries.length > 0) {
+    meetingHistoryMap.set(conversationId, diskEntries);
+  }
+  return diskEntries;
+}
+
+function addMeetingToHistory(
+  conversationId: string,
+  entry: MeetingHistoryEntry
+): void {
+  // Get existing history
+  let history = meetingHistoryMap.get(conversationId) || [];
+  
+  // Check if this meeting already exists (by meetingId)
+  const existingIndex = history.findIndex(h => h.meetingId === entry.meetingId);
+  if (existingIndex >= 0) {
+    // Update existing entry
+    history[existingIndex] = { ...history[existingIndex], ...entry };
+  } else {
+    // Add new entry at the beginning (most recent first)
+    history.unshift(entry);
+    
+    // Keep only top MAX_MEETING_HISTORY
+    if (history.length > MAX_MEETING_HISTORY) {
+      history = history.slice(0, MAX_MEETING_HISTORY);
+    }
+  }
+  
+  // Update memory
+  meetingHistoryMap.set(conversationId, history);
+  
+  // Persist to disk
+  const store = readMeetingHistoryStore();
+  store[conversationId] = history;
+  writeMeetingHistoryStore(store);
+  
+  console.log(`[MEETING_HISTORY] Updated history for ${conversationId}: ${history.length} meetings stored`);
+}
+
+function generateMeetingId(conversationId: string, startTime?: number): string {
+  // Generate a unique meeting ID based on conversation and time
+  const timestamp = startTime || Date.now();
+  const safeConvId = conversationId.replace(/[^a-zA-Z0-9]/g, '').slice(-10);
+  return `${safeConvId}_${timestamp}`;
+}
+
+function getLatestMeetingFromHistory(conversationId: string): MeetingHistoryEntry | null {
+  const history = getMeetingHistory(conversationId);
+  return history.length > 0 ? history[0] : null;
+}
+
+function loadTranscriptFromHistoryEntry(entry: MeetingHistoryEntry): string | null {
+  if (!entry.transcriptFilePath) return null;
+  try {
+    if (!fs.existsSync(entry.transcriptFilePath)) {
+      console.warn(`[MEETING_HISTORY] Transcript file not found: ${entry.transcriptFilePath}`);
+      return null;
+    }
+    return fs.readFileSync(entry.transcriptFilePath, 'utf-8');
+  } catch (error) {
+    console.warn(`[MEETING_HISTORY] Failed to load transcript from ${entry.transcriptFilePath}:`, error);
+    return null;
+  }
+}
+
 function cacheMeetingContext(
   conversationId: string,
   organizerId: string,
   joinWebUrl: string,
   subject?: string,
-  callWindow?: { startedAt?: number; endedAt?: number }
+  callWindow?: { startedAt?: number; endedAt?: number },
+  callId?: string,
+  onlineMeetingId?: string
 ) {
   console.log(`[CACHE_DEBUG] cacheMeetingContext called for ${conversationId}`);
   try {
@@ -497,8 +2006,15 @@ function cacheMeetingContext(
       updatedAt: Date.now(),
       callStartedAt: callWindow?.startedAt || existing?.callStartedAt,
       callEndedAt: callWindow?.endedAt || existing?.callEndedAt,
+      callId: callId || existing?.callId,
+      onlineMeetingId: onlineMeetingId || existing?.onlineMeetingId,
     };
     console.log(`[CACHE_DEBUG] Entry created`);
+
+    // Register the organizer for background transcript fetching
+    if (organizerId) {
+      registerOrganizerForBackgroundFetch(organizerId);
+    }
 
     meetingContextMap.set(conversationId, entry);
     console.log(`[CACHE_DEBUG] Memory map updated`);
@@ -522,6 +2038,8 @@ function getCachedMeetingContext(conversationId: string): MeetingContextEntry | 
   const diskEntry = store[conversationId];
   if (diskEntry?.organizerId && diskEntry?.joinWebUrl) {
     meetingContextMap.set(conversationId, diskEntry);
+    // Register the organizer for background transcript fetching
+    registerOrganizerForBackgroundFetch(diskEntry.organizerId);
     return diskEntry;
   }
   return null;
@@ -533,7 +2051,15 @@ async function resolveMeetingInfoForConversation(conversationId: string) {
   console.log(`[RESOLVE_MEETING] getOnlineMeetingFromChat returned: organizer=${graphInfo?.organizer?.id}, joinWebUrl=${graphInfo?.joinWebUrl ? 'yes' : 'no'}`);
   if (graphInfo?.organizer?.id && graphInfo?.joinWebUrl) {
     try {
-      cacheMeetingContext(conversationId, graphInfo.organizer.id, graphInfo.joinWebUrl, graphInfo.subject);
+      cacheMeetingContext(
+        conversationId,
+        graphInfo.organizer.id,
+        graphInfo.joinWebUrl,
+        graphInfo.subject,
+        undefined,
+        undefined,
+        (graphInfo as any).onlineMeetingId
+      );
       console.log(`[RESOLVE_MEETING] Cached and returning graphInfo`);
     } catch (cacheErr) {
       console.error(`[RESOLVE_MEETING] Error caching meeting context:`, cacheErr);
@@ -547,6 +2073,7 @@ async function resolveMeetingInfoForConversation(conversationId: string) {
     return {
       organizer: { id: cached.organizerId },
       joinWebUrl: cached.joinWebUrl,
+      onlineMeetingId: cached.onlineMeetingId,
       subject: cached.subject,
     };
   }
@@ -561,9 +2088,10 @@ function getTranscriptWindowForConversation(conversationId: string): { min?: num
   }
 
   // Use the conversation's own call window when available to avoid pulling transcripts
-  // from other occurrences in recurring meetings.
+  // from other occurrences in recurring meetings. Subtract 30 minutes from the start to
+  // handle cases where transcription began before the bot joined the call.
   return {
-    min: cached.callStartedAt,
+    min: cached.callStartedAt - (30 * 60 * 1000),
     max: cached.callEndedAt,
   };
 }
@@ -577,7 +2105,158 @@ function transcriptEntriesToPlainText(entries: TranscriptEntry[]): string {
     .join('\n');
 }
 
-async function generateKeyMeetingInsights(transcriptText: string, meetingTitle: string): Promise<string> {
+/**
+ * Extract specific parts of transcript based on speaker, topic, or time range.
+ * Used when user requests like "what John said", "first 10 minutes", "budget discussion".
+ */
+async function extractSpecificTranscriptContent(
+  entries: TranscriptEntry[],
+  specificRequest: string,
+  tracking?: { userId: string; displayName: string; meetingId: string }
+): Promise<{ filtered: TranscriptEntry[]; description: string }> {
+  const finalEntries = entries.filter(e => e.isFinal);
+  if (finalEntries.length === 0) {
+    return { filtered: [], description: 'No transcript entries available' };
+  }
+
+  // Try speaker-based filtering first (fast path)
+  const speakerMatch = specificRequest.match(/what\s+(\w+)\s+said|(\w+)'s\s+(contributions?|comments?|points?)|only\s+(\w+)/i);
+  if (speakerMatch) {
+    const speakerName = (speakerMatch[1] || speakerMatch[2] || speakerMatch[4] || '').toLowerCase();
+    if (speakerName) {
+      const filtered = finalEntries.filter(e => 
+        e.speaker.toLowerCase().includes(speakerName) ||
+        e.speaker.split(' ')[0].toLowerCase() === speakerName
+      );
+      if (filtered.length > 0) {
+        return { 
+          filtered, 
+          description: `${filtered.length} entries from ${filtered[0].speaker}` 
+        };
+      }
+    }
+  }
+
+  // Try time-based filtering
+  const timeMatch = specificRequest.match(/(first|last)\s+(\d+)\s+(minutes?|entries)/i);
+  if (timeMatch) {
+    const position = timeMatch[1].toLowerCase();
+    const count = parseInt(timeMatch[2], 10);
+    const unit = timeMatch[3].toLowerCase();
+    
+    if (unit.startsWith('entr')) {
+      // Entry count based
+      if (position === 'first') {
+        return { 
+          filtered: finalEntries.slice(0, count), 
+          description: `First ${count} transcript entries` 
+        };
+      } else {
+        return { 
+          filtered: finalEntries.slice(-count), 
+          description: `Last ${count} transcript entries` 
+        };
+      }
+    } else {
+      // Time-based (approximate - use entry timestamps)
+      const minutesMs = count * 60 * 1000;
+      if (finalEntries.length > 0) {
+        // Parse first timestamp to get start time
+        const parseTime = (ts: string) => {
+          const match = ts.match(/(\d{2}):(\d{2}):(\d{2})/);
+          if (!match) return 0;
+          return parseInt(match[1]) * 3600 + parseInt(match[2]) * 60 + parseInt(match[3]);
+        };
+        
+        const startSec = parseTime(finalEntries[0].timestamp);
+        const endSec = parseTime(finalEntries[finalEntries.length - 1].timestamp);
+        
+        if (position === 'first') {
+          const cutoffSec = startSec + (count * 60);
+          const filtered = finalEntries.filter(e => parseTime(e.timestamp) <= cutoffSec);
+          return { 
+            filtered, 
+            description: `First ${count} minutes (${filtered.length} entries)` 
+          };
+        } else {
+          const cutoffSec = endSec - (count * 60);
+          const filtered = finalEntries.filter(e => parseTime(e.timestamp) >= cutoffSec);
+          return { 
+            filtered, 
+            description: `Last ${count} minutes (${filtered.length} entries)` 
+          };
+        }
+      }
+    }
+  }
+
+  // Use LLM for topic-based or complex extraction
+  try {
+    const transcriptPreview = finalEntries.slice(0, 100).map(e => 
+      `[${e.speaker}]: ${e.text}`
+    ).join('\n');
+    
+    const extractPrompt = new ChatPrompt({
+      messages: [
+        {
+          role: 'user',
+          content:
+            `User wants specific content: "${specificRequest}"\n\n` +
+            `Analyze this transcript and identify which entries are relevant:\n${transcriptPreview}\n\n` +
+            `Return JSON with:\n` +
+            `1. "relevantSpeakers": array of speaker names whose content matches the request\n` +
+            `2. "keywords": array of keywords to search for in transcript text\n` +
+            `3. "description": brief description of what was found\n\n` +
+            `Example: {"relevantSpeakers": ["John Smith"], "keywords": ["budget", "cost", "spending"], "description": "Budget discussion by John"}`
+        }
+      ],
+      instructions: 'You help identify relevant transcript sections. Return valid JSON only.',
+      model: new OpenAIChatModel({
+        model: config.azureOpenAIDeploymentName,
+        apiKey: config.azureOpenAIKey,
+        endpoint: config.azureOpenAIEndpoint,
+        apiVersion: '2024-10-21',
+      }),
+    });
+
+    const response = await sendPromptWithTracking(extractPrompt, '', tracking ? {
+      ...tracking,
+      estimatedInputText: `${specificRequest}\n${transcriptPreview.substring(0, 500)}`,
+    } : undefined);
+    
+    const jsonStr = (response.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const parsed = JSON.parse(jsonStr);
+    
+    // Filter by speakers and/or keywords
+    const relevantSpeakers = (parsed.relevantSpeakers || []).map((s: string) => s.toLowerCase());
+    const keywords = (parsed.keywords || []).map((k: string) => k.toLowerCase());
+    
+    const filtered = finalEntries.filter(e => {
+      const speakerMatch = relevantSpeakers.length === 0 || 
+        relevantSpeakers.some((s: string) => e.speaker.toLowerCase().includes(s));
+      const keywordMatch = keywords.length === 0 ||
+        keywords.some((k: string) => e.text.toLowerCase().includes(k));
+      return speakerMatch && keywordMatch;
+    });
+    
+    return {
+      filtered: filtered.length > 0 ? filtered : finalEntries.slice(0, 50),
+      description: parsed.description || `Filtered content for "${specificRequest}"`
+    };
+  } catch (error) {
+    console.warn(`[TRANSCRIPT_EXTRACT] LLM extraction failed, returning full transcript:`, error);
+    return { 
+      filtered: finalEntries, 
+      description: 'Full transcript (specific extraction failed)' 
+    };
+  }
+}
+
+async function generateKeyMeetingInsights(
+  transcriptText: string,
+  meetingTitle: string,
+  tracking?: { userId: string; displayName: string; meetingId: string }
+): Promise<string> {
   const insightsPrompt = new ChatPrompt({
     messages: [
       {
@@ -603,7 +2282,10 @@ async function generateKeyMeetingInsights(transcriptText: string, meetingTitle: 
     }),
   });
 
-  const response = await insightsPrompt.send('');
+  const response = await sendPromptWithTracking(insightsPrompt, '', tracking ? {
+    ...tracking,
+    estimatedInputText: `${meetingTitle}\n${transcriptText}`,
+  } : undefined);
   return response.content || 'I could not generate insights from the transcript.';
 }
 
@@ -614,7 +2296,8 @@ async function generateKeyMeetingInsights(transcriptText: string, meetingTitle: 
 async function generateMeetingSummary(
   entries: TranscriptEntry[],
   meetingTitle: string,
-  speaker: string
+  speaker: string,
+  tracking?: { userId: string; displayName: string; meetingId: string }
 ): Promise<string> {
   if (entries.length === 0) return 'No transcript data available for summary.';
 
@@ -652,7 +2335,10 @@ async function generateMeetingSummary(
   });
 
   try {
-    const response = await prompt.send('');
+    const response = await sendPromptWithTracking(prompt, '', tracking ? {
+      ...tracking,
+      estimatedInputText: `${meetingTitle}\n${speaker}\n${transcriptText}`,
+    } : undefined);
     return response.content || 'Could not generate summary.';
   } catch (error) {
     console.error(`[SUMMARY_ERROR]`, error);
@@ -665,7 +2351,8 @@ async function generateFormattedSummaryHtml(
   meetingTitle: string,
   speaker: string,
   members: string[],
-  meetingDate?: Date | string // Optional: actual meeting date for past meetings
+  meetingDate?: Date | string, // Optional: actual meeting date for past meetings
+  tracking?: { userId: string; displayName: string; meetingId: string }
 ): Promise<string> {
   try {
     const instructionsPath = path.join(__dirname, 'summaryFormatInstructions.txt');
@@ -707,7 +2394,10 @@ async function generateFormattedSummaryHtml(
       }),
     });
 
-    const response = await prompt.send('');
+    const response = await sendPromptWithTracking(prompt, '', tracking ? {
+      ...tracking,
+      estimatedInputText: `${meetingTitle}\n${speaker}\n${members.join(', ')}\n${transcriptText}`,
+    } : undefined);
     return response.content || 'Could not generate meeting summary. Please try again.';
   } catch (error) {
     console.error(`[SUMMARY_FORMAT_ERROR]`, error);
@@ -719,7 +2409,8 @@ async function generateMinutesHtml(
   entries: TranscriptEntry[],
   meetingTitle: string,
   members: string[],
-  meetingDate?: Date | string // Optional: actual meeting date for past meetings
+  meetingDate?: Date | string, // Optional: actual meeting date for past meetings
+  tracking?: { userId: string; displayName: string; meetingId: string }
 ): Promise<string> {
   if (entries.length === 0) return 'No transcript data available for minutes.';
 
@@ -762,7 +2453,10 @@ async function generateMinutesHtml(
       }),
     });
 
-    const response = await prompt.send('');
+    const response = await sendPromptWithTracking(prompt, '', tracking ? {
+      ...tracking,
+      estimatedInputText: `${meetingTitle}\n${members.join(', ')}\n${transcriptText}`,
+    } : undefined);
     return response.content || 'Could not generate meeting minutes. Please try again.';
   } catch (error) {
     console.error(`[MINUTES_FORMAT_ERROR]`, error);
@@ -778,11 +2472,19 @@ type IntentLabel =
   | 'meeting_overview'
   | 'insights'
   | 'meeting_question'
+  | 'check_inbox'
+  | 'reply_email'
   | 'send_email'
+  | 'profile_details'
   | 'check_calendar'
   | 'general_chat';
 
-async function classifyIntent(message: string, isMeetingConversation: boolean): Promise<IntentLabel> {
+async function classifyIntent(
+  message: string,
+  isMeetingConversation: boolean,
+  tracking?: { userId: string; displayName: string; meetingId: string },
+  recentContext?: string
+): Promise<IntentLabel> {
   const text = (message || '').trim();
   if (!text) return 'general_chat';
 
@@ -796,6 +2498,7 @@ async function classifyIntent(message: string, isMeetingConversation: boolean): 
         role: 'user',
         content:
           `You are a smart intent classifier for a Teams meeting assistant bot. Analyze the user's message and determine their intent.\n\n` +
+          (recentContext ? `**Recent conversation (for follow-up resolution):**\n${recentContext}\n\n` : '') +
           `User message: "${text}"\n` +
           `Is this a meeting conversation: ${isMeetingConversation ? 'Yes' : 'No'}\n` +
           `${dateContext}\n\n` +
@@ -807,21 +2510,30 @@ async function classifyIntent(message: string, isMeetingConversation: boolean): 
           `5. **meeting_overview** - User asks about a specific meeting's details (e.g., "tell me about the meeting", "what happened in my last meeting")\n` +
           `6. **insights** - User wants key insights/highlights (e.g., "key takeaways", "main points", "highlights")\n` +
           `7. **meeting_question** - User asks a specific question about meeting content (e.g., "what did John say about X", "when did we discuss Y")\n` +
-          `8. **send_email** - User wants to send/email something. Includes ANY of these:\n` +
+          `8. **check_inbox** - User wants the bot to review mailbox content (e.g., "check my inbox", "show urgent emails", "what did Marin send me")\n` +
+          `9. **reply_email** - User wants a reply drafted based on an email or email thread (e.g., "draft a reply to Marin", "respond after analyzing that email conversation")\n` +
+          `10. **send_email** - User wants to send/email something. Includes ANY of these:\n` +
           `   - Sending previous content: "send to my inbox", "send it to my email", "email this to me", "email that"\n` +
           `   - Sending last output: "send the last summary/transcript/minutes to email"\n` +
           `   - Forward requests: "forward this", "send this"\n` +
           `   - Any mention of inbox/email as destination without asking for NEW content first\n` +
-          `9. **check_calendar** - User asks about their schedule, meetings, availability, or calendar\n` +
-          `10. **general_chat** - Casual conversation, greetings, or anything that doesn't fit above\n\n` +
+          `11. **profile_details** - User asks for their own profile details like "my email", "what is my email address", "my full details", "my profile"\n` +
+          `12. **check_calendar** - User asks about their schedule, meetings, availability, or calendar\n` +
+          `13. **general_chat** - Casual conversation, greetings, or anything that doesn't fit above\n\n` +
           `**Important rules:**\n` +
+          `- "check my inbox", "urgent email", "what did Marin send me" = check_inbox\n` +
+          `- "reply to Marin", "draft a response", "respond after analyzing that email" = reply_email\n` +
+          `- Follow-up pronouns like "respond to him/her", "reply to them" = reply_email if prior context shows an email/inbox result\n` +
+          `- Corrections like "I meant X not Y", "not X, I meant Y" = re-use prior context intent (reply_email if replying, check_inbox if browsing inbox)\n` +
           `- If user asks to EMAIL/SEND something without asking to CREATE new content first = send_email\n` +
           `- "send to my inbox", "email me", "send it", "forward this" = send_email\n` +
           `- "send the last summary to email" = send_email (not summarize!)\n` +
           `- "summarize AND email" = summarize (creating new content is primary)\n` +
+          `- "my email", "what is my email", "my details", "my profile" = profile_details\n` +
           `- Questions about calendar/schedule/availability = check_calendar\n` +
           `- Greetings = general_chat\n\n` +
           `Respond with JSON only: {"intent": "<one_intent_label>", "confidence": "high|medium|low", "reasoning": "<brief explanation>"}`,
+
       },
     ],
     instructions: 'You are a precise intent classifier. Think carefully about what the user REALLY wants. Output valid JSON with intent, confidence, and reasoning fields.',
@@ -834,7 +2546,10 @@ async function classifyIntent(message: string, isMeetingConversation: boolean): 
   });
 
   try {
-    const response = await prompt.send('');
+    const response = await sendPromptWithTracking(prompt, '', tracking ? {
+      ...tracking,
+      estimatedInputText: message,
+    } : undefined);
     const raw = (response.content || '').trim();
     // Handle potential markdown code blocks
     const jsonStr = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -853,7 +2568,10 @@ async function classifyIntent(message: string, isMeetingConversation: boolean): 
       'meeting_overview',
       'insights',
       'meeting_question',
+      'check_inbox',
+      'reply_email',
       'send_email',
+      'profile_details',
       'check_calendar',
       'general_chat',
     ];
@@ -866,144 +2584,6 @@ async function classifyIntent(message: string, isMeetingConversation: boolean): 
   }
 
   return 'general_chat';
-}
-
-/**
- * LLM-based analysis of email requests to intelligently determine:
- * - Is this a contextual reference (send previously shown content)?
- * - What type of content to send?
- * - Who is the recipient?
- */
-interface EmailRequestAnalysis {
-  isContextualReference: boolean;  // true if referring to previous bot response
-  contentType: 'summary' | 'minutes' | 'transcript' | 'previous' | 'custom' | null;
-  recipientType: 'self' | 'other' | null;  // 'self' = user's own email, 'other' = someone else
-  recipientName: string | null;  // name if sending to someone else
-  recipientEmail: string | null; // explicit email if provided
-  reasoning: string;
-}
-
-async function analyzeEmailRequest(message: string, hasRecentBotResponse: boolean, lastContentType?: string): Promise<EmailRequestAnalysis> {
-  const prompt = new ChatPrompt({
-    messages: [
-      {
-        role: 'user',
-        content:
-          `You are an intelligent email request analyzer for a meeting assistant bot. Your job is to understand EXACTLY what the user wants when they ask to send/email something.\n\n` +
-          `=== CONTEXT ===\n` +
-          `User's request: "${message}"\n` +
-          `Bot just showed content: ${hasRecentBotResponse ? 'YES' : 'NO'}\n` +
-          `${hasRecentBotResponse && lastContentType ? `Type of content just shown: "${lastContentType}"` : 'No recent content shown'}\n\n` +
-          `=== YOUR TASK ===\n` +
-          `Analyze the request and determine:\n\n` +
-          `1. **isContextualReference** (true/false): Is the user asking to send content that was ALREADY shown to them?\n` +
-          `   Think about it: If the bot just showed them something and they say "send that to email" or "send the [X] to my inbox" - they want what was ALREADY displayed, not new content.\n\n` +
-          `   Examples where isContextualReference = TRUE:\n` +
-          `   - "send it to my inbox" (referring to what was just shown)\n` +
-          `   - "email that to me" (that = previous content)\n` +
-          `   - "send to my email" (wants previous content sent)\n` +
-          `   - "send the transcript to my email" (when transcript was just shown)\n` +
-          `   - "send the summary to email" (when summary was just shown)\n` +
-          `   - "forward this" / "email this"\n` +
-          `   - "send me a copy" / "email me what you showed"\n` +
-          `   - Any request to send/email when there's recent content and no explicit "create new" language\n\n` +
-          `   Examples where isContextualReference = FALSE:\n` +
-          `   - "summarize the meeting and send to email" (CREATE new summary first)\n` +
-          `   - "create minutes and email them" (CREATE new minutes first)\n` +
-          `   - "generate a transcript and send it" (CREATE new transcript first)\n` +
-          `   - "compose an email to Bob about the project" (new email composition)\n\n` +
-          `2. **contentType**: What content to send?\n` +
-          `   - "previous" = They want to send what was ALREADY shown (use when isContextualReference=true)\n` +
-          `   - "summary" = They want to CREATE a NEW summary first, then send it\n` +
-          `   - "minutes" = They want to CREATE NEW minutes first, then send them\n` +
-          `   - "transcript" = They want to CREATE a NEW transcript first, then send it\n` +
-          `   - "custom" = They want to compose a completely new email (not meeting content)\n\n` +
-          `3. **recipientType**: Who receives the email?\n` +
-          `   - "self" = User's own email (my inbox, my email, to me, email me, send me, or no specific recipient)\n` +
-          `   - "other" = Someone else (send to John, email Sarah, forward to the team)\n\n` +
-          `4. **recipientName**: The name of the recipient if sending to someone else (null if self)\n\n` +
-          `5. **recipientEmail**: Extract any explicit email address mentioned (null if none)\n\n` +
-          `=== CRITICAL DECISION LOGIC ===\n` +
-          `- If hasRecentBotResponse=YES and user says "send the [content type] to email" where [content type] matches what was shown → isContextualReference=TRUE, contentType="previous"\n` +
-          `- If hasRecentBotResponse=YES and user just says "send to my inbox/email" without "create/make/generate" → isContextualReference=TRUE, contentType="previous"\n` +
-          `- ONLY set isContextualReference=FALSE if they explicitly want NEW content created first\n\n` +
-          `Respond with ONLY valid JSON: {"isContextualReference": boolean, "contentType": "previous"|"summary"|"minutes"|"transcript"|"custom"|null, "recipientType": "self"|"other"|null, "recipientName": string|null, "recipientEmail": string|null, "reasoning": "your brief explanation"}`,
-      },
-    ],
-    instructions: 'You are an intelligent assistant that understands context and user intent. Analyze carefully and output valid JSON only.',
-    model: new OpenAIChatModel({
-      model: config.azureOpenAIDeploymentName,
-      apiKey: config.azureOpenAIKey,
-      endpoint: config.azureOpenAIEndpoint,
-      apiVersion: '2024-10-21',
-    }),
-  });
-
-  try {
-    const response = await prompt.send('');
-    const raw = (response.content || '').trim();
-    const jsonStr = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const parsed = JSON.parse(jsonStr);
-    
-    console.log(`[EMAIL_ANALYSIS] LLM result: ${JSON.stringify(parsed)}`);
-    
-    return {
-      isContextualReference: !!parsed.isContextualReference,
-      contentType: parsed.contentType || null,
-      recipientType: parsed.recipientType || null,
-      recipientName: parsed.recipientName || null,
-      recipientEmail: parsed.recipientEmail || null,
-      reasoning: parsed.reasoning || '',
-    };
-  } catch (error) {
-    console.warn(`[EMAIL_ANALYSIS] LLM analysis failed, will retry with simpler prompt:`, error);
-    
-    // Retry with a simpler prompt
-    try {
-      const simplePrompt = new ChatPrompt({
-        messages: [
-          {
-            role: 'user',
-            content: `Quick analysis: "${message}"\nRecent content shown: ${hasRecentBotResponse ? `YES (type: ${lastContentType})` : 'NO'}\n\nIs user referring to already-shown content? Answer JSON: {"isContextualReference": true/false, "contentType": "previous" if referring to shown content else null, "recipientType": "self" if sending to themselves else "other", "recipientName": null, "recipientEmail": null, "reasoning": "brief"}`
-          }
-        ],
-        instructions: 'Output valid JSON only.',
-        model: new OpenAIChatModel({
-          model: config.azureOpenAIDeploymentName,
-          apiKey: config.azureOpenAIKey,
-          endpoint: config.azureOpenAIEndpoint,
-          apiVersion: '2024-10-21',
-        }),
-      });
-      
-      const retryResponse = await simplePrompt.send('');
-      const retryRaw = (retryResponse.content || '').trim();
-      const retryJson = retryRaw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      const retryParsed = JSON.parse(retryJson);
-      
-      console.log(`[EMAIL_ANALYSIS] Retry LLM result: ${JSON.stringify(retryParsed)}`);
-      
-      return {
-        isContextualReference: !!retryParsed.isContextualReference,
-        contentType: retryParsed.contentType || null,
-        recipientType: retryParsed.recipientType || null,
-        recipientName: retryParsed.recipientName || null,
-        recipientEmail: retryParsed.recipientEmail || null,
-        reasoning: retryParsed.reasoning || 'Retry analysis',
-      };
-    } catch (retryError) {
-      console.error(`[EMAIL_ANALYSIS] Both LLM attempts failed:`, retryError);
-      // Last resort: assume contextual if there's recent content
-      return {
-        isContextualReference: hasRecentBotResponse,
-        contentType: hasRecentBotResponse ? 'previous' : null,
-        recipientType: 'self',
-        recipientName: null,
-        recipientEmail: null,
-        reasoning: 'Fallback: assuming contextual reference since recent content exists',
-      };
-    }
-  }
 }
 
 function buildConversationContext(sharedMessages: any[], maxItems = 120): string {
@@ -1021,8 +2601,104 @@ function buildConversationContext(sharedMessages: any[], maxItems = 120): string
 }
 
 async function getTranscriptTextForConversation(conversationId: string): Promise<string> {
-  // ALWAYS try Graph first for the most up-to-date transcript
-  console.log(`[TRANSCRIPT_FETCH] Trying Graph API first for conversation ${conversationId}`);
+  return (await getTranscriptWithContext(conversationId)).text;
+}
+
+/**
+ * Transcript source type - helps differentiate live vs historical
+ */
+type TranscriptSource = 'live' | 'graph_fresh' | 'memory_cache' | 'file_cache' | 'background_cache' | 'none';
+
+/**
+ * Get transcript text with full context about its source
+ */
+async function getTranscriptWithContext(conversationId: string): Promise<{
+  text: string;
+  source: TranscriptSource;
+  isLive: boolean;
+  entryCount: number;
+  meetingSubject?: string;
+  callId?: string;
+}> {
+  const result = {
+    text: '',
+    source: 'none' as TranscriptSource,
+    isLive: false,
+    entryCount: 0,
+    meetingSubject: undefined as string | undefined,
+    callId: undefined as string | undefined,
+  };
+
+  // 1. FIRST: Check if there's an active LIVE transcript session for this conversation
+  const liveSession = getLiveTranscriptSession(conversationId);
+  if (liveSession) {
+    console.log(`[TRANSCRIPT_FETCH] Active live session detected for ${conversationId} (callId=${liveSession.callId})`);
+    const liveEntries = liveTranscriptMap.get(conversationId);
+    const liveFinalEntries = liveEntries?.filter((e) => e.isFinal) || [];
+    
+    if (liveFinalEntries.length > 0) {
+      console.log(`[TRANSCRIPT_FETCH] Using LIVE transcript (${liveFinalEntries.length} entries)`);
+      result.text = transcriptEntriesToPlainText(liveFinalEntries);
+      result.source = 'live';
+      result.isLive = true;
+      result.entryCount = liveFinalEntries.length;
+      result.meetingSubject = liveSession.meetingSubject;
+      result.callId = liveSession.callId;
+      return result;
+    }
+    // Live session exists but no entries yet - continue to check other sources
+    console.log(`[TRANSCRIPT_FETCH] Live session active but no entries captured yet`);
+  }
+
+  // 2. SECOND: Check in-memory cache (may have recent entries from polling)
+  const cachedEntries = liveTranscriptMap.get(conversationId);
+  const cachedFinalEntries = cachedEntries?.filter((e) => e.isFinal) || [];
+  if (cachedFinalEntries.length > 0) {
+    console.log(`[TRANSCRIPT_FETCH] Using in-memory cache (${cachedFinalEntries.length} entries)`);
+    result.text = transcriptEntriesToPlainText(cachedFinalEntries);
+    result.source = 'memory_cache';
+    result.isLive = false;
+    result.entryCount = cachedFinalEntries.length;
+    return result;
+  }
+
+  // 3. THIRD: Check file cache (saved transcripts from this conversation)
+  const cachedFile = loadCachedTranscriptText(conversationId);
+  if (cachedFile) {
+    console.log(`[TRANSCRIPT_FETCH] Using file cache for conversation`);
+    result.text = cachedFile;
+    result.source = 'file_cache';
+    result.isLive = false;
+    // Estimate entry count from content
+    result.entryCount = (cachedFile.match(/\n\s+-\s/g) || []).length || 1;
+    return result;
+  }
+
+  // 4. FOURTH: Check background worker cache (pre-fetched transcripts)
+  const meetingContext = getCachedMeetingContext(conversationId);
+  if (meetingContext?.onlineMeetingId) {
+    const cachedMetas = getCachedTranscriptMeta(meetingContext.onlineMeetingId);
+    if (cachedMetas.length > 0) {
+      // Use the most recent cached transcript
+      const latest = cachedMetas.sort((a, b) => 
+        new Date(b.createdDateTime).getTime() - new Date(a.createdDateTime).getTime()
+      )[0];
+      
+      const content = await loadCachedTranscriptByMeetingId(meetingContext.onlineMeetingId);
+      if (content) {
+        console.log(`[TRANSCRIPT_FETCH] Using background-cached transcript (meeting=${meetingContext.onlineMeetingId})`);
+        result.text = content;
+        result.source = 'background_cache';
+        result.isLive = false;
+        result.entryCount = latest.entryCount;
+        result.meetingSubject = latest.meetingSubject;
+        return result;
+      }
+    }
+  }
+
+  // 5. FIFTH: Fetch fresh from Graph API (only if cache misses)
+  console.log(`[TRANSCRIPT_FETCH] Cache miss - fetching from Graph API for ${conversationId}`);
   const meetingInfo = await resolveMeetingInfoForConversation(conversationId);
   if (meetingInfo?.organizer?.id && meetingInfo?.joinWebUrl) {
     const transcriptWindow = getTranscriptWindowForConversation(conversationId);
@@ -1039,59 +2715,110 @@ async function getTranscriptTextForConversation(conversationId: string): Promise
     if (vttContent) {
       const parsed = parseVttToEntries(vttContent);
       if (parsed.length > 0) {
-        console.log(`[TRANSCRIPT_FETCH] Graph API returned ${parsed.length} entries - using fresh data`);
+        console.log(`[TRANSCRIPT_FETCH] Graph API returned ${parsed.length} entries - caching result`);
         liveTranscriptMap.set(conversationId, parsed);
         saveTranscriptToFile(conversationId);
-        return transcriptEntriesToPlainText(parsed);
+        result.text = transcriptEntriesToPlainText(parsed);
+        result.source = 'graph_fresh';
+        result.isLive = false;
+        result.entryCount = parsed.length;
+        return result;
       }
     }
   }
-  console.log(`[TRANSCRIPT_FETCH] Graph API returned no transcript - falling back to cache`);
-
-  // Fallback to in-memory cache
-  const cachedEntries = liveTranscriptMap.get(conversationId);
-  const cachedFinalEntries = cachedEntries?.filter((e) => e.isFinal) || [];
-  if (cachedFinalEntries.length > 0) {
-    console.log(`[TRANSCRIPT_FETCH] Using in-memory cache (${cachedFinalEntries.length} entries)`);
-    return transcriptEntriesToPlainText(cachedFinalEntries);
-  }
-
-  // Final fallback to file cache
-  const cachedFile = loadCachedTranscriptText(conversationId);
-  if (cachedFile) {
-    console.log(`[TRANSCRIPT_FETCH] Using file cache`);
-    return cachedFile;
-  }
 
   console.log(`[TRANSCRIPT_FETCH] No transcript data available from any source`);
-  return '';
+  return result;
+}
+
+/**
+ * Get a summary of available transcripts for the user
+ */
+function getTranscriptAvailabilitySummary(conversationId: string): string {
+  const parts: string[] = [];
+  
+  // Check live session
+  const liveSession = getLiveTranscriptSession(conversationId);
+  if (liveSession) {
+    const liveEntries = liveTranscriptMap.get(conversationId)?.filter(e => e.isFinal) || [];
+    parts.push(`📍 **Live call in progress** (${liveEntries.length} lines captured${liveSession.meetingSubject ? `, "${liveSession.meetingSubject}"` : ''})`);
+  }
+  
+  // Check memory cache
+  const memoryEntries = liveTranscriptMap.get(conversationId)?.filter(e => e.isFinal) || [];
+  if (memoryEntries.length > 0 && !liveSession) {
+    parts.push(`💾 **Recent transcript** in memory (${memoryEntries.length} entries)`);
+  }
+  
+  // Check background cache
+  const allCached = getAllCachedTranscriptMeta();
+  if (allCached.length > 0) {
+    const recent = allCached.slice(0, 3);
+    parts.push(`📂 **${allCached.length} cached transcript(s)** from recent meetings:`);
+    for (const meta of recent) {
+      const date = new Date(meta.createdDateTime).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      parts.push(`   - ${meta.meetingSubject || 'Untitled meeting'} (${date}, ${meta.entryCount} entries)`);
+    }
+  }
+  
+  if (parts.length === 0) {
+    return 'No transcripts available. Join a call or ask me to transcribe a past meeting.';
+  }
+  
+  return parts.join('\n');
 }
 
 async function answerMeetingQuestionWithContext(
   question: string,
   meetingTitle: string,
   conversationContext: string,
-  transcriptContext: string
+  transcriptContext: string,
+  tracking?: { userId: string; displayName: string; meetingId: string }
 ): Promise<string> {
+  // Check for no-data scenarios and provide helpful guidance
+  const hasTranscript = transcriptContext && transcriptContext.trim().length > 50;
+  const hasConversation = conversationContext && conversationContext !== 'No conversation messages available.';
+  
+  if (!hasTranscript && !hasConversation) {
+    return `I don't have any meeting content to answer your question yet.\n\n` +
+      `**To get started:**\n` +
+      `- Ask me to **join the call** during an active meeting to capture live transcript\n` +
+      `- Or say **transcribe** after a recorded meeting to fetch the transcript from Teams\n` +
+      `- Once I have transcript data, I can answer questions like "${question}"`;
+  }
+
+  // Build context-aware prompt based on what's available
+  let contextSection = '';
+  if (hasConversation) {
+    contextSection += `\n\n**Chat Messages:**\n${conversationContext}`;
+  }
+  if (hasTranscript) {
+    contextSection += `\n\n**Meeting Transcript:**\n${transcriptContext}`;
+  }
+
   const prompt = new ChatPrompt({
     messages: [
       {
         role: 'user',
         content:
-          `User question: ${question}\n\n` +
-          `Meeting title: ${meetingTitle}\n\n` +
-          `Conversation Context:\n${conversationContext}\n\n` +
-          `Transcript Context:\n${transcriptContext || 'No transcript available.'}\n\n` +
-          `Respond with these exact sections:\n` +
-          `## Conversation Context\n` +
-          `## Transcript Context\n` +
-          `## Answer\n` +
-          `## Detailed Summary\n\n` +
-          `Use detailed summary in bullets and call out uncertainties clearly if data is missing.`
+          `User question about "${meetingTitle}": ${question}\n\n` +
+          `Available context:${contextSection}\n\n` +
+          `**Instructions:**\n` +
+          `1. Answer the question directly based ONLY on the provided context\n` +
+          `2. If asking about a specific person (e.g., "what did John say"), search for their name variations (John, John Smith, J. Smith)\n` +
+          `3. If the information isn't in the context, clearly state that\n` +
+          `4. Quote relevant parts when helpful\n` +
+          `5. If asking about time ("first 10 minutes", "at the end"), use timestamps if available\n\n` +
+          `Format your response:\n` +
+          `## Answer\n[Direct answer to the question]\n\n` +
+          `## Supporting Details\n[Relevant quotes or context that support the answer]\n\n` +
+          `## Confidence\n[High/Medium/Low - based on how well the context answers the question]`
       },
     ],
     instructions:
-      'You are a meeting analyst assistant. Always ground the answer in provided context and separate sections exactly as requested.',
+      'You are a meeting analyst. Answer questions precisely using ONLY the provided context. ' +
+      'If a speaker name is mentioned, try fuzzy matching (first name, last name, partial match). ' +
+      'Never make up information not in the context. Be concise but thorough.',
     model: new OpenAIChatModel({
       model: config.azureOpenAIDeploymentName,
       apiKey: config.azureOpenAIKey,
@@ -1100,7 +2827,10 @@ async function answerMeetingQuestionWithContext(
     }),
   });
 
-  const response = await prompt.send('');
+  const response = await sendPromptWithTracking(prompt, '', tracking ? {
+    ...tracking,
+    estimatedInputText: `${question}\n${meetingTitle}\n${conversationContext}\n${transcriptContext}`,
+  } : undefined);
   return response.content || 'I could not generate a meeting-context answer.';
 }
 
@@ -1135,23 +2865,67 @@ interface LiveTranscriptPollingState {
   callId: string;
   organizerId: string;
   joinWebUrl: string;
+  onlineMeetingId?: string;
   conversationId: string;
   serviceUrl: string;
   callStartTime: number;
   pollingTimerId?: ReturnType<typeof setTimeout>;
+  inFlight: boolean;
+  lastPollAt: number;
+  transcriptionActive: boolean;
   lastFetchedLineCount: number;
   consecutiveEmptyPolls: number;
   userNotifiedAboutDelay: boolean;
+  transcriptDetectedNotified: boolean;
+  meetingLookupCooldownUntil: number;
+  meetingLookupBackoffMs: number;
 }
 
 const liveTranscriptPollingMap = new Map<string, LiveTranscriptPollingState>();
-const LIVE_TRANSCRIPT_POLL_INTERVAL_MS = 10_000; // 10 seconds
+const LIVE_TRANSCRIPT_POLL_INTERVAL_IDLE_MS = 10_000;
+const LIVE_TRANSCRIPT_POLL_INTERVAL_ACTIVE_MS = 3_000;
 
-function clearPendingTranscriptionStart(callId: string) {
+type MeetingStatusNoticeKey =
+  | 'live_setup'
+  | 'transcription_enabled_waiting'
+  | 'transcription_pending_lines'
+  | 'transcript_detected';
+
+const meetingStatusNoticeMap = new Map<string, Set<MeetingStatusNoticeKey>>();
+
+async function sendMeetingStatusNoticeOnce(
+  serviceUrl: string,
+  conversationId: string,
+  noticeKey: MeetingStatusNoticeKey,
+  message: string
+) {
+  let sent = meetingStatusNoticeMap.get(conversationId);
+  if (!sent) {
+    sent = new Set<MeetingStatusNoticeKey>();
+    meetingStatusNoticeMap.set(conversationId, sent);
+  }
+  if (sent.has(noticeKey)) {
+    console.log(`[STATUS_NOTICE] Skipping duplicate notice (${noticeKey}) for conversation=${conversationId}`);
+    return;
+  }
+  sent.add(noticeKey);
+  await graphApiHelper.sendProactiveMessage(serviceUrl, conversationId, message);
+}
+
+function clearMeetingStatusNotices(conversationId: string) {
+  meetingStatusNoticeMap.delete(conversationId);
+}
+
+function clearTranscriptionRetryTimer(callId: string) {
   const state = transcriptionStartupMap.get(callId);
   if (state?.timerId) {
     clearTimeout(state.timerId);
+    state.timerId = undefined;
   }
+}
+
+function clearPendingTranscriptionStart(callId: string) {
+  clearTranscriptionRetryTimer(callId);
   transcriptionStartupMap.delete(callId);
 }
 
@@ -1204,8 +2978,14 @@ async function attemptAutoStartTranscription(
     if (started) {
       state.started = true;
       state.inProgress = false;
-      clearPendingTranscriptionStart(callId);
-      // Removed notification - no need to spam user about transcription status
+      // Keep state.started latched so participant updates do not trigger duplicate starts.
+      clearTranscriptionRetryTimer(callId);
+      await sendMeetingStatusNoticeOnce(
+        callEntry.serviceUrl,
+        callEntry.conversationId,
+        'transcription_enabled_waiting',
+        `Live transcription has been turned on. I'm now waiting for transcript data from Teams.`
+      );
       return;
     }
   } catch (error) {
@@ -1245,41 +3025,152 @@ function stopLiveTranscriptPolling(callId: string) {
 }
 
 async function pollLiveTranscript(state: LiveTranscriptPollingState) {
+  if (state.inFlight) {
+    return;
+  }
+  state.inFlight = true;
+  state.lastPollAt = Date.now();
+
   try {
-    const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
-      state.organizerId,
-      state.joinWebUrl,
-      state.callStartTime,
-      undefined,
-      state.conversationId // Match by conversation thread for Meet Now calls
-    );
+    // Strategy A: /chats/{chatId}/transcripts — most universal, works for all call types:
+    // 1:1 calls, Meet Now, group and scheduled meetings. The conversationId IS the chatId.
+    // Pass callId to filter to only the current call's transcript (not previous meetings)
+    let vttContent = await graphApiHelper.fetchChatTranscriptText(state.conversationId, state.callId);
+    if (vttContent) {
+      console.log(`[LIVE_TRANSCRIPT_POLL] Got transcript via /chats endpoint (callId=${state.callId})`);
+    }
+
+    // Strategy B: Communications calls API — direct callId path, bot must be in the call.
+    if (!vttContent) {
+      vttContent = await graphApiHelper.fetchCallTranscriptContent(state.callId);
+      if (vttContent) {
+        // When the call endpoint is producing live data, keep using it as the
+        // primary path and cool down scheduled-meeting lookup attempts.
+        state.meetingLookupCooldownUntil = Date.now() + (5 * 60 * 1000);
+        console.log(`[LIVE_TRANSCRIPT_POLL] Got transcript via communications API (callId=${state.callId})`);
+      }
+    }
+
+    // Strategy C: Graph online-meetings endpoint (meetingId lookup → transcript list).
+    // NOTE: This path uses /users/{userId}/onlineMeetings/... which requires Application Access Policy.
+    // Since we only have RSC permissions (OnlineMeetingTranscript.Read.Chat), skip this path
+    // to avoid 403 errors. The /chats/{chatId}/transcripts endpoint (Strategy A) works with RSC.
+    // Uncomment below if you have Application Access Policy configured.
+    /*
+    const canTryMeetingLookup = Date.now() >= state.meetingLookupCooldownUntil;
+    if (!vttContent && canTryMeetingLookup) {
+      vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+        state.organizerId,
+        state.joinWebUrl,
+        undefined,
+        undefined,
+        state.conversationId,
+        state.onlineMeetingId,
+        state.callId
+      );
+      if (vttContent) {
+        state.meetingLookupBackoffMs = 2 * 60 * 1000;
+        state.meetingLookupCooldownUntil = 0;
+        console.log(`[LIVE_TRANSCRIPT_POLL] Got transcript via Graph meeting endpoint (callId=${state.callId})`);
+      } else {
+        state.meetingLookupCooldownUntil = Date.now() + state.meetingLookupBackoffMs;
+        state.meetingLookupBackoffMs = Math.min(state.meetingLookupBackoffMs * 2, 15 * 60 * 1000);
+      }
+    }
+    */
+
     if (!vttContent) {
       state.consecutiveEmptyPolls++;
       console.log(`[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=${state.callId} (empty polls: ${state.consecutiveEmptyPolls})`);
       
-      // After 3 attempts (30 seconds), just note the delay silently
+      // After 3 attempts (30 seconds), notify once that transcript data is still pending.
       if (state.consecutiveEmptyPolls === 3 && !state.userNotifiedAboutDelay) {
         state.userNotifiedAboutDelay = true;
-        // Removed notification - no need to spam user about delays
+        await sendMeetingStatusNoticeOnce(
+          state.serviceUrl,
+          state.conversationId,
+          'transcription_pending_lines',
+          `Transcription is enabled, but I haven't detected transcript lines yet. I'll keep checking automatically.`
+        );
+      }
+
+      // After 15 idle empty polls (~150 seconds) with no transcription signal, attempt to
+      // re-trigger transcription start. Teams sometimes silently drops the initial request.
+      if (state.consecutiveEmptyPolls === 15 && !state.transcriptionActive) {
+        console.log(`[LIVE_TRANSCRIPT_POLL] 15 empty polls with no active transcription — re-triggering transcription start for callId=${state.callId}`);
+        const startupState = transcriptionStartupMap.get(state.callId);
+        if (startupState) {
+          // Reset so attemptAutoStartTranscription will accept a new attempt
+          startupState.started = false;
+          startupState.inProgress = false;
+          startupState.timerId = undefined;
+          startupState.attemptCount = 0;
+          startupState.failureNotified = false;
+        }
+        void attemptAutoStartTranscription(state.callId, 'poll-retry');
       }
     } else {
       // Parse the full VTT content
       const allEntries = parseVttToEntries(vttContent);
       const convEntries = liveTranscriptMap.get(state.conversationId) || [];
       
+      // Register/update the live transcript session (this is an active call)
+      const meetingContext = getCachedMeetingContext(state.conversationId);
+      registerLiveTranscriptSession(state.conversationId, state.callId, meetingContext?.subject);
+      
       // Check if we got new entries since last poll
       if (allEntries.length > state.lastFetchedLineCount) {
         const newEntries = allEntries.slice(state.lastFetchedLineCount);
         console.log(`[LIVE_TRANSCRIPT_POLL] Got ${newEntries.length} new entries (total now: ${allEntries.length})`);
+
+        // Log each new transcript entry so user can see what's being captured
+        for (const entry of newEntries) {
+          console.log(`[LIVE_TRANSCRIPT] [${entry.timestamp}] ${entry.speaker}: "${entry.text}"`);
+        }
         
-        // First time getting data after empty polls - silently continue (no spam)
+        // Show a streaming preview of the latest captured words (first 80 chars of last 3 entries)
+        const previewEntries = newEntries.slice(-3);
+        const previewText = previewEntries
+          .map(e => `${e.speaker}: ${e.text.substring(0, 60)}${e.text.length > 60 ? '...' : ''}`)
+          .join(' | ');
+        console.log(`[STREAM_PREVIEW] 🎙️ ${previewText.substring(0, 200)}${previewText.length > 200 ? '...' : ''}`);
+        console.log(`[STREAM_STATS] Total captured: ${allEntries.length} lines, ${allEntries.reduce((sum, e) => sum + e.text.length, 0)} chars`);
+
+        if (!state.transcriptDetectedNotified) {
+          state.transcriptDetectedNotified = true;
+          await sendMeetingStatusNoticeOnce(
+            state.serviceUrl,
+            state.conversationId,
+            'transcript_detected',
+            `Live transcript detected. I'm now capturing what participants are saying in real time.`
+          );
+        }
         
         convEntries.push(...newEntries);
         liveTranscriptMap.set(state.conversationId, convEntries);
         state.lastFetchedLineCount = allEntries.length;
         state.consecutiveEmptyPolls = 0; // Reset counter
         
-        // Save updated transcript to file
+        // Update the transcript metadata cache with live data (every poll cycle ~3-10s)
+        const liveCacheKey = `live:${state.conversationId}:${state.callId}`;
+        const totalCharCount = allEntries.reduce((sum, e) => sum + e.text.length, 0);
+        transcriptMetaCache.set(liveCacheKey, {
+          transcriptId: `live_${state.callId}`,
+          meetingId: state.onlineMeetingId || state.conversationId,
+          organizerId: state.organizerId,
+          createdDateTime: new Date(state.callStartTime).toISOString(),
+          filePath: '', // Will be set when saved to file
+          fetchedAt: Date.now(),
+          charCount: totalCharCount,
+          entryCount: allEntries.length,
+          isLive: true,
+          meetingSubject: meetingContext?.subject,
+          conversationId: state.conversationId,
+          callId: state.callId,
+        });
+        console.log(`[CACHE_UPDATE] Live transcript cache updated: ${allEntries.length} entries, ${totalCharCount} chars`);
+        
+        // Save updated transcript to file (non-blocking)
         saveTranscriptToFile(state.conversationId);
       } else {
         console.log(`[LIVE_TRANSCRIPT_POLL] No new entries since last poll (current: ${allEntries.length})`);
@@ -1287,13 +3178,18 @@ async function pollLiveTranscript(state: LiveTranscriptPollingState) {
     }
   } catch (error) {
     console.warn(`[LIVE_TRANSCRIPT_POLL_ERROR] Error polling transcript for callId=${state.callId}:`, error);
+  } finally {
+    state.inFlight = false;
   }
 
-  // Schedule next poll
+  // Schedule next poll (faster when transcription is active or entries already detected)
   if (liveTranscriptPollingMap.has(state.callId)) {
+    const nextIntervalMs = (state.transcriptionActive || state.lastFetchedLineCount > 0)
+      ? LIVE_TRANSCRIPT_POLL_INTERVAL_ACTIVE_MS
+      : LIVE_TRANSCRIPT_POLL_INTERVAL_IDLE_MS;
     state.pollingTimerId = setTimeout(() => {
       void pollLiveTranscript(state);
-    }, LIVE_TRANSCRIPT_POLL_INTERVAL_MS);
+    }, nextIntervalMs);
   }
 }
 
@@ -1301,6 +3197,7 @@ function startLiveTranscriptPolling(
   callId: string,
   organizerId: string,
   joinWebUrl: string,
+  onlineMeetingId: string | undefined,
   conversationId: string,
   serviceUrl: string,
   callStartTime: number
@@ -1311,16 +3208,23 @@ function startLiveTranscriptPolling(
     callId,
     organizerId,
     joinWebUrl,
+    onlineMeetingId,
     conversationId,
     serviceUrl,
     callStartTime,
+    inFlight: false,
+    lastPollAt: 0,
+    transcriptionActive: false,
     lastFetchedLineCount: 0,
     consecutiveEmptyPolls: 0,
     userNotifiedAboutDelay: false,
+    transcriptDetectedNotified: false,
+    meetingLookupCooldownUntil: 0,
+    meetingLookupBackoffMs: 2 * 60 * 1000,
   };
 
   liveTranscriptPollingMap.set(callId, state);
-  console.log(`[LIVE_TRANSCRIPT_POLL] Starting live transcript polling for callId=${callId}, interval=${LIVE_TRANSCRIPT_POLL_INTERVAL_MS / 1000}s`);
+  console.log(`[LIVE_TRANSCRIPT_POLL] Starting live transcript polling for callId=${callId}, idle=${LIVE_TRANSCRIPT_POLL_INTERVAL_IDLE_MS / 1000}s active=${LIVE_TRANSCRIPT_POLL_INTERVAL_ACTIVE_MS / 1000}s`);
   
   // Start polling immediately, then every 10s
   void pollLiveTranscript(state);
@@ -1367,6 +3271,7 @@ async function scheduleJoinRetry(conversationId: string) {
           serviceUrl: pending.serviceUrl,
           organizerId: meetingInfo.organizer?.id,
           joinWebUrl: meetingInfo.joinWebUrl,
+          onlineMeetingId: (meetingInfo as any)?.onlineMeetingId,
         });
         // Don't delete from pendingJoinMap yet � webhook will do it on 'established' or final failure
       } else {
@@ -1432,8 +3337,37 @@ function getCurrentDateTimeContext(): string {
   return `Current date: ${dayOfWeek}, ${dateStr}. Current time: ${timeStr} (${timeOfDay}).`;
 }
 
+async function resolveCurrentUserProfile(activity: any, actorName?: string): Promise<{ displayName: string; email: string; aadObjectId: string; tenantId: string }> {
+  const aadObjectId = activity?.from?.aadObjectId || activity?.from?.id || '';
+  const displayName = normalizeDisplayName(actorName) || normalizeDisplayName(activity?.from?.name) || 'Unknown user';
+  const tenantId = getActivityTenantId(activity) || '';
+
+  let email = '';
+  try {
+    if (activity?.conversation?.id) {
+      const members = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
+      const normalizedActor = (actorName || '').toLowerCase().trim();
+      const memberMatch = members.find((m) => m.userId === aadObjectId || (normalizedActor && m.displayName.toLowerCase() === normalizedActor));
+      email = memberMatch?.email || '';
+    }
+  } catch (error) {
+    console.warn('[PROFILE] Chat member email resolution failed:', error);
+  }
+
+  if (!email && aadObjectId) {
+    try {
+      const userInfo = await graphApiHelper.getUserInfo(aadObjectId);
+      email = userInfo?.mail || userInfo?.userPrincipalName || '';
+    } catch (error) {
+      console.warn('[PROFILE] Graph user lookup failed:', error);
+    }
+  }
+
+  return { displayName, email, aadObjectId, tenantId };
+}
+
 // Helper to detect if user wants to email results and extract email address
-function detectEmailRequest(message: string): { wantsEmail: boolean; emailAddress: string | null } {
+function detectEmailRequest(message: string): { wantsEmail: boolean; emailAddress: string | null; sendToAllAttendees: boolean } {
   const lower = (message || '').toLowerCase();
   const wantsEmail = 
     (lower.includes('send') && lower.includes('email')) ||
@@ -1443,11 +3377,75 @@ function detectEmailRequest(message: string): { wantsEmail: boolean; emailAddres
     lower.includes('mail it') ||
     lower.includes('send this to');
   
+  // Detect if user wants to send to all attendees/participants
+  const sendToAllAttendees = 
+    lower.includes('all attendees') ||
+    lower.includes('all participants') ||
+    lower.includes('everyone in') ||
+    lower.includes('everyone on') ||
+    lower.includes('send to everyone') ||
+    lower.includes('email everyone') ||
+    lower.includes('to all') ||
+    lower.includes('all members');
+  
   // Extract email address from message
   const emailMatch = message.match(/[\w.-]+@[\w.-]+\.\w+/i);
   const emailAddress = emailMatch ? emailMatch[0] : null;
   
-  return { wantsEmail, emailAddress };
+  return { wantsEmail: wantsEmail || sendToAllAttendees, emailAddress, sendToAllAttendees };
+}
+
+async function autoEmailSummaryToParticipants(
+  chatId: string,
+  senderUserId: string,
+  summarySubject: string,
+  summaryBody: string
+): Promise<{ sentCount: number; failedCount: number; skippedCount: number }> {
+  const members = await graphApiHelper.getChatMembersDetailed(chatId);
+  if (!members.length) {
+    return { sentCount: 0, failedCount: 0, skippedCount: 0 };
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const uniqueRecipients = new Map<string, string>();
+
+  for (const m of members) {
+    const nameLower = (m.displayName || '').toLowerCase();
+    if (nameLower.includes('bot') || nameLower === 'assistant') {
+      continue;
+    }
+
+    const email = (m.email || '').trim().toLowerCase();
+    if (!emailRegex.test(email)) {
+      continue;
+    }
+    if (!uniqueRecipients.has(email)) {
+      uniqueRecipients.set(email, m.displayName || email);
+    }
+  }
+
+  let sentCount = 0;
+  let failedCount = 0;
+
+  for (const [email] of uniqueRecipients) {
+    const sendResult = await graphApiHelper.sendEmail(
+      senderUserId,
+      email,
+      summarySubject,
+      summaryBody
+    );
+    if (sendResult.success) {
+      sentCount += 1;
+    } else {
+      failedCount += 1;
+    }
+  }
+
+  return {
+    sentCount,
+    failedCount,
+    skippedCount: members.length - uniqueRecipients.size,
+  };
 }
 
 // Helper function to get user's display name for personalization
@@ -1519,6 +3517,12 @@ const app = new App({
   storage
 });
 
+// Load meeting history into memory at startup
+loadMeetingHistoryIntoMemory();
+
+// Start the background transcript worker (non-blocking)
+startTranscriptBackgroundWorker();
+
 // Set the token factory for GraphApiHelper (works for both MSI and SingleTenant)
 {
   const graphTokenFactory = async (): Promise<string> => {
@@ -1539,7 +3543,19 @@ async function sendTypingIndicator(sendFn: any): Promise<void> {
 }
 
 // Handle incoming messages
-app.on('message', async ({ send, stream, activity }) => {
+app.on('message', async ({ send: sendActivity, stream, activity }) => {
+  const send = async (outgoing: any) => {
+    try {
+      await sendActivity(outgoing);
+      const text = typeof outgoing === 'string'
+        ? outgoing
+        : (outgoing?.text || outgoing?.summary || '[non-text activity]');
+      console.log(`[TEAMS_SEND_OK] conversation=${activity?.conversation?.id || 'unknown'} preview="${getTruncatedLogPreview(String(text || ''))}"`);
+    } catch (error) {
+      console.error(`[TEAMS_SEND_FAIL] conversation=${activity?.conversation?.id || 'unknown'}`, error);
+      throw error;
+    }
+  };
   //Get conversation history
   const conversationKey = `${activity.conversation.id}/${activity.from.id}`;
   const sharedConversationKey = `conversation/${activity.conversation.id}`;
@@ -1557,7 +3573,30 @@ app.on('message', async ({ send, stream, activity }) => {
     // Get user's display name for personalization
     const userName = await getUserDisplayName(activity.from.id, activity.from?.name);
     const actorName = activity.from?.name || userName;
+    const requesterId = activity.from.aadObjectId || activity.from.id;
+    const activityTenantId = getActivityTenantId(activity);
+    const meetingId = activity.conversation.id || 'unknown_meeting';
     console.log(`[USER] Display name resolved: ${userName}`);
+
+    const accessCheck = canUserAccess(requesterId);
+    if (!accessCheck.allowed) {
+      const deniedMessage = accessCheck.reason === 'blocked'
+        ? `Your account is currently blocked from using this bot. Please contact an administrator.`
+        : `This bot has reached its user capacity. Please contact an administrator to increase the user limit.`;
+      await send(new MessageActivity(deniedMessage).addAiGenerated());
+      return;
+    }
+
+    const tokenAllowance = canUserUseTokens(requesterId);
+    if (!tokenAllowance.allowed) {
+      await send(
+        new MessageActivity(
+          `You've reached your token usage limit (${tokenAllowance.used}/${tokenAllowance.limit}). ` +
+          `Please contact an administrator to increase your token allowance.`
+        ).addAiGenerated()
+      );
+      return;
+    }
     
     // Store the current message in history
     if (activity.text) {
@@ -1577,6 +3616,8 @@ app.on('message', async ({ send, stream, activity }) => {
       if (llmMessages.length > 30) {
         llmMessages = llmMessages.slice(-30);
       }
+
+      recordUserMessage(requesterId, actorName, activityTenantId);
 
       console.log(`[STORAGE] Added message to history (total: ${messages.length})`);
     }
@@ -1599,7 +3640,22 @@ app.on('message', async ({ send, stream, activity }) => {
       (conversationIdLower.includes('meeting_') ||
        conversationIdLower.includes('meeting') ||
        conversationIdLower.includes('spaces'));
-    const detectedIntent = await classifyIntent(cleanText, isMeetingConversation);
+    // Build recent context for the intent classifier so it handles follow-ups and corrections naturally
+    const recentLlmTurns = llmMessages.slice(-6).map((m: any) =>
+      `${m.role === 'user' ? 'User' : 'Bot'}: ${(m.content || '').slice(0, 300)}`
+    ).join('\n');
+    const _inboxCtxSnap = inboxContextMap.get(activity.conversation.id);
+    const _lastRespSnap = lastBotResponseMap.get(activity.conversation.id);
+    const stateLines: string[] = [];
+    if (_inboxCtxSnap?.lastMatchedSenderName) stateLines.push(`Bot last showed inbox email from: ${_inboxCtxSnap.lastMatchedSenderName} <${_inboxCtxSnap.lastMatchedSenderEmail || ''}>`);
+    if (_lastRespSnap?.subject) stateLines.push(`Bot last response subject: ${_lastRespSnap.subject}`);
+    const classifyContext = [recentLlmTurns, stateLines.join('\n')].filter(Boolean).join('\n\n');
+
+    const detectedIntent = await classifyIntent(cleanText, isMeetingConversation, {
+      userId: requesterId,
+      displayName: actorName,
+      meetingId,
+    }, classifyContext || undefined);
     console.log(`[INTENT] Detected intent: ${detectedIntent}`);
     const meetingAutoJoinKey = `meeting-autojoin/${activity.conversation.id}`;
     const hasAutoJoinedMeeting = storage.get(meetingAutoJoinKey) === true;
@@ -1629,7 +3685,7 @@ app.on('message', async ({ send, stream, activity }) => {
     }
 
     // Handle summarization commands
-    if (detectedIntent === 'summarize' || userMessage.includes('summarize') || userMessage.includes('summary')) {
+    if (detectedIntent === 'summarize') {
       console.log(`[ACTION] Processing summarization request`);
       await sendTypingIndicator(send);
       
@@ -1655,31 +3711,37 @@ Last week: ${lastWeekStart.toISOString().split('T')[0]} to ${today.toISOString()
           messages: [
             {
               role: 'user',
-              content: `Analyze this summarization request to determine what source the user wants summarized.
+              content: `Determine what the user wants summarized.
 
 User request: "${cleanText || activity.text}"
+User is currently in a meeting chat: ${isMeetingConversation ? 'YES' : 'NO'}
 
 ${dateContext}
 
-Determine:
-1. Is the user asking about the CURRENT conversation/meeting, a PAST meeting by date, or a SPECIFIC chat/group?
-2. If a past meeting by date (e.g., "yesterday's meeting", "last Friday's call", "the meeting we had last week"), extract the date
-3. If a specific chat/group by name, extract the name
-
-Respond with JSON only:
+RESPOND WITH JSON:
 {
-  "target": "current" | "past_meeting" | "specific_chat",
-  "chat_name": "name of the specific chat/group if mentioned, or null",
-  "meeting_date": "ISO date string if past meeting by date, or null",
-  "meeting_subject": "meeting subject/title if mentioned, or null",
-  "content_type": "meeting" | "chat" | "transcript" | "any"
+  "target": "current" | "past_meeting" | "last_meeting" | "specific_chat",
+  "chat_name": "name if specific chat mentioned, else null",
+  "meeting_date": "ISO date if explicit date mentioned, else null",
+  "meeting_subject": "title if mentioned, else null",
+  "content_type": "any"
 }`
             }
           ],
-          instructions: `You are analyzing summarization requests.
-- If the user mentions a DATE reference ("yesterday", "last Friday", "the meeting we had last week", "Thursday's meeting"), return target="past_meeting" with the meeting_date as ISO string.
-- If the user mentions a specific group/chat NAME ("test agent v2 group", "the marketing chat"), return target="specific_chat" with the chat_name.
-- If they just say "summarize" or "summarize this" or refer to "this meeting", return target="current".
+          instructions: `DECISION LOGIC (follow in order):
+
+1. If user is in a meeting chat (YES above):
+   - Default to target="current" unless they explicitly name a different date
+   - Generic phrases like "summarize", "summary" refer to current session
+   
+2. If user is NOT in a meeting chat:
+   - "summarize", "the meeting", "last meeting" → target="last_meeting"
+   - With specific date ("yesterday", "March 10") → target="past_meeting" with meeting_date
+
+3. Set target="past_meeting" when user mentions a specific calendar date
+   
+4. Set target="specific_chat" only when user names a specific group/channel by title
+
 Output valid JSON only.`,
           model: new OpenAIChatModel({
             model: config.azureOpenAIDeploymentName,
@@ -1689,7 +3751,12 @@ Output valid JSON only.`,
           })
         });
 
-        const targetResponse = await targetExtractPrompt.send('');
+        const targetResponse = await sendPromptWithTracking(targetExtractPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: cleanText || activity.text || '',
+        });
         const jsonStr = (targetResponse.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         let targetInfo: { target: string; chat_name: string | null; meeting_date: string | null; meeting_subject: string | null; content_type: string } = { 
           target: 'current', chat_name: null, meeting_date: null, meeting_subject: null, content_type: 'any' 
@@ -1710,16 +3777,24 @@ Output valid JSON only.`,
           
           if (pastMeeting.success && pastMeeting.meeting) {
             console.log(`[SUMMARIZE] Found past meeting: "${pastMeeting.meeting.subject}"`);
-            // Try to fetch transcript for this meeting
-            const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+            
+            // Notify user we're fetching the transcript (it may take time)
+            await send(new MessageActivity(
+              `Found meeting "**${pastMeeting.meeting.subject}**". Checking for transcript availability...`
+            ).addAiGenerated());
+            
+            // Poll for transcript with retries (transcripts may not be immediately available after meeting ends)
+            const pollResult = await pollForTranscriptReady(
               pastMeeting.meeting.organizerId,
               pastMeeting.meeting.joinWebUrl,
               pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
-              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined
+              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
+              6,  // maxAttempts
+              5000 // initialDelayMs (5 seconds)
             );
             
-            if (vttContent) {
-              const parsed = parseVttToEntries(vttContent);
+            if (pollResult.success && pollResult.vttContent) {
+              const parsed = parseVttToEntries(pollResult.vttContent);
               if (parsed.length > 0) {
                 console.log(`[SUMMARIZE] Got ${parsed.length} transcript entries from past meeting`);
                 generatedSummary = await generateFormattedSummaryHtml(
@@ -1727,29 +3802,45 @@ Output valid JSON only.`,
                   pastMeeting.meeting.subject,
                   userName,
                   [],
-                  pastMeeting.meeting.start // Use actual meeting date
+                  pastMeeting.meeting.start, // Use actual meeting date
+                  { userId: requesterId, displayName: actorName, meetingId }
                 );
                 
                 await send(new MessageActivity(generatedSummary).addAiGenerated().addFeedback());
                 
                 // Track for email follow-up
-                lastBotResponseMap.set(activity.conversation.id, {
+                recordBotResponse(activity.conversation.id, {
                   content: generatedSummary,
                   contentType: 'summary',
-                  subject: `Meeting Summary: ${pastMeeting.meeting.subject}`,
+                    subject: `Meeting Summary: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
                   timestamp: Date.now()
                 });
                 
                 // Handle email if requested
-                if (emailRequest.wantsEmail && emailRequest.emailAddress) {
-                  const sendResult = await graphApiHelper.sendEmail(
-                    activity.from.aadObjectId || activity.from.id,
-                    emailRequest.emailAddress,
-                    `Meeting Summary: ${pastMeeting.meeting.subject}`,
-                    generatedSummary
-                  );
-                  if (sendResult.success) {
-                    await send(new MessageActivity(`Done! I've emailed this summary to **${emailRequest.emailAddress}**.`).addAiGenerated());
+                if (emailRequest.wantsEmail) {
+                  if (emailRequest.sendToAllAttendees) {
+                    // Send to all meeting attendees
+                    const emailResult = await autoEmailSummaryToParticipants(
+                      activity.conversation.id,
+                      activity.from.aadObjectId || activity.from.id,
+                      `Meeting Summary: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
+                      generatedSummary
+                    );
+                    if (emailResult.sentCount > 0) {
+                      await send(new MessageActivity(`Done! I've emailed this summary to **${emailResult.sentCount} attendee(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`).addAiGenerated());
+                    } else {
+                      await send(new MessageActivity(`I couldn't email the summary to attendees. No valid email addresses found.`).addAiGenerated());
+                    }
+                  } else if (emailRequest.emailAddress) {
+                    const sendResult = await graphApiHelper.sendEmail(
+                      activity.from.aadObjectId || activity.from.id,
+                      emailRequest.emailAddress,
+                      `Meeting Summary: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
+                      generatedSummary
+                    );
+                    if (sendResult.success) {
+                      await send(new MessageActivity(`Done! I've emailed this summary to **${emailRequest.emailAddress}**.`).addAiGenerated());
+                    }
                   }
                 }
                 
@@ -1760,10 +3851,10 @@ Output valid JSON only.`,
               }
             }
             
-            // No transcript available for this past meeting
+            // No transcript available for this past meeting after polling
             await send(new MessageActivity(
-              `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
-              `Transcription may not have been enabled for that meeting.`
+              `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available yet. ` +
+              `${pollResult.error || 'Transcription may not have been enabled, or the transcript is still processing.'}`
             ).addAiGenerated().addFeedback());
             storage.set(conversationKey, messages);
             storage.set(sharedConversationKey, sharedMessages);
@@ -1779,6 +3870,106 @@ Output valid JSON only.`,
             storage.set(llmConversationKey, llmMessages);
             return;
           }
+        }
+        
+        // --- LAST MEETING LOOKUP (most recent from calendar) ---
+        if (targetInfo.target === 'last_meeting' || (!isMeetingConversation && targetInfo.target === 'current')) {
+          console.log(`[SUMMARIZE] Looking up most recent meeting from calendar`);
+          const userId = activity.from.aadObjectId || activity.from.id;
+          
+          // Find most recent Teams meeting
+          const pastMeeting = await graphApiHelper.findPastMeeting(userId, undefined, targetInfo.meeting_subject || undefined);
+          
+          if (pastMeeting.success && pastMeeting.meeting) {
+            console.log(`[SUMMARIZE] Found most recent meeting: "${pastMeeting.meeting.subject}"`);
+            
+            await send(new MessageActivity(
+              `Found your most recent meeting: "**${pastMeeting.meeting.subject}**". Generating summary...`
+            ).addAiGenerated());
+            
+            // Poll for transcript
+            const pollResult = await pollForTranscriptReady(
+              pastMeeting.meeting.organizerId,
+              pastMeeting.meeting.joinWebUrl,
+              pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
+              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
+              6, 5000
+            );
+            
+            if (pollResult.success && pollResult.vttContent) {
+              const parsed = parseVttToEntries(pollResult.vttContent);
+              if (parsed.length > 0) {
+                console.log(`[SUMMARIZE] Got ${parsed.length} transcript entries from last meeting`);
+                generatedSummary = await generateFormattedSummaryHtml(
+                  parsed,
+                  pastMeeting.meeting.subject,
+                  userName,
+                  [],
+                  pastMeeting.meeting.start,
+                  { userId: requesterId, displayName: actorName, meetingId }
+                );
+                
+                await send(new MessageActivity(generatedSummary).addAiGenerated().addFeedback());
+                
+                recordBotResponse(activity.conversation.id, {
+                  content: generatedSummary,
+                  contentType: 'summary',
+                  subject: `Meeting Summary: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
+                  timestamp: Date.now()
+                });
+                
+                // Handle email if requested
+                if (emailRequest.wantsEmail) {
+                  if (emailRequest.sendToAllAttendees) {
+                    const emailResult = await autoEmailSummaryToParticipants(
+                      activity.conversation.id,
+                      activity.from.aadObjectId || activity.from.id,
+                      `Meeting Summary: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
+                      generatedSummary
+                    );
+                    if (emailResult.sentCount > 0) {
+                      await send(new MessageActivity(`Done! I've emailed this summary to **${emailResult.sentCount} attendee(s)**.`).addAiGenerated());
+                    }
+                  } else if (emailRequest.emailAddress) {
+                    const sendResult = await graphApiHelper.sendEmail(
+                      activity.from.aadObjectId || activity.from.id,
+                      emailRequest.emailAddress,
+                      `Meeting Summary: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
+                      generatedSummary
+                    );
+                    if (sendResult.success) {
+                      await send(new MessageActivity(`Done! I've emailed this summary to **${emailRequest.emailAddress}**.`).addAiGenerated());
+                    }
+                  }
+                }
+                
+                storage.set(conversationKey, messages);
+                storage.set(sharedConversationKey, sharedMessages);
+                storage.set(llmConversationKey, llmMessages);
+                return;
+              }
+            }
+            
+            await send(new MessageActivity(
+              `I found your recent meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
+              `${pollResult.error || 'Transcription may not have been enabled during the call.'}`
+            ).addAiGenerated().addFeedback());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          } else if (!isMeetingConversation) {
+            // Only show error if not in meeting chat (if in meeting chat, let it fall through to current conversation logic)
+            await send(new MessageActivity(
+              `I couldn't find any recent Teams meetings in your calendar. ` +
+              `${pastMeeting.error || 'Try specifying a date like "summarize yesterday\'s meeting".'}`
+            ).addAiGenerated().addFeedback());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          }
+          // If in meeting chat and no recent meeting found, fall through to current conversation logic
         }
         
         // Determine which chat to summarize
@@ -1824,7 +4015,8 @@ Output valid JSON only.`,
             meetingTitle,
             userName,
             memberList,
-            chatInfo?.startDateTime // Use actual meeting date
+            chatInfo?.startDateTime, // Use actual meeting date
+            { userId: requesterId, displayName: actorName, meetingId }
           );
           console.log(`[SUMMARIZE] Summary generated successfully from transcript`);
 
@@ -1832,97 +4024,182 @@ Output valid JSON only.`,
           await send(responseActivity);
           
           // Track for email follow-up
-          lastBotResponseMap.set(activity.conversation.id, {
+          recordBotResponse(activity.conversation.id, {
             content: generatedSummary,
             contentType: 'summary',
             subject: `Summary: ${meetingTitle}`,
             timestamp: Date.now()
           });
-          
-          console.log(`[SUCCESS] Transcript-based summary sent to user`);
-        } else {
-          // No transcript available - guide user to get transcript first
-          console.log(`[SUMMARIZE] No transcript entries available`);
-          
-          // Try to fetch transcript from Graph API for past meetings
-          const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
-          if (chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
-            console.log(`[SUMMARIZE] Attempting to fetch transcript from Graph API`);
-            const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
-            const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
-              chatInfo.organizer.id,
-              chatInfo.joinWebUrl,
-              transcriptWindow.min,
-              transcriptWindow.max,
-              activity.conversation.id // Match by conversation thread
-            );
-            
-            if (vttContent) {
-              const parsed = parseVttToEntries(vttContent);
-              if (parsed.length > 0) {
-                console.log(`[SUMMARIZE] Got ${parsed.length} entries from Graph transcript`);
-                liveTranscriptMap.set(activity.conversation.id, parsed);
-                saveTranscriptToFile(activity.conversation.id);
-                
-                const meetingTitle = chatInfo.subject || 'Meeting';
-                const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
-                
-                generatedSummary = await generateFormattedSummaryHtml(
-                  parsed,
-                  meetingTitle,
-                  userName,
-                  chatMembers,
-                  chatInfo.startDateTime // Use actual meeting date
-                );
-                
-                await send(new MessageActivity(generatedSummary).addAiGenerated().addFeedback());
-                
-                lastBotResponseMap.set(activity.conversation.id, {
-                  content: generatedSummary,
-                  contentType: 'summary',
-                  subject: `Summary: ${meetingTitle}`,
-                  timestamp: Date.now()
-                });
-                
-                // Handle email if requested
-                if (emailRequest.wantsEmail) {
-                  let recipientEmail = emailRequest.emailAddress;
-                  if (!recipientEmail) {
-                    const userInfo = await graphApiHelper.getUserInfo(activity.from.aadObjectId || activity.from.id);
-                    recipientEmail = userInfo?.mail || userInfo?.userPrincipalName || '';
-                  }
-                  if (recipientEmail) {
-                    const emailResult = await graphApiHelper.sendEmail(
-                      activity.from.aadObjectId || activity.from.id,
-                      recipientEmail,
-                      `Meeting Summary from ${config.botDisplayName}`,
-                      generatedSummary
-                    );
-                    if (emailResult.success) {
-                      await send(new MessageActivity(`Done! I've emailed the summary to **${recipientEmail}**.`).addAiGenerated());
-                    }
-                  }
+
+          // Handle email if user requested it
+          if (emailRequest.wantsEmail) {
+            console.log(`[SUMMARIZE] User requested email - sending summary`);
+            if (emailRequest.sendToAllAttendees) {
+              // Send to all meeting attendees
+              const emailResult = await autoEmailSummaryToParticipants(
+                activity.conversation.id,
+                activity.from.aadObjectId || activity.from.id,
+                `Meeting Summary: ${meetingTitle}`,
+                generatedSummary
+              );
+              if (emailResult.sentCount > 0) {
+                await send(new MessageActivity(`Done! I've emailed the summary to **${emailResult.sentCount} attendee(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`).addAiGenerated());
+              } else {
+                await send(new MessageActivity(`I couldn't email the summary to attendees. No valid email addresses found.`).addAiGenerated());
+              }
+            } else {
+              // Send to specific recipient or requesting user
+              let recipientEmail = emailRequest.emailAddress;
+              if (!recipientEmail) {
+                const detailedMembers = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
+                const selfMember = detailedMembers.find((m) => m.userId === (activity.from.aadObjectId || activity.from.id) || m.displayName.toLowerCase() === (actorName || '').toLowerCase());
+                recipientEmail = selfMember?.email || '';
+                if (!recipientEmail) {
+                  const userInfo = await graphApiHelper.getUserInfo(activity.from.aadObjectId || activity.from.id);
+                  recipientEmail = userInfo?.mail || userInfo?.userPrincipalName || '';
                 }
-                
-                storage.set(conversationKey, messages);
-                storage.set(sharedConversationKey, sharedMessages);
-                storage.set(llmConversationKey, llmMessages);
-                return;
+              }
+              if (recipientEmail) {
+                const emailResult = await graphApiHelper.sendEmail(
+                  activity.from.aadObjectId || activity.from.id,
+                  recipientEmail,
+                  `Meeting Summary: ${meetingTitle}`,
+                  generatedSummary,
+                  { replyToEmail: recipientEmail, replyToName: actorName }
+                );
+                if (emailResult.success) {
+                  await send(new MessageActivity(`Done! I've emailed the summary to **${recipientEmail}**.`).addAiGenerated());
+                } else {
+                  await send(new MessageActivity(`I generated the summary but couldn't send the email: ${emailResult.error || 'unknown error'}`).addAiGenerated());
+                }
+              } else {
+                await send(new MessageActivity(`I generated the summary but couldn't find your email address. Please try "send to [email]".`).addAiGenerated());
               }
             }
           }
-          
-          // No transcript found anywhere - generate natural response
-          const noTranscriptMsg = isMeetingConversation
-            ? `I don't have a transcript to summarize yet. If you're in a meeting, ask me to **join the call** and I'll start capturing the conversation. Or if the meeting already happened and was recorded, just ask me to **transcribe** it.`
-            : `I'd need a meeting transcript to create a summary. This looks like a regular chat - for meeting summaries, start a Teams meeting and invite me, or ask about a past meeting like "summarize yesterday's standup"!`;
-          
-          await send(new MessageActivity(noTranscriptMsg).addAiGenerated().addFeedback());
+
+          console.log(`[SUCCESS] Transcript-based summary sent to user`);
           storage.set(conversationKey, messages);
           storage.set(sharedConversationKey, sharedMessages);
           storage.set(llmConversationKey, llmMessages);
           return;
         }
+        
+        // If target was explicitly 'last_meeting', don't fall through to current conversation Graph API
+        // (we already tried calendar lookup above - avoid duplicate summaries)
+        if (targetInfo.target === 'last_meeting') {
+          console.log(`[SUMMARIZE] last_meeting lookup didn't find transcript, not falling through to current conversation`);
+          await send(new MessageActivity(
+            `I couldn't find a transcript for your recent meetings. Make sure transcription was enabled during the call, or try specifying a date like "summarize yesterday's meeting".`
+          ).addAiGenerated().addFeedback());
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+        
+        // No local transcript - try to fetch from Graph API
+        console.log(`[SUMMARIZE] No local transcript entries, trying Graph API`);
+          
+        // Try to fetch transcript from Graph API for past meetings
+        const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
+        if (chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
+          console.log(`[SUMMARIZE] Attempting to fetch transcript from Graph API`);
+          const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
+          const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+            chatInfo.organizer.id,
+            chatInfo.joinWebUrl,
+            transcriptWindow.min,
+            transcriptWindow.max,
+            activity.conversation.id // Match by conversation thread
+          );
+          
+          if (vttContent) {
+            const parsed = parseVttToEntries(vttContent);
+            if (parsed.length > 0) {
+              console.log(`[SUMMARIZE] Got ${parsed.length} entries from Graph transcript`);
+              liveTranscriptMap.set(activity.conversation.id, parsed);
+              saveTranscriptToFile(activity.conversation.id);
+              
+              const meetingTitle = chatInfo.subject || 'Meeting';
+              const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
+              
+              generatedSummary = await generateFormattedSummaryHtml(
+                parsed,
+                meetingTitle,
+                userName,
+                chatMembers,
+                chatInfo.startDateTime, // Use actual meeting date
+                { userId: requesterId, displayName: actorName, meetingId }
+              );
+              
+              await send(new MessageActivity(generatedSummary).addAiGenerated().addFeedback());
+              
+              recordBotResponse(activity.conversation.id, {
+                content: generatedSummary,
+                contentType: 'summary',
+                subject: `Summary: ${meetingTitle}`,
+                timestamp: Date.now()
+              });
+
+              // Handle email if requested
+              if (emailRequest.wantsEmail) {
+                console.log(`[SUMMARIZE] User requested email - sending summary`);
+                if (emailRequest.sendToAllAttendees) {
+                  // Send to all meeting attendees
+                  const emailResult = await autoEmailSummaryToParticipants(
+                    activity.conversation.id,
+                    activity.from.aadObjectId || activity.from.id,
+                    `Meeting Summary: ${meetingTitle}`,
+                    generatedSummary
+                  );
+                  if (emailResult.sentCount > 0) {
+                    await send(new MessageActivity(`Done! I've emailed the summary to **${emailResult.sentCount} attendee(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`).addAiGenerated());
+                  } else {
+                    await send(new MessageActivity(`Couldn't email the summary to attendees. No valid email addresses found.`).addAiGenerated());
+                  }
+                } else {
+                  let recipientEmail = emailRequest.emailAddress;
+                  if (!recipientEmail) {
+                    const detailedMembers = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
+                    const selfMember = detailedMembers.find((m) => m.userId === (activity.from.aadObjectId || activity.from.id) || m.displayName.toLowerCase() === (actorName || '').toLowerCase());
+                    recipientEmail = selfMember?.email || '';
+                    if (!recipientEmail) {
+                      const userInfo = await graphApiHelper.getUserInfo(activity.from.aadObjectId || activity.from.id);
+                      recipientEmail = userInfo?.mail || userInfo?.userPrincipalName || '';
+                    }
+                  }
+                  if (recipientEmail) {
+                    const emailResult = await graphApiHelper.sendEmail(
+                      activity.from.aadObjectId || activity.from.id,
+                      recipientEmail,
+                      `Meeting Summary: ${meetingTitle}`,
+                      generatedSummary,
+                      { replyToEmail: recipientEmail, replyToName: actorName }
+                    );
+                    if (emailResult.success) {
+                      await send(new MessageActivity(`Done! I've emailed the summary to **${recipientEmail}**.`).addAiGenerated());
+                    } else {
+                      await send(new MessageActivity(`Summary generated but email failed: ${emailResult.error || 'unknown error'}`).addAiGenerated());
+                    }
+                  }
+                }
+              }
+              
+              storage.set(conversationKey, messages);
+              storage.set(sharedConversationKey, sharedMessages);
+              storage.set(llmConversationKey, llmMessages);
+              return;
+            }
+          }
+        }
+        
+        // No transcript found anywhere - generate natural response
+        const noTranscriptMsg = isMeetingConversation
+          ? `I don't have a transcript to summarize yet. If you're in a meeting, ask me to **join the call** and I'll start capturing the conversation. Or if the meeting already happened and was recorded, just ask me to **transcribe** it.`
+          : `I'd need a meeting transcript to create a summary. This looks like a regular chat - for meeting summaries, start a Teams meeting and invite me, or ask about a past meeting like "summarize yesterday's standup"!`;
+        
+        await send(new MessageActivity(noTranscriptMsg).addAiGenerated().addFeedback());
       } catch (error) {
         console.error(`[ERROR_SUMMARIZE] Failed to summarize:`, error);
         const errorResponse = new MessageActivity(
@@ -1937,7 +4214,7 @@ Output valid JSON only.`,
     }
 
     // Handle meeting overview search (searches transcripts, not chat)
-    if (detectedIntent === 'meeting_overview' || userMessage.toLowerCase().includes('tell me about') || userMessage.toLowerCase().includes('meeting overview')) {
+    if (detectedIntent === 'meeting_overview') {
       console.log(`[ACTION] Processing meeting overview request`);
       await sendTypingIndicator(send);
       try {
@@ -1995,7 +4272,8 @@ Output valid JSON only.`,
           meetingTitle,
           userName,
           memberList,
-          chatInfo?.startDateTime // Use actual meeting date
+          chatInfo?.startDateTime, // Use actual meeting date
+          { userId: requesterId, displayName: actorName, meetingId }
         );
         console.log(`[MEETING_OVERVIEW] Overview generated successfully`);
 
@@ -2015,13 +4293,223 @@ Output valid JSON only.`,
       return;
     }
 
+    if (detectedIntent === 'profile_details') {
+      console.log(`[ACTION] Processing profile_details request`);
+      await sendTypingIndicator(send);
+      const profile = await resolveCurrentUserProfile(activity, actorName);
+      const lines = [
+        `## Your Profile Details`,
+        '',
+        `Hi ${userName}, here is what I can access:`,
+        '',
+        `• **Name:** ${profile.displayName || 'Not available'}`,
+        `• **Email:** ${profile.email || 'Not available'}`,
+      ];
+      if (!profile.email) {
+        lines.push('');
+        lines.push(`I couldn't resolve your email from this chat context.`);
+        lines.push(`You can share a preferred email address and I will use it for delivery.`);
+      }
+      await send(new MessageActivity(lines.join('\n')).addAiGenerated().addFeedback());
+      storage.set(conversationKey, messages);
+      storage.set(sharedConversationKey, sharedMessages);
+      storage.set(llmConversationKey, llmMessages);
+      return;
+    }
+
     // Handle transcription requests
-    if (detectedIntent === 'transcribe' || userMessage.includes('transcribe') || userMessage.includes('transcript')) {
+    if (detectedIntent === 'transcribe') {
       console.log(`[ACTION] Processing transcription request`);
       await sendTypingIndicator(send);
       try {
         console.log(`[TRANSCRIBE_DEBUG] Step 1-2: Processing transcript request`);
 
+        // --- TARGET EXTRACTION: Determine if user wants current meeting or a past meeting ---
+        const today = new Date();
+        const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+        
+        const targetExtractPrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content: `User message: "${cleanText || activity.text}"
+
+Context:
+- Today: ${today.toISOString().split('T')[0]} (${today.toLocaleDateString('en-US', { weekday: 'long' })})
+- Yesterday: ${yesterday.toISOString().split('T')[0]} (${yesterday.toLocaleDateString('en-US', { weekday: 'long' })})
+- Is user in a meeting chat conversation: ${isMeetingConversation ? 'YES' : 'NO'}
+
+Extract what meeting the user wants transcribed:
+{
+  "target": "current" | "past_meeting" | "last_meeting",
+  "meeting_date": "YYYY-MM-DD or null",
+  "meeting_subject": "keyword or null"
+}`
+            }
+          ],
+          instructions: `DECISION LOGIC:
+1. If user is in a meeting chat and says generic "transcribe", "get transcript" → target="current"
+2. If user says "last meeting", "previous meeting", "the meeting" (NOT in meeting chat) → target="last_meeting"
+3. If user mentions a specific date like "yesterday", "last Friday", "March 10" → target="past_meeting" with the date
+4. If user mentions a meeting name/subject → include in meeting_subject
+5. If NOT in meeting chat and no date given → target="last_meeting" (find most recent)
+
+Output valid JSON only.`,
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21'
+          })
+        });
+
+        const targetResponse = await sendPromptWithTracking(targetExtractPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: cleanText || activity.text || '',
+        });
+        const jsonStr = (targetResponse.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        let targetInfo: { target: string; meeting_date: string | null; meeting_subject: string | null } = { 
+          target: isMeetingConversation ? 'current' : 'last_meeting', meeting_date: null, meeting_subject: null
+        };
+        try {
+          targetInfo = JSON.parse(jsonStr);
+        } catch {
+          console.warn(`[TRANSCRIBE] Could not parse target extraction, defaulting to current`);
+        }
+        
+        console.log(`[TRANSCRIBE] Target analysis: ${JSON.stringify(targetInfo)}`);
+
+        // --- PAST MEETING LOOKUP ---
+        if (targetInfo.target === 'past_meeting' && targetInfo.meeting_date) {
+          console.log(`[TRANSCRIBE] Looking up past meeting from ${targetInfo.meeting_date}`);
+          const userId = activity.from.aadObjectId || activity.from.id;
+          const pastMeeting = await graphApiHelper.findPastMeeting(userId, targetInfo.meeting_date, targetInfo.meeting_subject || undefined);
+          
+          if (pastMeeting.success && pastMeeting.meeting) {
+            console.log(`[TRANSCRIBE] Found past meeting: "${pastMeeting.meeting.subject}"`);
+            
+            await send(new MessageActivity(
+              `Found meeting "**${pastMeeting.meeting.subject}**". Fetching transcript...`
+            ).addAiGenerated());
+            
+            // Poll for transcript
+            const pollResult = await pollForTranscriptReady(
+              pastMeeting.meeting.organizerId,
+              pastMeeting.meeting.joinWebUrl,
+              pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
+              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
+              6, 5000
+            );
+            
+            if (pollResult.success && pollResult.vttContent) {
+              const parsed = parseVttToEntries(pollResult.vttContent);
+              if (parsed.length > 0) {
+                console.log(`[TRANSCRIBE] Got ${parsed.length} transcript entries from past meeting`);
+                const displayEntries = parsed.length > 80 ? parsed.slice(-80) : parsed;
+                const transcript = await buildTranscriptHtml(
+                  displayEntries,
+                  pastMeeting.meeting.subject,
+                  [],
+                  parsed.length,
+                  parsed.length > 80,
+                  { userId: requesterId, displayName: actorName, meetingId }
+                );
+                await send(new MessageActivity(transcript).addAiGenerated().addFeedback());
+                storage.set(conversationKey, messages);
+                storage.set(sharedConversationKey, sharedMessages);
+                storage.set(llmConversationKey, llmMessages);
+                return;
+              }
+            }
+            
+            await send(new MessageActivity(
+              `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
+              `${pollResult.error || 'Transcription may not have been enabled during the call.'}`
+            ).addAiGenerated().addFeedback());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          } else {
+            await send(new MessageActivity(
+              `I couldn't find a Teams meeting on ${targetInfo.meeting_date}. ` +
+              `${pastMeeting.error || 'Please check the date and try again.'}`
+            ).addAiGenerated().addFeedback());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          }
+        }
+
+        // --- LAST MEETING LOOKUP (most recent from calendar) ---
+        if (targetInfo.target === 'last_meeting' || (targetInfo.target === 'past_meeting' && !targetInfo.meeting_date)) {
+          console.log(`[TRANSCRIBE] Looking up most recent meeting from calendar`);
+          const userId = activity.from.aadObjectId || activity.from.id;
+          
+          // Find most recent Teams meeting (null date = search all recent)
+          const pastMeeting = await graphApiHelper.findPastMeeting(userId, undefined, targetInfo.meeting_subject || undefined);
+          
+          if (pastMeeting.success && pastMeeting.meeting) {
+            console.log(`[TRANSCRIBE] Found most recent meeting: "${pastMeeting.meeting.subject}"`);
+            
+            await send(new MessageActivity(
+              `Found your most recent meeting: "**${pastMeeting.meeting.subject}**". Fetching transcript...`
+            ).addAiGenerated());
+            
+            // Poll for transcript
+            const pollResult = await pollForTranscriptReady(
+              pastMeeting.meeting.organizerId,
+              pastMeeting.meeting.joinWebUrl,
+              pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
+              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
+              6, 5000
+            );
+            
+            if (pollResult.success && pollResult.vttContent) {
+              const parsed = parseVttToEntries(pollResult.vttContent);
+              if (parsed.length > 0) {
+                console.log(`[TRANSCRIBE] Got ${parsed.length} transcript entries from last meeting`);
+                const displayEntries = parsed.length > 80 ? parsed.slice(-80) : parsed;
+                const transcript = await buildTranscriptHtml(
+                  displayEntries,
+                  pastMeeting.meeting.subject,
+                  [],
+                  parsed.length,
+                  parsed.length > 80,
+                  { userId: requesterId, displayName: actorName, meetingId }
+                );
+                await send(new MessageActivity(transcript).addAiGenerated().addFeedback());
+                storage.set(conversationKey, messages);
+                storage.set(sharedConversationKey, sharedMessages);
+                storage.set(llmConversationKey, llmMessages);
+                return;
+              }
+            }
+            
+            await send(new MessageActivity(
+              `I found your recent meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
+              `${pollResult.error || 'Transcription may not have been enabled during the call.'}`
+            ).addAiGenerated().addFeedback());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          } else {
+            await send(new MessageActivity(
+              `I couldn't find any recent Teams meetings in your calendar. ` +
+              `${pastMeeting.error || 'Try specifying a date like "transcribe yesterday\'s meeting".'}`
+            ).addAiGenerated().addFeedback());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          }
+        }
+
+        // --- CURRENT CONVERSATION TRANSCRIPT ---
         // Fetch meeting metadata (title + members) for header
         const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
         console.log(`[TRANSCRIBE_DEBUG] Step 3: Got chatInfo, organizer=${chatInfo?.organizer?.id}, joinWebUrl=${chatInfo?.joinWebUrl ? 'yes' : 'no'}`);
@@ -2043,14 +4531,23 @@ Output valid JSON only.`,
 
           const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
           console.log(`[TRANSCRIBE_DEBUG] Step 7: Transcript window min=${transcriptWindow.min}, max=${transcriptWindow.max}`);
+          
+          // Use fetchMeetingTranscriptText which handles ALL strategies internally:
+          // Strategy 0: RSC /chats/{chatId}/transcripts
+          // Strategy 1: /users/{organizerId}/onlineMeetings filter by joinWebUrl  
+          // Strategy 2: getAllTranscripts scan with thread matching
           const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
             chatInfo.organizer.id,
             chatInfo.joinWebUrl,
             transcriptWindow.min,
             transcriptWindow.max,
-            activity.conversation.id // Match by conversation thread
+            activity.conversation.id, // Match by conversation thread
+            undefined,                // knownMeetingId
+            undefined,                // targetCallId
+            true                      // force=true to bypass cooldown
           );
           console.log(`[TRANSCRIBE_DEBUG] Step 8: fetchMeetingTranscriptText returned ${vttContent ? vttContent.length + ' chars' : 'null'}`);
+          
           if (vttContent) {
             graphTranscriptParsed = parseVttToEntries(vttContent);
             if (graphTranscriptParsed.length > 0) {
@@ -2084,7 +4581,8 @@ Output valid JSON only.`,
 
           const transcript = await buildTranscriptHtml(
             displayEntries, meetingTitle, speakerList,
-            finalEntries.length, showingPartial
+            finalEntries.length, showingPartial,
+            { userId: requesterId, displayName: actorName, meetingId }
           );
 
           const responseActivity = new MessageActivity(transcript).addAiGenerated().addFeedback();
@@ -2114,7 +4612,8 @@ Output valid JSON only.`,
                   const transcript = await buildTranscriptHtml(
                     parsed.length > 80 ? parsed.slice(-80) : parsed,
                     graphTitle, speakerList,
-                    parsed.length, parsed.length > 80
+                    parsed.length, parsed.length > 80,
+                    { userId: requesterId, displayName: actorName, meetingId }
                   );
                   const responseActivity = new MessageActivity(transcript).addAiGenerated().addFeedback();
                   await send(responseActivity);
@@ -2126,23 +4625,63 @@ Output valid JSON only.`,
                   await send(responseActivity);
                 }
               } else {
-                const responseActivity = new MessageActivity(
-                  `No transcript available yet for this meeting.\n\n` +
-                  `**If you're in a Meet Now/instant call:**\n` +
-                  `• Say "**join the call**" and I'll start capturing live transcription\n\n` +
-                  `**If the meeting ended:**\n` +
-                  `• Wait 1-2 minutes for Teams to process the transcript, then try again`
-                ).addAiGenerated();
+                // Check if the bot ever joined this meeting's call
+                const cachedCtx = getCachedMeetingContext(activity.conversation.id);
+                const botWasInCall = !!(cachedCtx?.callStartedAt);
+                
+                console.log(`[TRANSCRIPT] No Graph transcript available. botWasInCall=${botWasInCall}, cachedCtx=${JSON.stringify(cachedCtx || {})}`);
+                
+                let noTranscriptMsg: string;
+                if (botWasInCall) {
+                  // Bot was in the call but no transcript found - Teams might still be processing
+                  noTranscriptMsg = 
+                    `I joined this meeting but haven't received the transcript yet.\n\n` +
+                    `**Possible reasons:**\n` +
+                    `• Teams transcription wasn't enabled during the call\n` +
+                    `• Teams is still processing the transcript (can take a few minutes)\n\n` +
+                    `**Try again in 2-3 minutes**, or enable transcription in Teams during your next call.`;
+                } else {
+                  // Bot never joined this meeting
+                  noTranscriptMsg = 
+                    `I don't have a transcript for this meeting because I wasn't asked to join the call.\n\n` +
+                    `**To get transcripts, I need to join your meeting:**\n` +
+                    `• Start or schedule a Teams meeting\n` +
+                    `• Say "**join the call**" or "**join**" in the meeting chat\n` +
+                    `• I'll join and capture the conversation live\n\n` +
+                    `_Note: I can only transcribe meetings that I've joined. Teams' built-in transcription is separate._`;
+                }
+                
+                const responseActivity = new MessageActivity(noTranscriptMsg).addAiGenerated();
                 await send(responseActivity);
               }
             } else {
-              const responseActivity = new MessageActivity(
-                `I couldn't find a transcript for this meeting yet.\n\n` +
-                `**If this is a Meet Now/instant call:**\n` +
-                `• Say "**join the call**" so I can capture live transcription\n\n` +
-                `**If the meeting already ended:**\n` +
-                `• Transcripts take 1-2 minutes to appear after a meeting ends`
-              ).addAiGenerated();
+              // Check if bot was ever in this meeting
+              const cachedCtx = getCachedMeetingContext(activity.conversation.id);
+              const botWasInCall = !!(cachedCtx?.callStartedAt);
+              
+              console.log(`[TRANSCRIPT] No meeting info available. botWasInCall=${botWasInCall}, isMeetingConversation=${isMeetingConversation}`);
+              
+              let noInfoMsg: string;
+              if (botWasInCall) {
+                noInfoMsg = 
+                  `I was in this meeting but can't find the transcript right now.\n\n` +
+                  `**Try again in a minute** — Teams may still be processing it.`;
+              } else if (isMeetingConversation) {
+                noInfoMsg = 
+                  `I don't have a transcript for this meeting yet.\n\n` +
+                  `**To capture transcripts:**\n` +
+                  `• Say "**join**" or "**join the call**" when you start the meeting\n` +
+                  `• I'll join and record the conversation live\n\n` +
+                  `_I can only transcribe meetings I've joined._`;
+              } else {
+                noInfoMsg = 
+                  `This doesn't appear to be a meeting chat. To get transcripts:\n\n` +
+                  `• Start a Teams meeting\n` +
+                  `• Ask me to join from the meeting chat\n` +
+                  `• I'll capture the conversation for you`;
+              }
+              
+              const responseActivity = new MessageActivity(noInfoMsg).addAiGenerated();
               await send(responseActivity);
             }
         }
@@ -2198,7 +4737,11 @@ Output valid JSON only.`,
           return;
         }
 
-        const insights = await generateKeyMeetingInsights(transcriptText, meetingTitle);
+        const insights = await generateKeyMeetingInsights(transcriptText, meetingTitle, {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+        });
         const insightsActivity = new MessageActivity(
           `## 💡 Key Meeting Insights\n\n${insights}`
         ).addAiGenerated().addFeedback();
@@ -2219,7 +4762,7 @@ Output valid JSON only.`,
     }
 
     // Handle meeting minutes requests
-    if (detectedIntent === 'minutes' || userMessage.includes('minutes') || userMessage.includes('meeting notes')) {
+    if (detectedIntent === 'minutes') {
       console.log(`[ACTION] Processing meeting minutes request`);
       await sendTypingIndicator(send);
       
@@ -2244,28 +4787,33 @@ Last week: ${lastWeekStart.toISOString().split('T')[0]} to ${today.toISOString()
           messages: [
             {
               role: 'user',
-              content: `Analyze this minutes request to determine what meeting the user wants.
+              content: `Determine what meeting the user wants minutes for.
 
 User request: "${cleanText || activity.text}"
+User is currently in a meeting chat: ${isMeetingConversation ? 'YES' : 'NO'}
 
 ${dateContext}
 
-Determine:
-1. Is the user asking for the CURRENT meeting/conversation or a PAST meeting by date?
-2. If a past meeting by date (e.g., "last Friday", "yesterday", "last week on Friday"), extract the date
-3. If a meeting subject/title is mentioned, extract it
-
-Respond with JSON only:
+RESPOND WITH JSON:
 {
   "target": "current" | "past_meeting",
-  "meeting_date": "ISO date string if past meeting by date, or null",
-  "meeting_subject": "meeting subject/title if mentioned, or null"
+  "meeting_date": "ISO date if explicit date mentioned, else null",
+  "meeting_subject": "title if mentioned, else null"
 }`
             }
           ],
-          instructions: `You are analyzing minutes requests.
-- If the user mentions a DATE reference ("yesterday", "last Friday", "last week", "Thursday's meeting"), return target="past_meeting" with meeting_date as ISO string.
-- If they ask generally for minutes of this meeting, return target="current".
+          instructions: `DECISION LOGIC (follow in order):
+
+1. If user is in a meeting chat (YES above):
+   - Default to target="current" unless they explicitly name a different date
+   - Generic phrases all mean the current session
+   
+2. Only set target="past_meeting" when BOTH conditions are met:
+   - User explicitly mentions a calendar date ("yesterday", "March 10", "last Tuesday")
+   - The date is clearly in the past, not referring to today's session
+
+3. When in doubt: target="current"
+
 Output valid JSON only.`,
           model: new OpenAIChatModel({
             model: config.azureOpenAIDeploymentName,
@@ -2275,7 +4823,12 @@ Output valid JSON only.`,
           })
         });
 
-        const targetResponse = await targetExtractPrompt.send('');
+        const targetResponse = await sendPromptWithTracking(targetExtractPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: cleanText || activity.text || '',
+        });
         const targetJsonStr = (targetResponse.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         let targetInfo: { target: string; meeting_date: string | null; meeting_subject: string | null } = {
           target: 'current', meeting_date: null, meeting_subject: null
@@ -2300,41 +4853,63 @@ Output valid JSON only.`,
 
           if (pastMeeting.success && pastMeeting.meeting) {
             console.log(`[MINUTES] Found past meeting: "${pastMeeting.meeting.subject}"`);
-            const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+            
+            // Notify user we're fetching the transcript
+            await send(new MessageActivity(
+              `Found meeting "**${pastMeeting.meeting.subject}**". Checking for transcript availability...`
+            ).addAiGenerated());
+            
+            // Poll for transcript with retries
+            const pollResult = await pollForTranscriptReady(
               pastMeeting.meeting.organizerId,
               pastMeeting.meeting.joinWebUrl,
               pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
-              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined
+              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
+              6,
+              5000
             );
 
-            if (vttContent) {
-              const parsed = parseVttToEntries(vttContent);
+            if (pollResult.success && pollResult.vttContent) {
+              const parsed = parseVttToEntries(pollResult.vttContent);
               if (parsed.length > 0) {
                 generatedMinutes = await generateMinutesHtml(
                   parsed,
                   pastMeeting.meeting.subject,
                   [],
-                  pastMeeting.meeting.start
+                  pastMeeting.meeting.start,
+                  { userId: requesterId, displayName: actorName, meetingId }
                 );
 
                 await send(new MessageActivity(generatedMinutes).addAiGenerated().addFeedback());
 
-                lastBotResponseMap.set(activity.conversation.id, {
+                recordBotResponse(activity.conversation.id, {
                   content: generatedMinutes,
                   contentType: 'minutes',
-                  subject: `Meeting Minutes: ${pastMeeting.meeting.subject}`,
+                    subject: `Meeting Minutes: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
                   timestamp: Date.now()
                 });
 
-                if (emailRequest.wantsEmail && emailRequest.emailAddress) {
-                  const sendResult = await graphApiHelper.sendEmail(
-                    activity.from.aadObjectId || activity.from.id,
-                    emailRequest.emailAddress,
-                    `Meeting Minutes: ${pastMeeting.meeting.subject}`,
-                    generatedMinutes
-                  );
-                  if (sendResult.success) {
-                    await send(new MessageActivity(`Done! I've emailed these minutes to **${emailRequest.emailAddress}**.`).addAiGenerated());
+                if (emailRequest.wantsEmail) {
+                  if (emailRequest.sendToAllAttendees) {
+                    const emailResult = await autoEmailSummaryToParticipants(
+                      activity.conversation.id,
+                      activity.from.aadObjectId || activity.from.id,
+                      `Meeting Minutes: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
+                      generatedMinutes
+                    );
+                    if (emailResult.sentCount > 0) {
+                      await send(new MessageActivity(`Done! I've emailed these minutes to **${emailResult.sentCount} attendee(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`).addAiGenerated());
+                    }
+                  } else if (emailRequest.emailAddress) {
+                    const sendResult = await graphApiHelper.sendEmail(
+                      activity.from.aadObjectId || activity.from.id,
+                      emailRequest.emailAddress,
+                      `Meeting Minutes: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
+                      generatedMinutes
+                    );
+                    if (sendResult.success) {
+                      await send(new MessageActivity(`Done! I've emailed these minutes to **${emailRequest.emailAddress}**.`).addAiGenerated());
+                    }
                   }
                 }
 
@@ -2346,8 +4921,8 @@ Output valid JSON only.`,
             }
 
             await send(new MessageActivity(
-              `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
-              `Transcription may not have been enabled for that meeting.`
+              `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available yet. ` +
+              `${pollResult.error || 'Transcription may not have been enabled, or the transcript is still processing.'}`
             ).addAiGenerated().addFeedback());
             storage.set(conversationKey, messages);
             storage.set(sharedConversationKey, sharedMessages);
@@ -2380,7 +4955,8 @@ Output valid JSON only.`,
             transcriptEntries,
             meetingTitle,
             memberList,
-            chatInfo?.startDateTime // Use actual meeting date
+            chatInfo?.startDateTime, // Use actual meeting date
+            { userId: requesterId, displayName: actorName, meetingId }
           );
           console.log(`[MINUTES] Minutes generated successfully from transcript`);
 
@@ -2416,34 +4992,53 @@ Output valid JSON only.`,
                   parsed,
                   meetingTitle,
                   chatMembers,
-                  chatInfo.startDateTime // Use actual meeting date
+                  chatInfo.startDateTime, // Use actual meeting date
+                  { userId: requesterId, displayName: actorName, meetingId }
                 );
                 
                 await send(new MessageActivity(generatedMinutes).addAiGenerated().addFeedback());
                 
-                lastBotResponseMap.set(activity.conversation.id, {
+                recordBotResponse(activity.conversation.id, {
                   content: generatedMinutes,
                   contentType: 'minutes',
-                  subject: `Meeting Minutes: ${meetingTitle}`,
+                    subject: `Meeting Minutes: ${meetingTitle} — ${config.botDisplayName}`,
                   timestamp: Date.now()
                 });
                 
                 // Handle email if requested
                 if (emailRequest.wantsEmail) {
-                  let recipientEmail = emailRequest.emailAddress;
-                  if (!recipientEmail) {
-                    const userInfo = await graphApiHelper.getUserInfo(activity.from.aadObjectId || activity.from.id);
-                    recipientEmail = userInfo?.mail || userInfo?.userPrincipalName || '';
-                  }
-                  if (recipientEmail) {
-                    const emailResult = await graphApiHelper.sendEmail(
+                  if (emailRequest.sendToAllAttendees) {
+                    const emailResult = await autoEmailSummaryToParticipants(
+                      activity.conversation.id,
                       activity.from.aadObjectId || activity.from.id,
-                      recipientEmail,
-                      `Meeting Minutes: ${meetingTitle}`,
+                      `Meeting Minutes: ${meetingTitle} — ${config.botDisplayName}`,
                       generatedMinutes
                     );
-                    if (emailResult.success) {
-                      await send(new MessageActivity(`Done! I've emailed the minutes to **${recipientEmail}**.`).addAiGenerated());
+                    if (emailResult.sentCount > 0) {
+                      await send(new MessageActivity(`Done! I've emailed the minutes to **${emailResult.sentCount} attendee(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`).addAiGenerated());
+                    }
+                  } else {
+                    let recipientEmail = emailRequest.emailAddress;
+                    if (!recipientEmail) {
+                      const chatMembers = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
+                      const selfMember = chatMembers.find((m) => m.userId === (activity.from.aadObjectId || activity.from.id) || m.displayName.toLowerCase() === (actorName || '').toLowerCase());
+                      recipientEmail = selfMember?.email || '';
+                      if (!recipientEmail) {
+                        const userInfo = await graphApiHelper.getUserInfo(activity.from.aadObjectId || activity.from.id);
+                        recipientEmail = userInfo?.mail || userInfo?.userPrincipalName || '';
+                      }
+                    }
+                    if (recipientEmail) {
+                      const emailResult = await graphApiHelper.sendEmail(
+                        activity.from.aadObjectId || activity.from.id,
+                        recipientEmail,
+                        `Meeting Minutes: ${meetingTitle} — ${config.botDisplayName}`,
+                        generatedMinutes,
+                        { replyToEmail: recipientEmail, replyToName: actorName }
+                      );
+                      if (emailResult.success) {
+                        await send(new MessageActivity(`Done! I've emailed the minutes to **${recipientEmail}**.`).addAiGenerated());
+                      }
                     }
                   }
                 }
@@ -2471,29 +5066,48 @@ Output valid JSON only.`,
         // If user requested email, send it now
         if (emailRequest.wantsEmail && generatedMinutes) {
           console.log(`[EMAIL] User requested minutes via email`);
-          let recipientEmail = emailRequest.emailAddress;
-          
-          // If no email in message, get user's email
-          if (!recipientEmail) {
-            const userInfo = await graphApiHelper.getUserInfo(activity.from.aadObjectId || activity.from.id);
-            recipientEmail = userInfo?.mail || userInfo?.userPrincipalName || '';
-          }
-          
-          if (recipientEmail) {
-            const emailResult = await graphApiHelper.sendEmail(
+          if (emailRequest.sendToAllAttendees) {
+            const emailResult = await autoEmailSummaryToParticipants(
+              activity.conversation.id,
               activity.from.aadObjectId || activity.from.id,
-              recipientEmail,
               `Meeting Minutes from ${config.botDisplayName}`,
               generatedMinutes
             );
-            
-            if (emailResult.success) {
-              await send(new MessageActivity(`Done! I've emailed the minutes to **${recipientEmail}**.`).addAiGenerated());
+            if (emailResult.sentCount > 0) {
+              await send(new MessageActivity(`Done! I've emailed the minutes to **${emailResult.sentCount} attendee(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`).addAiGenerated());
             } else {
-              await send(new MessageActivity(`Hmm, I couldn't send that email - ${emailResult.error || 'something went wrong'}. Want to try again?`).addAiGenerated());
+              await send(new MessageActivity(`I couldn't email the minutes to attendees. No valid email addresses found.`).addAiGenerated());
             }
           } else {
-            await send(new MessageActivity(`I couldn't figure out your email address. Could you tell me where to send it?`).addAiGenerated());
+            let recipientEmail = emailRequest.emailAddress;
+            
+            // If no email in message, get user's email
+            if (!recipientEmail) {
+              const chatMembers = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
+              const selfMember = chatMembers.find((m) => m.userId === (activity.from.aadObjectId || activity.from.id) || m.displayName.toLowerCase() === (actorName || '').toLowerCase());
+              recipientEmail = selfMember?.email || '';
+              if (!recipientEmail) {
+                const userInfo = await graphApiHelper.getUserInfo(activity.from.aadObjectId || activity.from.id);
+                recipientEmail = userInfo?.mail || userInfo?.userPrincipalName || '';
+              }
+            }
+            
+            if (recipientEmail) {
+              const emailResult = await graphApiHelper.sendEmail(
+                activity.from.aadObjectId || activity.from.id,
+                recipientEmail,
+                `Meeting Minutes from ${config.botDisplayName}`,
+                generatedMinutes
+              );
+              
+              if (emailResult.success) {
+                await send(new MessageActivity(`Done! I've emailed the minutes to **${recipientEmail}**.`).addAiGenerated());
+              } else {
+                await send(new MessageActivity(`Hmm, I couldn't send that email - ${emailResult.error || 'something went wrong'}. Want to try again?`).addAiGenerated());
+              }
+            } else {
+              await send(new MessageActivity(`I couldn't figure out your email address. Could you tell me where to send it?`).addAiGenerated());
+            }
           }
         }
       } catch (error) {
@@ -2524,7 +5138,8 @@ Output valid JSON only.`,
           cleanText || activity.text || '',
           meetingTitle,
           conversationContext,
-          transcriptContext
+          transcriptContext,
+          { userId: requesterId, displayName: actorName, meetingId }
         );
 
         await send(new MessageActivity(answer).addAiGenerated().addFeedback());
@@ -2540,6 +5155,188 @@ Output valid JSON only.`,
       return;
     }
 
+    if (detectedIntent === 'check_inbox' || detectedIntent === 'reply_email') {
+      console.log(`[ACTION] Processing inbox capability request`);
+      await sendTypingIndicator(send);
+
+      try {
+        const inboxRequest = parseInboxRequest(cleanText || activity.text || '');
+        const mailboxUserId = activity.from.aadObjectId || activity.from.id;
+        const cachedInboxCtx = inboxContextMap.get(activity.conversation.id);
+
+        // ── Fast path: reply_email with a cached matched message ─────────────────
+        // When the user says "respond to him" / "reply to her" without a new sender
+        // query, skip re-fetching the inbox and reply against the exact message we
+        // already showed them.  This prevents a rescored inbox fetch from picking a
+        // different message (e.g. a calendar cancellation) instead of the intended one.
+        if (
+          detectedIntent === 'reply_email' &&
+          !inboxRequest.senderQuery &&
+          cachedInboxCtx?.lastMessages?.length
+        ) {
+          // Try to extract a sender reference from the user's message against cached contacts
+          let targetMsg: MailMessageSummary | undefined;
+          const userLower = (cleanText || '').toLowerCase();
+          for (const contact of cachedInboxCtx.contacts || []) {
+            const firstName = contact.displayName.split(' ')[0].toLowerCase();
+            const fullName = contact.displayName.toLowerCase();
+            if (userLower.includes(firstName) || userLower.includes(fullName)) {
+              targetMsg = cachedInboxCtx.lastMessages.find(
+                (m) => (m.fromName || '').toLowerCase().includes(firstName)
+              );
+              if (targetMsg) {
+                console.log(`[INBOX] Fast-path: resolved sender '${contact.displayName}' from user message`);
+                break;
+              }
+            }
+          }
+          // Fall back to the stored lastMatchedMessageId
+          if (!targetMsg && cachedInboxCtx.lastMatchedMessageId) {
+            targetMsg = cachedInboxCtx.lastMessages.find((m) => m.id === cachedInboxCtx.lastMatchedMessageId)
+              || cachedInboxCtx.lastMessages[0];
+            console.log(`[INBOX] Fast-path: using cached matched message ${cachedInboxCtx.lastMatchedMessageId} from ${cachedInboxCtx.lastMatchedSenderName}`);
+          }
+          // Last resort: most recent cached message
+          if (!targetMsg) {
+            targetMsg = cachedInboxCtx.lastMessages[0];
+          }
+
+          if (targetMsg && cachedInboxCtx.mailboxUserId) {
+            rememberMatchedInboxThread(activity.conversation.id, mailboxUserId, targetMsg);
+            const threadMessages = targetMsg.conversationId
+              ? await graphApiHelper.getMailConversationMessages(mailboxUserId, targetMsg.conversationId, 8)
+              : [];
+            const draftReply = await draftReplyFromInboxThread(
+              cleanText || activity.text || '',
+              threadMessages.length ? [...threadMessages].reverse() : [targetMsg],
+              sendPromptWithTracking,
+              {
+                userId: requesterId,
+                displayName: actorName,
+                meetingId,
+                estimatedInputText: `${cleanText || activity.text || ''}\n${JSON.stringify(threadMessages.length ? threadMessages : [targetMsg])}`,
+              },
+              { name: targetMsg.fromName || '', email: targetMsg.fromAddress || '' }
+            );
+            await send(new MessageActivity(draftReply).addAiGenerated().addFeedback());
+            recordBotResponse(activity.conversation.id, {
+              content: draftReply,
+              contentType: 'general',
+              subject: `Email Reply Draft for ${targetMsg.fromName || targetMsg.fromAddress}`,
+              timestamp: Date.now(),
+            });
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          }
+        }
+        // ── Normal path: fetch inbox ──────────────────────────────────────────────
+        const effectiveSenderQuery = inboxRequest.senderQuery ||
+          (detectedIntent === 'reply_email' && cachedInboxCtx?.lastMatchedSenderName
+            ? cachedInboxCtx.lastMatchedSenderName
+            : undefined);
+        const inboxMessages = await graphApiHelper.getInboxMessages(mailboxUserId, {
+          senderQuery: effectiveSenderQuery,
+          top: Math.max(inboxRequest.maxResults * 2, 8),
+          unreadOnly: inboxRequest.wantsUnreadOnly,
+        });
+
+        const scoreInboxPriority = (message: { importance: string; isRead: boolean; flagged?: boolean; receivedDateTime: string }) => {
+          const recencyBonus = message.receivedDateTime
+            ? Math.max(0, 2 - Math.floor((Date.now() - new Date(message.receivedDateTime).getTime()) / (1000 * 60 * 60 * 12)))
+            : 0;
+          return (message.importance === 'high' ? 3 : 0) + (message.flagged ? 2 : 0) + (!message.isRead ? 1 : 0) + recencyBonus;
+        };
+
+        const prioritizedMessages = [...inboxMessages].sort((left, right) => {
+          const diff = scoreInboxPriority(right) - scoreInboxPriority(left);
+          if (diff !== 0) return diff;
+          // Tiebreak: more recent wins
+          return new Date(right.receivedDateTime).getTime() - new Date(left.receivedDateTime).getTime();
+        });
+        const relevantMessages = inboxRequest.wantsUrgentOnly
+          ? prioritizedMessages.filter((message) => scoreInboxPriority(message) >= 3).slice(0, inboxRequest.maxResults)
+          : prioritizedMessages.slice(0, inboxRequest.maxResults);
+
+        // Cache all fetched messages and the best match for future follow-ups
+        cacheInboxContext(activity.conversation.id, relevantMessages.length ? relevantMessages : prioritizedMessages.slice(0, inboxRequest.maxResults));
+        if (relevantMessages.length > 0) {
+          rememberMatchedInboxThread(activity.conversation.id, mailboxUserId, relevantMessages[0]);
+        }
+
+        if (!relevantMessages.length) {
+          const senderFilterNote = effectiveSenderQuery ? ` from **${effectiveSenderQuery}**` : '';
+          const guidance = inboxMessages.length > 0
+            ? `I can read your inbox, but I didn't find matching messages${senderFilterNote} in the messages I checked. Try a broader query like "show emails from Leonard".`
+            : `I couldn't find matching inbox messages${senderFilterNote}. If you expected results, make sure the app has Microsoft Graph mail read permissions such as **Mail.Read** and admin consent for the mailbox.`;
+          await send(new MessageActivity(
+            guidance
+          ).addAiGenerated().addFeedback());
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+
+        if (detectedIntent === 'reply_email' || inboxRequest.wantsReplyDraft) {
+          const primaryMessage = relevantMessages[0];
+          rememberMatchedInboxThread(activity.conversation.id, mailboxUserId, primaryMessage);
+          const threadMessages = primaryMessage.conversationId
+            ? await graphApiHelper.getMailConversationMessages(mailboxUserId, primaryMessage.conversationId, 8)
+            : [];
+          const draftReply = await draftReplyFromInboxThread(
+            cleanText || activity.text || '',
+            threadMessages.length ? [...threadMessages].reverse() : [primaryMessage],
+            sendPromptWithTracking,
+            {
+              userId: requesterId,
+              displayName: actorName,
+              meetingId,
+              estimatedInputText: `${cleanText || activity.text || ''}\n${JSON.stringify(threadMessages.length ? threadMessages : [primaryMessage])}`,
+            },
+            { name: primaryMessage.fromName || '', email: primaryMessage.fromAddress || '' }
+          );
+          await send(new MessageActivity(draftReply).addAiGenerated().addFeedback());
+          recordBotResponse(activity.conversation.id, {
+            content: draftReply,
+            contentType: 'general',
+            subject: `Email Reply Draft for ${primaryMessage.fromName || primaryMessage.fromAddress}`,
+            timestamp: Date.now(),
+          });
+        } else {
+          const inboxSummary = await summarizeInboxMessages(
+            cleanText || activity.text || '',
+            relevantMessages,
+            sendPromptWithTracking,
+            {
+              userId: requesterId,
+              displayName: actorName,
+              meetingId,
+              estimatedInputText: `${cleanText || activity.text || ''}\n${JSON.stringify(relevantMessages)}`,
+            }
+          );
+          await send(new MessageActivity(inboxSummary).addAiGenerated().addFeedback());
+          recordBotResponse(activity.conversation.id, {
+            content: inboxSummary,
+            contentType: 'general',
+            subject: `Inbox Summary from ${config.botDisplayName}`,
+            timestamp: Date.now(),
+          });
+        }
+      } catch (error) {
+        console.error(`[ERROR_INBOX]`, error);
+        await send(new MessageActivity(
+          `I couldn't review the inbox right now. This capability needs working Microsoft Graph mail permissions and mailbox access. Please verify the app can read messages, then try again.`
+        ).addAiGenerated().addFeedback());
+      }
+
+      storage.set(conversationKey, messages);
+      storage.set(sharedConversationKey, sharedMessages);
+      storage.set(llmConversationKey, llmMessages);
+      return;
+    }
+
     const isJoinCallIntent =
       detectedIntent === 'join_meeting' ||
       (userMessage.includes('join') && userMessage.includes('call')) ||
@@ -2547,6 +5344,20 @@ Output valid JSON only.`,
 
     if (isJoinCallIntent) {
       console.log(`[ACTION] Processing join-call flow`);
+
+      const monthlyJoinCheck = canUserJoinMeetingThisMonth(requesterId);
+      if (!monthlyJoinCheck.allowed) {
+        await send(
+          new MessageActivity(
+            `Free tier limit reached: you've used ${monthlyJoinCheck.used}/${monthlyJoinCheck.limit} meeting joins this month. ` +
+            `Upgrade your plan or wait for next month to join more meetings.`
+          ).addAiGenerated().addFeedback()
+        );
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      }
 
       // Guard: Check if bot is already in this meeting's call
       const existingCall = Array.from(activeCallMap.entries()).find(
@@ -2573,10 +5384,18 @@ Output valid JSON only.`,
       if (callbackUri && tenantId) {
         // Cancel any previous pending retry for this conversation
         cancelPendingJoin(activity.conversation.id);
+        recordMeetingJoinRequest(requesterId, actorName, activityTenantId);
 
         console.log(`[CALLS_API] Getting meeting info for join attempt, callback: ${callbackUri}`);
         const meetingOnlineInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
         if (meetingOnlineInfo?.organizer?.id) {
+          recordMeetingJoinForQuota(
+            requesterId,
+            actorName,
+            meetingId,
+            meetingOnlineInfo.subject || getCachedMeetingContext(meetingId)?.subject || 'Meeting',
+            activityTenantId
+          );
           const callResult = await graphApiHelper.joinMeetingCall(meetingOnlineInfo, callbackUri, tenantId, activity.conversation.id);
           if (callResult) {
             joinedCall = true;
@@ -2585,6 +5404,7 @@ Output valid JSON only.`,
               serviceUrl: activity.serviceUrl || '',
               organizerId: meetingOnlineInfo.organizer?.id,
               joinWebUrl: meetingOnlineInfo.joinWebUrl,
+              onlineMeetingId: (meetingOnlineInfo as any)?.onlineMeetingId,
             });
             // Register pending join info so auto-retry works if the call terminates with 2203
             pendingJoinMap.set(activity.conversation.id, {
@@ -2670,38 +5490,134 @@ Output valid JSON only.`,
         const hasRecentContext = lastResponse && (Date.now() - lastResponse.timestamp) < 10 * 60 * 1000; // within 10 minutes
         
         // Use LLM to intelligently analyze the email request
-        const emailAnalysis = await analyzeEmailRequest(userText, !!hasRecentContext, lastResponse?.contentType);
-        console.log(`[EMAIL] LLM Analysis: contextual=${emailAnalysis.isContextualReference}, contentType=${emailAnalysis.contentType}, recipientType=${emailAnalysis.recipientType}, reasoning=${emailAnalysis.reasoning}`);
+        const emailAnalysis = await analyzeEmailRequest(
+          userText,
+          !!hasRecentContext,
+          lastResponse?.contentType,
+          sendPromptWithTracking,
+          {
+            userId: requesterId,
+            displayName: actorName,
+            meetingId,
+            estimatedInputText: `${userText}\n${lastResponse?.contentType || ''}`,
+          }
+        );
+        console.log(`[EMAIL] LLM Analysis: contextual=${emailAnalysis.isContextualReference}, contentType=${emailAnalysis.contentType}, recipientType=${emailAnalysis.recipientType}, emails=${emailAnalysis.recipientEmails.join(',')}, names=${emailAnalysis.recipientNames.join(',')}, reasoning=${emailAnalysis.reasoning}`);
         
-        // Determine recipient email
-        let recipientEmail = emailAnalysis.recipientEmail;
-        let recipientName = emailAnalysis.recipientName || '';
+        // Determine recipient emails - support multiple recipients
+        let recipientEmails: string[] = [...emailAnalysis.recipientEmails];
+        let recipientNames: string[] = [...emailAnalysis.recipientNames];
         
-        // If LLM found a recipient name but no email, try to resolve it
-        if (!recipientEmail && emailAnalysis.recipientName && emailAnalysis.recipientType === 'other') {
-          console.log(`[EMAIL] Trying to resolve email for: "${emailAnalysis.recipientName}"`);
-          const memberMatch = await graphApiHelper.findMemberEmailByName(activity.conversation.id, emailAnalysis.recipientName);
-          if (memberMatch && memberMatch.email) {
-            recipientEmail = memberMatch.email;
-            recipientName = memberMatch.displayName;
-            console.log(`[EMAIL] Resolved "${emailAnalysis.recipientName}" to ${recipientName} <${recipientEmail}>`);
+        // If LLM found recipient names but no emails, try to resolve them from chat members
+        if (recipientEmails.length === 0 && emailAnalysis.recipientNames.length > 0 && (emailAnalysis.recipientType === 'other' || emailAnalysis.recipientType === 'multiple')) {
+          console.log(`[EMAIL] Trying to resolve emails for: ${emailAnalysis.recipientNames.join(', ')}`);
+          for (const name of emailAnalysis.recipientNames) {
+            const memberMatch = await graphApiHelper.findMemberEmailByName(activity.conversation.id, name);
+            if (memberMatch && memberMatch.email) {
+              recipientEmails.push(memberMatch.email);
+              // Update name to resolved display name
+              const idx = recipientNames.indexOf(name);
+              if (idx >= 0) recipientNames[idx] = memberMatch.displayName;
+              console.log(`[EMAIL] Resolved "${name}" to ${memberMatch.displayName} <${memberMatch.email}>`);
+              continue;
+            }
+
+            const inboxMatch = resolveRecipientFromInboxContext(activity.conversation.id, name);
+            if (inboxMatch?.email) {
+              recipientEmails.push(inboxMatch.email);
+              const idx = recipientNames.indexOf(name);
+              if (idx >= 0) recipientNames[idx] = inboxMatch.displayName;
+              console.log(`[EMAIL] Resolved "${name}" from inbox context to ${inboxMatch.displayName} <${inboxMatch.email}>`);
+            }
           }
         }
         
-        // If still no email (sending to self or couldn't resolve), get user's own email
-        if (!recipientEmail) {
-          const userInfo = await graphApiHelper.getUserInfo(activity.from.aadObjectId || activity.from.id);
-          recipientEmail = userInfo?.mail || userInfo?.userPrincipalName || '';
-          if (emailAnalysis.recipientType === 'self' || !emailAnalysis.recipientType) {
-            recipientName = userName; // sending to self
+        // Handle "all_participants" - get all chat members' emails
+        if (emailAnalysis.recipientType === 'all_participants' && recipientEmails.length === 0) {
+          console.log(`[EMAIL] Resolving all participant emails for conversation`);
+          const chatMembers = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
+          const selfAadId = activity.from.aadObjectId || activity.from.id;
+          for (const member of chatMembers) {
+            if (member.email && member.userId !== selfAadId) {
+              recipientEmails.push(member.email);
+              recipientNames.push(member.displayName);
+            }
+          }
+          // Also include self unless excluded
+          const selfMember = chatMembers.find((m) => m.userId === selfAadId);
+          if (selfMember?.email) {
+            recipientEmails.push(selfMember.email);
+            recipientNames.push(userName);
+          }
+          console.log(`[EMAIL] Resolved ${recipientEmails.length} participant emails`);
+        }
+        
+        // If still no emails (sending to self or couldn't resolve), try chat members first (cross-tenant),
+        // then fall back to Graph /users/ (home-tenant only).
+        if (recipientEmails.length === 0 && (emailAnalysis.recipientType === 'self' || !emailAnalysis.recipientType)) {
+          // Chat members API works across tenants and returns email for all participants.
+          const selfAadId = activity.from.aadObjectId || activity.from.id;
+          const chatMembers = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
+          const selfMember = chatMembers.find((m) => m.userId === selfAadId || m.displayName.toLowerCase() === (actorName || '').toLowerCase());
+          if (selfMember?.email) {
+            recipientEmails.push(selfMember.email);
+            recipientNames.push(userName);
+            console.log(`[EMAIL] Resolved self email from chat members: ${selfMember.email}`);
+          } else {
+            // Fall back to /users/{id} (only works for home-tenant users)
+            const userInfo = await graphApiHelper.getUserInfo(selfAadId);
+            const selfEmail = userInfo?.mail || userInfo?.userPrincipalName || '';
+            if (selfEmail) {
+              recipientEmails.push(selfEmail);
+              recipientNames.push(userName);
+            }
+          }
+        }
+
+        // Last-resort resolution from recent inbox context for phrases like "to his email".
+        if (recipientEmails.length === 0 && emailAnalysis.recipientNames.length > 0) {
+          for (const name of emailAnalysis.recipientNames) {
+            const inboxMatch = resolveRecipientFromInboxContext(activity.conversation.id, name);
+            if (inboxMatch?.email) {
+              recipientEmails.push(inboxMatch.email);
+              recipientNames.push(inboxMatch.displayName);
+              console.log(`[EMAIL] Last-resort inbox resolution: ${inboxMatch.displayName} <${inboxMatch.email}>`);
+            }
           }
         }
         
-        if (!recipientEmail) {
-          await send(new MessageActivity(`I couldn't determine the recipient email address. Please specify who to send the email to (e.g., "send the summary to John" or provide an email address).`).addAiGenerated().addFeedback());
+        if (recipientEmails.length === 0) {
+          await send(new MessageActivity(`I couldn't determine the recipient email address. Please specify who to send the email to (e.g., "send the summary to John" or provide an email address like john@example.com).`).addAiGenerated().addFeedback());
         } else if (emailAnalysis.isContextualReference && hasRecentContext && lastResponse) {
           // User is referring to something we just showed them - use conversation context!
-          console.log(`[EMAIL] Using contextual reference - sending last ${lastResponse.contentType} response`);
+          console.log(`[EMAIL] Using contextual reference - sending last ${lastResponse.contentType} response to ${recipientEmails.length} recipient(s)`);;
+
+          const inboxContext = inboxContextMap.get(activity.conversation.id);
+          const hasThreadReplyContext =
+            !!inboxContext?.lastMatchedMessageId &&
+            !!inboxContext?.mailboxUserId &&
+            (lastResponse.subject || '').toLowerCase().startsWith('email reply draft');
+
+          if (hasThreadReplyContext) {
+            const replyBody = extractSuggestedReplyBody(lastResponse.content);
+            const threadReplyResult = await graphApiHelper.replyToMessageInThread(
+              inboxContext.mailboxUserId as string,
+              inboxContext.lastMatchedMessageId as string,
+              replyBody
+            );
+
+            if (threadReplyResult.success) {
+              const targetName = inboxContext.lastMatchedSenderName || recipientNames[0] || 'the sender';
+              await send(new MessageActivity(`Done! I replied in the same email thread to **${targetName}**.`).addAiGenerated().addFeedback());
+              console.log(`[EMAIL] Sent in-thread reply instead of new email`);
+              storage.set(conversationKey, messages);
+              storage.set(sharedConversationKey, sharedMessages);
+              storage.set(llmConversationKey, llmMessages);
+              return;
+            }
+
+            console.warn(`[EMAIL] In-thread reply failed, falling back to regular email send: ${threadReplyResult.error}`);
+          }
           
           const contentTypeLabels: Record<string, string> = {
             'calendar': 'calendar schedule',
@@ -2714,20 +5630,20 @@ Output valid JSON only.`,
           };
           
           const emailSubject = lastResponse.subject || `${contentTypeLabels[lastResponse.contentType] || 'Information'} from ${config.botDisplayName}`;
+          const contentTypeName = contentTypeLabels[lastResponse.contentType] || 'information';
           
+          // Use independent sending for multiple recipients so one failure doesn't affect others
           const sendResult = await graphApiHelper.sendEmail(
             activity.from.aadObjectId || activity.from.id,
-            recipientEmail,
+            recipientEmails,
             emailSubject,
-            lastResponse.content
+            lastResponse.content,
+            { replyToEmail: recipientEmails[0], replyToName: actorName, sendIndependently: recipientEmails.length > 1 }
           );
           
-          if (sendResult.success) {
-            const recipientDisplay = recipientName ? `**${recipientName}** (${recipientEmail})` : `**${recipientEmail}**`;
-            await send(new MessageActivity(`Done! I've sent your ${contentTypeLabels[lastResponse.contentType] || 'information'} to ${recipientDisplay}.`).addAiGenerated());
-          } else {
-            await send(new MessageActivity(`Couldn't send that email - ${sendResult.error || 'something went wrong'}. Want to try again?`).addAiGenerated());
-          }
+          // Use the helper to format the result with partial success handling
+          const resultMessage = formatEmailResult(sendResult, recipientNames, contentTypeName);
+          await send(new MessageActivity(resultMessage).addAiGenerated().addFeedback());
         } else if (emailAnalysis.contentType === 'summary' || emailAnalysis.contentType === 'minutes' || emailAnalysis.contentType === 'transcript') {
           // Generate the requested content first, then email it
           const wantsSummary = emailAnalysis.contentType === 'summary';
@@ -2747,14 +5663,22 @@ Output valid JSON only.`,
             const memberList = chatMembers.length > 0 ? chatMembers : [userName];
             
             if (wantsSummary) {
-              contentToSend = await generateFormattedSummaryHtml(transcriptEntries, meetingTitle, userName, memberList, chatInfo?.startDateTime);
-              emailSubject = `Meeting Summary: ${meetingTitle}`;
+              contentToSend = await generateFormattedSummaryHtml(transcriptEntries, meetingTitle, userName, memberList, chatInfo?.startDateTime, {
+                userId: requesterId,
+                displayName: actorName,
+                meetingId,
+              });
+                emailSubject = `Meeting Summary: ${meetingTitle} — ${config.botDisplayName}`;
             } else if (wantsMinutes) {
-              contentToSend = await generateMinutesHtml(transcriptEntries, meetingTitle, memberList, chatInfo?.startDateTime);
-              emailSubject = `Meeting Minutes: ${meetingTitle}`;
+              contentToSend = await generateMinutesHtml(transcriptEntries, meetingTitle, memberList, chatInfo?.startDateTime, {
+                userId: requesterId,
+                displayName: actorName,
+                meetingId,
+              });
+                emailSubject = `Meeting Minutes: ${meetingTitle} — ${config.botDisplayName}`;
             } else if (wantsTranscript) {
               contentToSend = transcriptEntries.map(e => `[${e.speaker}]: ${e.text}`).join('\n');
-              emailSubject = `Meeting Transcript: ${meetingTitle}`;
+                emailSubject = `Meeting Transcript: ${meetingTitle} — ${config.botDisplayName}`;
             }
           } else {
             // Try to fetch transcript from Graph API
@@ -2777,14 +5701,22 @@ Output valid JSON only.`,
                   const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
                   
                   if (wantsSummary) {
-                    contentToSend = await generateFormattedSummaryHtml(parsed, meetingTitle, userName, chatMembers, chatInfo.startDateTime);
-                    emailSubject = `Meeting Summary: ${meetingTitle}`;
+                    contentToSend = await generateFormattedSummaryHtml(parsed, meetingTitle, userName, chatMembers, chatInfo.startDateTime, {
+                      userId: requesterId,
+                      displayName: actorName,
+                      meetingId,
+                    });
+                      emailSubject = `Meeting Summary: ${meetingTitle} — ${config.botDisplayName}`;
                   } else if (wantsMinutes) {
-                    contentToSend = await generateMinutesHtml(parsed, meetingTitle, chatMembers, chatInfo.startDateTime);
-                    emailSubject = `Meeting Minutes: ${meetingTitle}`;
+                    contentToSend = await generateMinutesHtml(parsed, meetingTitle, chatMembers, chatInfo.startDateTime, {
+                      userId: requesterId,
+                      displayName: actorName,
+                      meetingId,
+                    });
+                      emailSubject = `Meeting Minutes: ${meetingTitle} — ${config.botDisplayName}`;
                   } else if (wantsTranscript) {
                     contentToSend = parsed.map(e => `[${e.speaker}]: ${e.text}`).join('\n');
-                    emailSubject = `Meeting Transcript: ${meetingTitle}`;
+                      emailSubject = `Meeting Transcript: ${meetingTitle} — ${config.botDisplayName}`;
                   }
                 }
               }
@@ -2795,24 +5727,28 @@ Output valid JSON only.`,
             // Also show in chat
             await send(new MessageActivity(contentToSend).addAiGenerated().addFeedback());
             
-            // Send email
+            // Send email to all recipients independently so one failure doesn't affect others
+            const contentTypeName = wantsSummary ? 'summary' : wantsMinutes ? 'minutes' : 'transcript';
             const sendResult = await graphApiHelper.sendEmail(
               activity.from.aadObjectId || activity.from.id,
-              recipientEmail,
+              recipientEmails,
               emailSubject,
-              contentToSend
+              contentToSend,
+              { replyToEmail: recipientEmails[0], replyToName: actorName, sendIndependently: recipientEmails.length > 1 }
             );
             
-            if (sendResult.success) {
-              const recipientDisplay = recipientName ? `**${recipientName}** (${recipientEmail})` : `**${recipientEmail}**`;
-              await send(new MessageActivity(`Done! I've sent the ${wantsSummary ? 'summary' : wantsMinutes ? 'minutes' : 'transcript'} to ${recipientDisplay}.`).addAiGenerated());
-            } else {
-              await send(new MessageActivity(`Couldn't send that email - ${sendResult.error || 'something went wrong'}. Want to try again?`).addAiGenerated());
-            }
+            // Use the helper to format the result with partial success handling
+            const resultMessage = formatEmailResult(sendResult, recipientNames, contentTypeName);
+            await send(new MessageActivity(resultMessage).addAiGenerated().addFeedback());
           } else {
+            const contentTypeName = wantsSummary ? 'summary' : wantsMinutes ? 'minutes' : 'transcript';
             await send(new MessageActivity(
-              `I need a meeting transcript to send ${wantsSummary ? 'a summary' : wantsMinutes ? 'minutes' : 'a transcript'}. ` +
-              `Ask me to **join the call** during a meeting, or say **transcribe** after a recorded meeting.`
+              `I need meeting content to send ${wantsSummary ? 'a summary' : wantsMinutes ? 'minutes' : 'a transcript'}.\n\n` +
+              `**How to get ${contentTypeName}:**\n` +
+              `• **During a live meeting:** Say "join the call" to capture live transcript\n` +
+              `• **After a recorded meeting:** Say "transcribe" to fetch from Teams\n` +
+              `• **For a past meeting:** Say "transcribe yesterday's standup" or similar\n\n` +
+              `Once I have the transcript, I can create and email the ${contentTypeName} to ${formatRecipientDisplay(recipientEmails, recipientNames)}.`
             ).addAiGenerated().addFeedback());
           }
         } else {
@@ -2854,40 +5790,59 @@ Respond with JSON: {"subject": "clear email subject", "body": "complete email bo
             })
           });
 
-          const extractResponse = await extractPrompt.send('');
+          const extractResponse = await sendPromptWithTracking(extractPrompt, '', {
+            userId: requesterId,
+            displayName: actorName,
+            meetingId,
+            estimatedInputText: `${cleanText || activity.text || ''}\n${conversationContext}`,
+          });
           const jsonStr = (extractResponse.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
           const extracted = JSON.parse(jsonStr);
           
           if (extracted.needs_clarification) {
             await send(new MessageActivity(extracted.body || "I'm not sure what you'd like me to email. Could you please clarify what content you want me to send?").addAiGenerated().addFeedback());
           } else {
-            // Send the email
+            // Send the email to all recipients independently so one failure doesn't affect others
             const sendResult = await graphApiHelper.sendEmail(
               activity.from.aadObjectId || activity.from.id,
-              recipientEmail,
+              recipientEmails,
               extracted.subject || `Message from ${config.botDisplayName}`,
-              extracted.body || cleanText || activity.text || ''
+              extracted.body || cleanText || activity.text || '',
+              { replyToEmail: recipientEmails[0], replyToName: actorName, sendIndependently: recipientEmails.length > 1 }
             );
 
-            // Let LLM generate the response based on result
-            const responsePrompt = new ChatPrompt({
-              messages: [
-                {
-                  role: 'user',
-                  content: `Generate a brief, friendly response about sending an email.\n\nResult: ${sendResult.success ? 'SUCCESS' : 'FAILED'}\nRecipient: ${recipientEmail}\nSubject: ${extracted.subject || `Message from ${config.botDisplayName}`}\n${sendResult.error ? `Error: ${sendResult.error}` : ''}\n\nRespond naturally as if you just completed (or failed) this action.`
-                }
-              ],
-              instructions: 'You are a helpful assistant. Generate a natural, brief response about the email send result. Be friendly but concise.',
-              model: new OpenAIChatModel({
-                model: config.azureOpenAIDeploymentName,
-                apiKey: config.azureOpenAIKey,
-                endpoint: config.azureOpenAIEndpoint,
-                apiVersion: '2024-10-21'
-              })
-            });
+            // Use helper for consistent result formatting with partial success support
+            if (sendResult.partialSuccess || !sendResult.success) {
+              // Use the detailed helper for failures or partial success
+              const resultMessage = formatEmailResult(sendResult, recipientNames, 'email');
+              await send(new MessageActivity(resultMessage).addAiGenerated().addFeedback());
+            } else {
+              // Full success - let LLM generate a friendly response
+              const recipientListDisplay = formatRecipientDisplay(sendResult.sentTo || recipientEmails, recipientNames);
+              const responsePrompt = new ChatPrompt({
+                messages: [
+                  {
+                    role: 'user',
+                    content: `Generate a brief, friendly response about sending an email.\n\nResult: SUCCESS\nRecipients: ${recipientListDisplay}\nSubject: ${extracted.subject || `Message from ${config.botDisplayName}`}\n\nRespond naturally as if you just completed this action.`
+                  }
+                ],
+                instructions: 'You are a helpful assistant. Generate a natural, brief response about the email send result. Be friendly but concise.',
+                model: new OpenAIChatModel({
+                  model: config.azureOpenAIDeploymentName,
+                  apiKey: config.azureOpenAIKey,
+                  endpoint: config.azureOpenAIEndpoint,
+                  apiVersion: '2024-10-21'
+                })
+              });
 
-            const responseResult = await responsePrompt.send('');
-            await send(new MessageActivity(responseResult.content || 'Email action completed.').addAiGenerated().addFeedback());
+              const responseResult = await sendPromptWithTracking(responsePrompt, '', {
+                userId: requesterId,
+                displayName: actorName,
+                meetingId,
+                estimatedInputText: `email send result for ${recipientEmails.join(', ')}`,
+              });
+              await send(new MessageActivity(responseResult.content || 'Email action completed.').addAiGenerated().addFeedback());
+            }
           }
         }
         console.log(`[SUCCESS] Email intent processed`);
@@ -2958,7 +5913,12 @@ Respond with JSON only: {"query_type": "view_events|check_availability|find_free
           })
         });
 
-        const extractResponse = await extractPrompt.send('');
+        const extractResponse = await sendPromptWithTracking(extractPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: cleanText || activity.text || '',
+        });
         const rawExtract = (extractResponse.content || '').trim();
         // Strip markdown code blocks if present (LLM sometimes wraps JSON in ```json...```)
         const extractJson = rawExtract.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -3035,12 +5995,17 @@ Examples of good responses:
           })
         });
 
-        const responseResult = await responsePrompt.send('');
+        const responseResult = await sendPromptWithTracking(responsePrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: `${cleanText || activity.text || ''}\ncalendar events`,
+        });
         const calendarResponseContent = responseResult.content || 'Calendar check completed.';
         await send(new MessageActivity(calendarResponseContent).addAiGenerated().addFeedback());
         
         // Track this response for contextual follow-ups like "send it to my email"
-        lastBotResponseMap.set(activity.conversation.id, {
+        recordBotResponse(activity.conversation.id, {
           content: calendarResponseContent,
           contentType: 'calendar',
           subject: `Calendar for ${extracted.start_date || 'today'}`,
@@ -3070,7 +6035,12 @@ Generate a brief, friendly apology and suggest they try again. Be conversational
               apiVersion: '2024-10-21'
             })
           });
-          const errorResponse = await errorPrompt.send('');
+          const errorResponse = await sendPromptWithTracking(errorPrompt, '', {
+            userId: requesterId,
+            displayName: actorName,
+            meetingId,
+            estimatedInputText: `${cleanText || activity.text || ''}\ncalendar error`,
+          });
           await send(new MessageActivity(errorResponse.content || 'Sorry, I ran into an issue checking your calendar. Could you try again?').addAiGenerated().addFeedback());
         } catch {
           await send(new MessageActivity(`Sorry, I ran into an issue checking your calendar. Could you try again?`).addAiGenerated().addFeedback());
@@ -3131,22 +6101,44 @@ Generate a brief, friendly apology and suggest they try again. Be conversational
       // back to the group chat
       console.log(`[CHAT] Group chat mode - awaiting full response`);
       const response = await prompt.send(cleanText || activity.text || '');
+      const responseText = extractModelResponseText(response);
+      recordEstimatedModelUsage({
+        userId: requesterId,
+        displayName: actorName,
+        meetingId,
+        inputText: cleanText || activity.text || '',
+        outputText: responseText,
+      });
       console.log(`[CHAT] Received response from model`);
-      llmMessages.push({ role: 'assistant', content: response.content || '' });
+      console.log(`[MODEL_RESPONSE] ${getTruncatedLogPreview(responseText)}`);
+      llmMessages.push({ role: 'assistant', content: responseText });
       if (llmMessages.length > 30) {
         llmMessages = llmMessages.slice(-30);
       }
-      const responseActivity = new MessageActivity(response.content).addAiGenerated().addFeedback();
+      const responseActivity = new MessageActivity(responseText).addAiGenerated().addFeedback();
       await send(responseActivity);
       console.log(`[SUCCESS] Chat response sent to group`);
     } else {
         console.log(`[CHAT] Personal/direct mode - streaming response`);
-        await prompt.send(cleanText || activity.text || '', {
+        let streamedResponse = '';
+        const streamedResult = await prompt.send(cleanText || activity.text || '', {
           onChunk: (chunk) => {
             console.log(`[STREAM] Chunk received`);
+            streamedResponse += chunk || '';
             stream.emit(chunk);
           },
         });
+      if (!streamedResponse.trim()) {
+        streamedResponse = extractModelResponseText(streamedResult);
+      }
+      recordEstimatedModelUsage({
+        userId: requesterId,
+        displayName: actorName,
+        meetingId,
+        inputText: cleanText || activity.text || '',
+        outputText: streamedResponse,
+      });
+      console.log(`[MODEL_RESPONSE] ${getTruncatedLogPreview(streamedResponse)}`);
       // We wrap the final response with an AI Generated indicator
       stream.emit(new MessageActivity().addAiGenerated().addFeedback());
     }
@@ -3161,7 +6153,19 @@ Generate a brief, friendly apology and suggest they try again. Be conversational
 });
 
 // Handle conversation updates (bot added/removed, members joined/left)
-app.on('conversationUpdate', async ({ send, activity }) => {
+app.on('conversationUpdate', async ({ send: sendActivity, activity }) => {
+  const send = async (outgoing: any) => {
+    try {
+      await sendActivity(outgoing);
+      const text = typeof outgoing === 'string'
+        ? outgoing
+        : (outgoing?.text || outgoing?.summary || '[non-text activity]');
+      console.log(`[TEAMS_SEND_OK] conversation=${activity?.conversation?.id || 'unknown'} preview="${getTruncatedLogPreview(String(text || ''))}"`);
+    } catch (error) {
+      console.error(`[TEAMS_SEND_FAIL] conversation=${activity?.conversation?.id || 'unknown'}`, error);
+      throw error;
+    }
+  };
   console.log(`[CONVERSATION_UPDATE] Event triggered for: ${activity.conversation.id}`);
   console.log(`[CONVERSATION_UPDATE] Is Group: ${activity.conversation.isGroup}, Channel ID: ${activity.channelId}`);
 
@@ -3186,6 +6190,15 @@ app.on('conversationUpdate', async ({ send, activity }) => {
     
     if (botWasAdded) {
       console.log(`[BOT_ADDED] Bot was added to conversation: ${activity.conversation.id}`);
+
+      // Teams can emit duplicate conversationUpdate events; prevent double greeting spam.
+      const greetingSentKey = `greeting-sent/${activity.conversation.id}`;
+      const lastGreetingAt = Number(storage.get(greetingSentKey) || 0);
+      if (lastGreetingAt && Date.now() - lastGreetingAt < 10 * 60 * 1000) {
+        console.log(`[BOT_ADDED] Greeting already sent recently for ${activity.conversation.id} - skipping duplicate`);
+        return;
+      }
+      storage.set(greetingSentKey, Date.now());
       
       try {
         // Detect if this is a meeting chat
@@ -3222,52 +6235,9 @@ Start a meeting and invite me, or ask about a past meeting!`;
         
         console.log(`[SUCCESS] Sent greeting to ${isMeetingChat ? 'meeting' : 'conversation'}`);
 
-        // Auto-join the meeting call if this is a meeting chat
-        if (isMeetingChat) {
-          console.log(`[AUTO_JOIN] Attempting to auto-join meeting call...`);
-          const botEndpoint = process.env.BOT_ENDPOINT || '';
-          const callbackUri = botEndpoint ? `${botEndpoint}/api/calls` : '';
-          const tenantId = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID || '';
-
-          if (callbackUri && tenantId) {
-            try {
-              const meetingOnlineInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
-              if (meetingOnlineInfo?.organizer?.id) {
-                cancelPendingJoin(activity.conversation.id);
-                const callResult = await graphApiHelper.joinMeetingCall(meetingOnlineInfo, callbackUri, tenantId, activity.conversation.id);
-                if (callResult) {
-                  activeCallMap.set(callResult.id, {
-                    conversationId: activity.conversation.id,
-                    serviceUrl: activity.serviceUrl || '',
-                    organizerId: meetingOnlineInfo.organizer?.id,
-                    joinWebUrl: meetingOnlineInfo.joinWebUrl,
-                  });
-                  pendingJoinMap.set(activity.conversation.id, {
-                    conversationId: activity.conversation.id,
-                    serviceUrl: activity.serviceUrl || '',
-                    callbackUri,
-                    tenantId,
-                    retryCount: 0,
-                    maxRetries: MAX_RETRIES,
-                  });
-                  console.log(`[AUTO_JOIN] Successfully initiated join for call ${callResult.id}`);
-                  const autoJoinMsg = new MessageActivity(
-                    `Auto-joining the meeting call now — I'll connect and start transcribing!`
-                  ).addAiGenerated();
-                  await send(autoJoinMsg);
-                } else {
-                  console.warn(`[AUTO_JOIN] Could not join meeting audio`);
-                }
-              } else {
-                console.warn(`[AUTO_JOIN] No meeting organizer info found`);
-              }
-            } catch (error) {
-              console.error(`[AUTO_JOIN_ERROR]`, error);
-            }
-          } else {
-            console.warn(`[AUTO_JOIN] Missing BOT_ENDPOINT or TENANT_ID - skipping auto-join`);
-          }
-        }
+        // NOTE: We no longer auto-join calls automatically on bot add.
+        // Auto-join caused confusion when users wanted to ask about PAST meetings.
+        // Users should explicitly say "join the call" to start live transcription.
       } catch (error) {
         console.error(`[ERROR_GREETING] Failed to send greeting:`, error);
       }
@@ -3292,6 +6262,2042 @@ app.on('message.submit.feedback', async ({ activity }) => {
   //add custom feedback process logic here
   console.log("Your feedback is " + JSON.stringify(activity.value));
 })
+
+interface AdminSession {
+  accessToken: string;
+  expiresAt: number;
+  tenantId: string;
+  displayName?: string;
+  email?: string;
+  userId?: string;
+}
+
+interface AdminUserProfile {
+  displayName: string;
+  email: string;
+  userId: string;
+  tenantId: string;
+  jobTitle?: string;
+  department?: string;
+}
+
+const ADMIN_SESSION_COOKIE = 'mela_admin_session';
+const ADMIN_LOGIN_PATH = '/admin/login';
+const ADMIN_AUTH_CALLBACK_PATH = '/admin/auth/callback';
+const ADMIN_LOGOUT_PATH = '/admin/logout';
+const ADMIN_AUTH_DISABLED = (process.env.ADMIN_AUTH_DISABLED || 'true').toLowerCase() === 'true';
+const ADMIN_ERROR_LOG_FILE = path.join(ADMIN_DATA_DIR, 'admin_error_logs.json');
+
+interface AdminErrorLogEntry {
+  id: string;
+  ts: string;
+  source: 'server' | 'client';
+  route: string;
+  message: string;
+  stack?: string;
+  userId?: string;
+  tenantId?: string;
+  meta?: any;
+}
+
+function normalizeError(err: any): { message: string; stack?: string } {
+  if (!err) return { message: 'unknown_error' };
+  if (err instanceof Error) {
+    return { message: err.message || 'error', stack: err.stack || '' };
+  }
+  if (typeof err === 'string') {
+    return { message: err };
+  }
+  try {
+    return { message: JSON.stringify(err) };
+  } catch {
+    return { message: String(err) };
+  }
+}
+
+function loadAdminErrorLogs(): AdminErrorLogEntry[] {
+  try {
+    ensureAdminDataDir();
+    if (!fs.existsSync(ADMIN_ERROR_LOG_FILE)) {
+      return [];
+    }
+    const raw = fs.readFileSync(ADMIN_ERROR_LOG_FILE, 'utf-8').trim();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as AdminErrorLogEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAdminErrorLogs(entries: AdminErrorLogEntry[]) {
+  ensureAdminDataDir();
+  fs.writeFileSync(ADMIN_ERROR_LOG_FILE, JSON.stringify(entries, null, 2), 'utf-8');
+}
+
+function logAdminError(source: 'server' | 'client', route: string, error: any, options?: { userId?: string; tenantId?: string; meta?: any }) {
+  const normalized = normalizeError(error);
+  const entries = loadAdminErrorLogs();
+  const next: AdminErrorLogEntry = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    ts: new Date().toISOString(),
+    source,
+    route,
+    message: normalized.message,
+    stack: normalized.stack,
+    userId: options?.userId,
+    tenantId: options?.tenantId,
+    meta: options?.meta,
+  };
+  entries.push(next);
+  if (entries.length > 500) {
+    entries.splice(0, entries.length - 500);
+  }
+  saveAdminErrorLogs(entries);
+}
+
+function getConfiguredTenantId(): string {
+  const raw = (process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID || '').trim();
+  if (!raw) return '';
+
+  // Accept plain tenant IDs/domains, and defensively normalize accidental full URLs.
+  try {
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      const parsed = new URL(raw);
+      const match = parsed.pathname.match(/\/([^/]+)\/oauth2\//i);
+      if (match?.[1]) {
+        return match[1];
+      }
+    }
+  } catch {
+    // Fall through to raw cleanup below
+  }
+
+  return raw
+    .replace(/^https?:\/\/login\.microsoftonline\.com\//i, '')
+    .replace(/\/oauth2\/v2\.0\/(authorize|token).*$/i, '')
+    .replace(/\/$/, '');
+}
+
+function getAdminBaseUrl(req?: any): string {
+  const forwardedHost = req?.headers?.['x-forwarded-host'];
+  const host = forwardedHost || req?.headers?.host;
+  if (host) {
+    const forwardedProto = req?.headers?.['x-forwarded-proto'];
+    const protocol = forwardedProto || (String(host).includes('localhost') ? 'http' : 'https');
+    return `${protocol}://${host}`.replace(/\/$/, '');
+  }
+
+  const configured = (process.env.BOT_ENDPOINT || '').trim();
+  if (configured) {
+    return configured.replace(/\/$/, '');
+  }
+
+  return 'http://localhost:3978';
+}
+
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const map: Record<string, string> = {};
+  if (!cookieHeader) return map;
+  for (const part of cookieHeader.split(';')) {
+    const [rawName, ...rest] = part.trim().split('=');
+    if (!rawName) continue;
+    map[rawName] = decodeURIComponent(rest.join('=') || '');
+  }
+  return map;
+}
+
+function serializeCookie(name: string, value: string, maxAgeSeconds: number, secure: boolean): string {
+  const secureFlag = secure ? '; Secure' : '';
+  return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureFlag}`;
+}
+
+function clearCookie(name: string): string {
+  return `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+function decodeJwtPayload(token?: string): Record<string, any> {
+  if (!token) return {};
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return {};
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4);
+    return JSON.parse(Buffer.from(padded, 'base64').toString('utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function getAdminSession(req: any): AdminSession | null {
+  try {
+    const cookies = parseCookies(req?.headers?.cookie || '');
+    const encoded = cookies[ADMIN_SESSION_COOKIE];
+    if (!encoded) return null;
+    const json = Buffer.from(encoded, 'base64url').toString('utf-8');
+    const parsed = JSON.parse(json) as AdminSession;
+    if (!parsed?.accessToken || !parsed?.expiresAt || !parsed?.tenantId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function shouldUseSecureCookie(req: any): boolean {
+  const forwardedProto = (req?.headers?.['x-forwarded-proto'] || '').toString().toLowerCase();
+  if (forwardedProto === 'https') return true;
+
+  const host = (req?.headers?.host || '').toString().toLowerCase();
+  if (!host) return false;
+  if (host.includes('localhost') || host.startsWith('127.0.0.1')) {
+    return false;
+  }
+  return true;
+}
+
+function setAdminSessionCookie(req: any, res: any, session: AdminSession) {
+  const raw = Buffer.from(JSON.stringify(session), 'utf-8').toString('base64url');
+  const maxAge = Math.max(60, Math.floor((session.expiresAt - Date.now()) / 1000));
+  res.setHeader('Set-Cookie', serializeCookie(ADMIN_SESSION_COOKIE, raw, maxAge, shouldUseSecureCookie(req)));
+}
+
+function redirectToAdminLogin(req: any, res: any) {
+  const returnTo = encodeURIComponent(req?.originalUrl || '/admin/overview');
+  res.redirect(`${ADMIN_LOGIN_PATH}?returnTo=${returnTo}`);
+}
+
+async function requireAdminAuth(req: any, res: any, isApi = false): Promise<AdminSession | null> {
+  if (ADMIN_AUTH_DISABLED) {
+    return {
+      accessToken: '',
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      tenantId: getConfiguredTenantId() || 'auth-disabled',
+      displayName: 'Admin (Auth Disabled)',
+      email: 'auth-disabled@local',
+      userId: 'auth-disabled',
+    };
+  }
+
+  const tenantId = getConfiguredTenantId();
+  if (!tenantId) {
+    if (isApi) {
+      res.status(500).json({ error: 'tenant_not_configured' });
+    } else {
+      res.status(500).send('Admin auth is not configured. Missing TENANT_ID.');
+    }
+    return null;
+  }
+
+  const session = getAdminSession(req);
+  if (!session || session.expiresAt <= Date.now() || session.tenantId !== tenantId) {
+    res.setHeader('Set-Cookie', clearCookie(ADMIN_SESSION_COOKIE));
+    if (isApi) {
+      res.status(401).json({ error: 'unauthorized' });
+    } else {
+      redirectToAdminLogin(req, res);
+    }
+    return null;
+  }
+  return session;
+}
+
+async function getCurrentAdminUserProfile(session: AdminSession): Promise<AdminUserProfile> {
+  try {
+    const { default: axios } = await import('axios');
+    const response = await axios.get('https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName,jobTitle,department', {
+      headers: {
+        Authorization: `Bearer ${session.accessToken}`,
+      },
+    });
+    const me = response.data || {};
+    return {
+      displayName: me.displayName || session.displayName || 'Tenant User',
+      email: me.mail || me.userPrincipalName || session.email || 'unknown',
+      userId: me.id || session.userId || 'unknown',
+      tenantId: session.tenantId,
+      jobTitle: me.jobTitle || '',
+      department: me.department || '',
+    };
+  } catch {
+    return {
+      displayName: session.displayName || 'Tenant User',
+      email: session.email || 'unknown',
+      userId: session.userId || 'unknown',
+      tenantId: session.tenantId,
+      jobTitle: '',
+      department: '',
+    };
+  }
+}
+
+app.http.get(ADMIN_LOGIN_PATH, async (req: any, res: any) => {
+  if (ADMIN_AUTH_DISABLED) {
+    res.redirect('/admin/overview');
+    return;
+  }
+
+  const tenantId = getConfiguredTenantId();
+  if (!tenantId || !process.env.CLIENT_ID || !process.env.CLIENT_SECRET) {
+    res.status(500).send('Admin auth is not configured. Missing CLIENT_ID/CLIENT_SECRET/TENANT_ID.');
+    return;
+  }
+  const returnTo = (req?.query?.returnTo as string) || '/admin/overview';
+  const redirectUri = `${getAdminBaseUrl(req)}${ADMIN_AUTH_CALLBACK_PATH}`;
+  console.log(`[ADMIN_AUTH] Login start host=${req?.headers?.host || 'unknown'} redirectUri=${redirectUri}`);
+  const authorizeUrl = new URL(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize`);
+  authorizeUrl.searchParams.set('client_id', process.env.CLIENT_ID);
+  authorizeUrl.searchParams.set('response_type', 'code');
+  authorizeUrl.searchParams.set('redirect_uri', redirectUri);
+  authorizeUrl.searchParams.set('response_mode', 'query');
+  authorizeUrl.searchParams.set('scope', 'openid profile email User.Read');
+  authorizeUrl.searchParams.set('state', Buffer.from(JSON.stringify({ returnTo }), 'utf-8').toString('base64url'));
+  res.redirect(authorizeUrl.toString());
+});
+
+app.http.get(ADMIN_AUTH_CALLBACK_PATH, async (req: any, res: any) => {
+  if (ADMIN_AUTH_DISABLED) {
+    res.redirect('/admin/overview');
+    return;
+  }
+
+  try {
+    const tenantId = getConfiguredTenantId();
+    const code = (req?.query?.code as string) || '';
+    const stateRaw = (req?.query?.state as string) || '';
+    const state = stateRaw ? JSON.parse(Buffer.from(stateRaw, 'base64url').toString('utf-8')) : {};
+    const returnTo = typeof state?.returnTo === 'string' ? state.returnTo : '/admin/overview';
+
+    if (!tenantId || !code || !process.env.CLIENT_ID || !process.env.CLIENT_SECRET) {
+      res.status(400).send('Invalid admin login callback.');
+      return;
+    }
+
+    const redirectUri = `${getAdminBaseUrl(req)}${ADMIN_AUTH_CALLBACK_PATH}`;
+    console.log(`[ADMIN_AUTH] Callback host=${req?.headers?.host || 'unknown'} redirectUri=${redirectUri}`);
+    const form = new URLSearchParams();
+    form.append('client_id', process.env.CLIENT_ID);
+    form.append('client_secret', process.env.CLIENT_SECRET);
+    form.append('grant_type', 'authorization_code');
+    form.append('code', code);
+    form.append('redirect_uri', redirectUri);
+    form.append('scope', 'openid profile email User.Read');
+
+    const { default: axios } = await import('axios');
+    const tokenResponse = await axios.post(
+      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+      form.toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+
+    const tokenData = tokenResponse.data || {};
+    const idTokenPayload = decodeJwtPayload(tokenData.id_token);
+    if (idTokenPayload?.tid !== tenantId) {
+      res.status(403).send('Access denied: user is not from allowed tenant.');
+      return;
+    }
+
+    const session: AdminSession = {
+      accessToken: tokenData.access_token,
+      expiresAt: Date.now() + Math.max(300, Number(tokenData.expires_in || 3600)) * 1000,
+      tenantId: idTokenPayload?.tid || tenantId,
+      displayName: idTokenPayload?.name || '',
+      email: idTokenPayload?.preferred_username || idTokenPayload?.email || '',
+      userId: idTokenPayload?.oid || '',
+    };
+
+    setAdminSessionCookie(req, res, session);
+    res.redirect(returnTo.startsWith('/admin') ? returnTo : '/admin/overview');
+  } catch (error) {
+    const axiosError: any = error as any;
+    const aadError = axiosError?.response?.data?.error as string | undefined;
+    const aadDescription = (axiosError?.response?.data?.error_description as string | undefined) || '';
+
+    // If callback is hit twice (refresh/back button/replay), Entra returns invalid_grant code-redeemed.
+    // Treat this as recoverable and continue if session already exists.
+    if (aadError === 'invalid_grant' && /already redeemed/i.test(aadDescription)) {
+      const existingSession = getAdminSession(req);
+      if (existingSession && existingSession.expiresAt > Date.now()) {
+        res.redirect('/admin/overview');
+        return;
+      }
+      res.redirect(`${ADMIN_LOGIN_PATH}?error=code_redeemed`);
+      return;
+    }
+
+    logAdminError('server', ADMIN_AUTH_CALLBACK_PATH, error, { meta: { phase: 'oauth_callback' } });
+    console.error('[ADMIN_AUTH_CALLBACK] Failed:', error);
+    res.status(500).send('Admin login failed.');
+  }
+});
+
+app.http.get(ADMIN_LOGOUT_PATH, async (_req: any, res: any) => {
+  if (ADMIN_AUTH_DISABLED) {
+    res.redirect('/admin/overview');
+    return;
+  }
+
+  res.setHeader('Set-Cookie', clearCookie(ADMIN_SESSION_COOKIE));
+  res.redirect(ADMIN_LOGIN_PATH);
+});
+
+app.http.get('/api/admin/stats', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+    const stats = loadBotAdminStats();
+    const monthKey = getMonthKey();
+    const userId = req?.query?.userId as string | undefined;
+    const meetingId = req?.query?.meetingId as string | undefined;
+
+    if (userId) {
+      const user = stats.users[userId];
+      if (!user) {
+        res.status(404).json({ error: 'user_not_found' });
+        return;
+      }
+      res.json({
+        month: monthKey,
+        user,
+        monthlyMeetingsUsed: user.monthlyMeetingsJoined?.[monthKey] || 0,
+        monthlyMeetingsLimit: stats.freeTierMonthlyMeetingLimit,
+      });
+      return;
+    }
+
+    if (meetingId) {
+      const meeting = stats.meetings[meetingId];
+      if (!meeting) {
+        res.status(404).json({ error: 'meeting_not_found' });
+        return;
+      }
+      res.json({ month: monthKey, meeting });
+      return;
+    }
+
+    res.json({
+      month: monthKey,
+      overview: {
+        startedAt: stats.startedAt,
+        lastUpdatedAt: stats.lastUpdatedAt,
+        totalMessages: stats.totalMessages,
+        totalMeetingsJoined: stats.totalMeetingsJoined,
+        activeMeetings: stats.activeMeetingConversationIds.length,
+        freeTierMonthlyMeetingLimit: stats.freeTierMonthlyMeetingLimit,
+        modelInputCostPer1kUsd: stats.modelInputCostPer1kUsd,
+        modelOutputCostPer1kUsd: stats.modelOutputCostPer1kUsd,
+        totalEstimatedInputTokens: stats.totalEstimatedInputTokens,
+        totalEstimatedOutputTokens: stats.totalEstimatedOutputTokens,
+        totalEstimatedTokens: stats.totalEstimatedTokens,
+        totalEstimatedCostUsd: Number(stats.totalEstimatedCostUsd.toFixed(6)),
+      },
+      users: Object.values(stats.users),
+      meetings: Object.values(stats.meetings),
+    });
+  } catch (error) {
+    logAdminError('server', '/api/admin/stats', error);
+    console.error('[ADMIN_STATS_API] Failed:', error);
+    res.status(500).json({ error: 'failed_to_get_stats' });
+  }
+});
+
+app.http.post('/api/admin/config/free-tier-limit', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+    const limit = Number(req?.body?.limit);
+    if (!Number.isFinite(limit) || limit < 1 || limit > 1000) {
+      res.status(400).json({ error: 'invalid_limit', message: 'limit must be between 1 and 1000' });
+      return;
+    }
+
+    const stats = loadBotAdminStats();
+    stats.freeTierMonthlyMeetingLimit = Math.floor(limit);
+    saveBotAdminStats();
+    res.json({ success: true, freeTierMonthlyMeetingLimit: stats.freeTierMonthlyMeetingLimit });
+  } catch (error) {
+    logAdminError('server', '/api/admin/config/free-tier-limit', error);
+    console.error('[ADMIN_CONFIG_API] Failed:', error);
+    res.status(500).json({ error: 'failed_to_update_limit' });
+  }
+});
+
+app.http.post('/api/admin/config/max-users', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+    const maxUsers = Number(req?.body?.maxUsers);
+    if (!Number.isFinite(maxUsers) || maxUsers < 1 || maxUsers > 50000) {
+      res.status(400).json({ error: 'invalid_max_users', message: 'maxUsers must be between 1 and 50000' });
+      return;
+    }
+
+    const stats = loadBotAdminStats();
+    stats.maxUsers = Math.floor(maxUsers);
+    saveBotAdminStats();
+    res.json({ success: true, maxUsers: stats.maxUsers });
+  } catch (error) {
+    logAdminError('server', '/api/admin/config/max-users', error);
+    console.error('[ADMIN_CONFIG_MAX_USERS_API] Failed:', error);
+    res.status(500).json({ error: 'failed_to_update_max_users' });
+  }
+});
+
+app.http.post('/api/admin/config/enforce-global-limits', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+
+    const enabled = req?.body?.enabled === true;
+    const stats = loadBotAdminStats();
+    stats.enforceGlobalLimits = enabled;
+    saveBotAdminStats();
+
+    res.json({ success: true, enforceGlobalLimits: stats.enforceGlobalLimits });
+  } catch (error) {
+    logAdminError('server', '/api/admin/config/enforce-global-limits', error);
+    console.error('[ADMIN_CONFIG_ENFORCE_GLOBAL_LIMITS_API] Failed:', error);
+    res.status(500).json({ error: 'failed_to_update_enforcement_setting' });
+  }
+});
+
+app.http.post('/api/admin/users/block-status', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+    const userId = (req?.body?.userId || '').toString().trim();
+    const blocked = req?.body?.blocked === true;
+    if (!userId) {
+      res.status(400).json({ error: 'invalid_user_id' });
+      return;
+    }
+
+    const stats = loadBotAdminStats();
+    const user = stats.users[userId];
+    if (!user) {
+      res.status(404).json({ error: 'user_not_found' });
+      return;
+    }
+
+    user.blocked = blocked;
+    if (!blocked) {
+      user.blockReason = '';
+      user.blockedAt = undefined;
+    }
+    user.lastSeenAt = Date.now();
+    saveBotAdminStats();
+    res.json({ success: true, userId, blocked: user.blocked });
+  } catch (error) {
+    logAdminError('server', '/api/admin/users/block-status', error);
+    console.error('[ADMIN_USER_BLOCK_API] Failed:', error);
+    res.status(500).json({ error: 'failed_to_update_user_block_status' });
+  }
+});
+
+app.http.post('/api/admin/users/policy', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+
+    const userId = (req?.body?.userId || '').toString().trim();
+    const tokenPolicyRaw = (req?.body?.tokenPolicy || 'unlimited').toString();
+    const tokenLimitRaw = req?.body?.tokenLimit;
+    const meetingLimitRaw = req?.body?.monthlyMeetingLimitOverride;
+
+    if (!userId) {
+      res.status(400).json({ error: 'invalid_user_id' });
+      return;
+    }
+
+    const tokenPolicy = tokenPolicyRaw === 'limited' ? 'limited' : 'unlimited';
+    const tokenLimit = tokenLimitRaw === null || tokenLimitRaw === '' || typeof tokenLimitRaw === 'undefined'
+      ? null
+      : Number(tokenLimitRaw);
+    const monthlyMeetingLimitOverride = meetingLimitRaw === null || meetingLimitRaw === '' || typeof meetingLimitRaw === 'undefined'
+      ? null
+      : Number(meetingLimitRaw);
+
+    if (tokenPolicy === 'limited' && (!Number.isFinite(tokenLimit) || (tokenLimit as number) < 1)) {
+      res.status(400).json({ error: 'invalid_token_limit' });
+      return;
+    }
+    if (monthlyMeetingLimitOverride !== null && (!Number.isFinite(monthlyMeetingLimitOverride) || monthlyMeetingLimitOverride < 1)) {
+      res.status(400).json({ error: 'invalid_meeting_limit_override' });
+      return;
+    }
+
+    const stats = loadBotAdminStats();
+    const user = stats.users[userId];
+    if (!user) {
+      res.status(404).json({ error: 'user_not_found' });
+      return;
+    }
+
+    user.tokenPolicy = tokenPolicy;
+    user.tokenLimit = tokenPolicy === 'limited' ? Math.floor(tokenLimit as number) : null;
+    user.monthlyMeetingLimitOverride = monthlyMeetingLimitOverride === null ? null : Math.floor(monthlyMeetingLimitOverride);
+    user.lastSeenAt = Date.now();
+    saveBotAdminStats();
+
+    res.json({
+      success: true,
+      userId,
+      tokenPolicy: user.tokenPolicy,
+      tokenLimit: user.tokenLimit,
+      monthlyMeetingLimitOverride: user.monthlyMeetingLimitOverride,
+    });
+  } catch (error) {
+    logAdminError('server', '/api/admin/users/policy', error);
+    console.error('[ADMIN_USER_POLICY_API] Failed:', error);
+    res.status(500).json({ error: 'failed_to_update_user_policy' });
+  }
+});
+
+function renderAdminLayout(
+  activePage: 'overview' | 'users' | 'meetings' | 'settings' | 'invoices' | 'errors',
+  pageTitle: string,
+  contentHtml: string,
+  adminUser: AdminUserProfile,
+  pageScript = ''
+): string {
+  const isActive = (page: string) => (activePage === page ? 'menu-link active' : 'menu-link');
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${pageTitle}</title>
+  <style>
+    :root {
+      --bg: #041014;
+      --bg-soft: #0a1e24;
+      --panel: rgba(7, 34, 42, 0.78);
+      --line: rgba(47, 85, 151, 0.4);
+      --accent: #2F5597;
+      --text: #e2e9f7;
+      --muted: #aebddc;
+      --shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: "Trebuchet MS", "Lucida Sans Unicode", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(900px 360px at -10% -10%, rgba(47, 85, 151, 0.28), transparent 60%),
+        radial-gradient(800px 280px at 120% 110%, rgba(47, 85, 151, 0.18), transparent 60%),
+        linear-gradient(140deg, var(--bg), #02090d 45%, var(--bg-soft));
+      min-height: 100vh;
+    }
+    .layout { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+    .sidebar {
+      position: sticky; top: 0; height: 100vh; border-right: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(6, 28, 35, 0.88), rgba(3, 14, 18, 0.95));
+      padding: 22px 16px; backdrop-filter: blur(8px);
+    }
+    .brand { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 18px; background: rgba(47, 85, 151, 0.18); }
+    .brand h1 { margin: 0; font-size: 18px; }
+    .brand p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .menu { display: flex; flex-direction: column; gap: 8px; }
+    .menu-link { text-decoration: none; color: var(--text); padding: 10px 12px; border-radius: 10px; border: 1px solid transparent; transition: 160ms ease; }
+    .menu-link:hover { border-color: var(--line); background: rgba(47, 85, 151, 0.22); }
+    .menu-link.active { border-color: var(--line); background: rgba(47, 85, 151, 0.28); }
+    .main { padding: 26px; }
+    .hero { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: var(--shadow); padding: 18px; margin-bottom: 18px; }
+    .subtitle { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: linear-gradient(145deg, rgba(47, 85, 151, 0.2), rgba(8, 16, 31, 0.88)); }
+    .card strong { color: #dce6fb; font-size: 12px; text-transform: uppercase; }
+    .metric { font-size: 26px; margin-top: 8px; font-weight: 700; color: var(--accent); }
+    .table-wrap { border: 1px solid var(--line); border-radius: 12px; overflow: auto; background: var(--panel); }
+    table { border-collapse: collapse; width: 100%; min-width: 760px; }
+    th, td { border-bottom: 1px solid rgba(47, 85, 151, 0.2); padding: 10px; text-align: left; }
+    th { background: rgba(47, 85, 151, 0.22); color: #dce6fb; font-size: 12px; text-transform: uppercase; }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+    .control { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: var(--panel); }
+    .chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .chart-grid canvas { width: 100%; height: 180px; border-radius: 8px; background: rgba(6, 15, 27, 0.38); }
+    label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 6px; }
+    input { width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(1, 10, 12, 0.85); color: var(--text); margin-bottom: 8px; }
+    button { border: 1px solid var(--line); background: linear-gradient(135deg, rgba(47, 85, 151, 0.34), rgba(47, 85, 151, 0.2)); color: var(--text); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+    .status-pill { padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); background: rgba(47, 85, 151, 0.2); font-size: 12px; }
+    .status-pill.blocked { border-color: rgba(255, 110, 110, 0.35); background: rgba(255, 110, 110, 0.12); color: #ffd4d4; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .toast-host {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 1200;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+    }
+    .toast {
+      min-width: 240px;
+      max-width: 360px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: rgba(10, 20, 35, 0.94);
+      color: var(--text);
+      padding: 10px 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+      opacity: 0;
+      transform: translateY(-6px);
+      transition: 180ms ease;
+      pointer-events: auto;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.success { border-color: rgba(76, 175, 80, 0.55); }
+    .toast.error { border-color: rgba(244, 67, 54, 0.55); }
+    .toast.info { border-color: var(--line); }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line); }
+      .menu { flex-direction: row; flex-wrap: wrap; }
+      .main { padding: 16px; }
+      .chart-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand"><h1>Mela Control</h1><p>AI Ops Console</p></div>
+      <div class="brand" style="margin-bottom:14px;">
+        <p style="margin:0;color:var(--muted);font-size:11px;">Signed in as</p>
+        <h1 style="font-size:15px;margin-top:6px;">${adminUser.displayName}</h1>
+        <p style="margin:4px 0 0;font-size:12px;word-break:break-word;">${adminUser.email}</p>
+      </div>
+      <nav class="menu">
+        <a class="${isActive('overview')}" href="/admin/overview">Overview</a>
+        <a class="${isActive('users')}" href="/admin/users">Users</a>
+        <a class="${isActive('meetings')}" href="/admin/meetings">Meetings</a>
+        <a class="${isActive('invoices')}" href="/admin/invoices">Invoices</a>
+        <a class="${isActive('errors')}" href="/admin/errors">Errors</a>
+        <a class="${isActive('settings')}" href="/admin/settings">Settings</a>
+      </nav>
+      <div style="margin-top:16px;"><a class="menu-link" href="${ADMIN_LOGOUT_PATH}">Sign out</a></div>
+    </aside>
+    <main class="main">${contentHtml}</main>
+  </div>
+  <div id="toastHost" class="toast-host"></div>
+  <script>
+    function showToast(message, type = 'info', timeoutMs = 2600) {
+      const host = document.getElementById('toastHost');
+      if (!host) return;
+      const el = document.createElement('div');
+      el.className = 'toast ' + (type || 'info');
+      el.textContent = message;
+      host.appendChild(el);
+      requestAnimationFrame(() => el.classList.add('show'));
+      setTimeout(() => {
+        el.classList.remove('show');
+        setTimeout(() => el.remove(), 220);
+      }, timeoutMs);
+    }
+
+    window.addEventListener('error', function (event) {
+      const payload = {
+        route: window.location.pathname,
+        message: (event && event.message) ? String(event.message) : 'window_error',
+        stack: event && event.error && event.error.stack ? String(event.error.stack) : '',
+      };
+      console.error('[ADMIN_CLIENT_ERROR]', payload.message, payload.stack || '(no stack)');
+      fetch('/api/admin/errors/client', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(function () {});
+    });
+
+    window.addEventListener('unhandledrejection', function (event) {
+      const reason = event && event.reason ? event.reason : 'unhandled_rejection';
+      const payload = {
+        route: window.location.pathname,
+        message: typeof reason === 'string' ? reason : ((reason && reason.message) ? String(reason.message) : 'unhandled_rejection'),
+        stack: reason && reason.stack ? String(reason.stack) : '',
+      };
+      console.error('[ADMIN_CLIENT_REJECTION]', payload.message, payload.stack || '(no stack)');
+      fetch('/api/admin/errors/client', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(function () {});
+    });
+  </script>
+  ${pageScript ? `<script>${pageScript}</script>` : ''}
+</body>
+</html>`;
+}
+
+app.http.get('/api/admin/errors', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+    const limitRaw = Number(req?.query?.limit);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 500) : 200;
+    const logs = loadAdminErrorLogs();
+    res.json({
+      total: logs.length,
+      errors: logs.slice(-limit).reverse(),
+    });
+  } catch (error) {
+    logAdminError('server', '/api/admin/errors', error);
+    res.status(500).json({ error: 'failed_to_get_admin_errors' });
+  }
+});
+
+app.http.post('/api/admin/errors/clear', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+    saveAdminErrorLogs([]);
+    res.json({ success: true });
+  } catch (error) {
+    logAdminError('server', '/api/admin/errors/clear', error);
+    res.status(500).json({ error: 'failed_to_clear_admin_errors' });
+  }
+});
+
+app.http.post('/api/admin/errors/client', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+
+    const message = (req?.body?.message || '').toString().trim() || 'client_error';
+    const stack = (req?.body?.stack || '').toString();
+    const route = (req?.body?.route || '/admin').toString();
+
+    logAdminError('client', route, { message, stack }, {
+      userId: adminSession.userId,
+      tenantId: adminSession.tenantId,
+      meta: {
+        userAgent: req?.headers?.['user-agent'] || '',
+      },
+    });
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'failed_to_log_client_error' });
+  }
+});
+
+app.http.get('/admin/errors', async (req: any, res: any) => {
+  const adminSession = await requireAdminAuth(req, res, false);
+  if (!adminSession) return;
+  const adminUser = await getCurrentAdminUserProfile(adminSession);
+  const logs = loadAdminErrorLogs().slice(-200).reverse();
+
+  const rows = logs
+    .map((entry, index) => {
+      const safeMessage = (entry.message || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const safeRoute = (entry.route || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const safeSource = (entry.source || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<tr>
+        <td>${entry.ts}</td>
+        <td>${safeSource}</td>
+        <td>${safeRoute}</td>
+        <td style="max-width:520px;white-space:normal;word-break:break-word;">${safeMessage}</td>
+        <td><button onclick="copyErrorByIndex(${index})">Copy</button></td>
+      </tr>`;
+    })
+    .join('');
+
+  const content = `
+    <section class="hero"><h2>Error Reporting</h2><p class="subtitle">Exact admin page/API errors for troubleshooting.</p></section>
+    <section class="controls">
+      <div class="control">
+        <label>Actions</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button onclick="refreshErrors()">Refresh</button>
+          <button onclick="copyAllErrors()">Copy All</button>
+          <button onclick="clearErrors()">Clear Logs</button>
+        </div>
+        <div class="muted" style="margin-top:8px;">Showing latest ${logs.length} error entries.</div>
+      </div>
+    </section>
+    <div class="table-wrap" style="margin-top:14px;">
+      <table id="adminErrorTable">
+        <thead><tr><th>Timestamp</th><th>Source</th><th>Route</th><th>Message</th><th>Copy</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5">No errors logged</td></tr>'}</tbody>
+      </table>
+    </div>`;
+
+  const logsJson = JSON.stringify(logs);
+  const script = `
+    const adminErrors = ${logsJson};
+
+    async function copyErrorByIndex(index) {
+      try {
+        const row = adminErrors[index];
+        const text = JSON.stringify(row || {}, null, 2);
+        await navigator.clipboard.writeText(text);
+        showToast('Error copied', 'success', 1300);
+      } catch {
+        showToast('Copy failed', 'error', 2000);
+      }
+    }
+
+    async function copyAllErrors() {
+      try {
+        const text = JSON.stringify(adminErrors, null, 2);
+        await navigator.clipboard.writeText(text);
+        showToast('All errors copied', 'success', 1300);
+      } catch {
+        showToast('Copy failed', 'error', 2000);
+      }
+    }
+
+    function refreshErrors() {
+      window.location.reload();
+    }
+
+    async function clearErrors() {
+      const response = await fetch('/api/admin/errors/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (!response.ok) {
+        showToast('Failed to clear logs', 'error', 2200);
+        return;
+      }
+      showToast('Logs cleared', 'success', 1200);
+      setTimeout(() => window.location.reload(), 350);
+    }
+  `;
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(renderAdminLayout('errors', 'Mela Control - Errors', content, adminUser, script));
+});
+
+app.http.get('/admin', async (_req: any, res: any) => {
+  res.redirect('/admin/overview');
+});
+
+app.http.get('/admin/overview', async (req: any, res: any) => {
+  const adminSession = await requireAdminAuth(req, res, false);
+  if (!adminSession) return;
+  const adminUser = await getCurrentAdminUserProfile(adminSession);
+  const stats = loadBotAdminStats();
+  const monthKey = getMonthKey();
+  const tenantOptions = Array.from(
+    new Set(
+      Object.values(stats.users)
+        .map((u) => normalizeTenantId(u.tenantId))
+        .filter((v) => !!v)
+    )
+  )
+    .sort((a, b) => a.localeCompare(b))
+    .map((tenant) => `<option value="${tenant}">${tenant}</option>`)
+    .join('');
+  const userOptions = Object.values(stats.users)
+    .sort((a, b) => a.displayName.localeCompare(b.displayName))
+    .map((u) => {
+      const tenant = normalizeTenantId(u.tenantId);
+      return `<option value="${u.userId}" data-tenant="${tenant}">${u.displayName}</option>`;
+    })
+    .join('');
+
+  const dailyUsageJson = toInlineScriptJson(stats.dailyUsage || {});
+  const perUserDailyUsageJson = toInlineScriptJson(stats.perUserDailyUsage || {});
+  const usersSnapshotJson = toInlineScriptJson(stats.users || {});
+  const statsSnapshotJson = toInlineScriptJson({
+    totalMessages: stats.totalMessages || 0,
+    totalEstimatedInputTokens: stats.totalEstimatedInputTokens || 0,
+    totalEstimatedOutputTokens: stats.totalEstimatedOutputTokens || 0,
+    totalEstimatedTokens: stats.totalEstimatedTokens || 0,
+    totalEstimatedCostUsd: stats.totalEstimatedCostUsd || 0,
+  });
+
+  const content = `
+    <section class="hero"><h2>Overview</h2><p class="subtitle">Billing month: ${monthKey}</p></section>
+    <section class="cards">
+      <div class="card"><strong>Total Messages</strong><div id="kpiMessages" class="metric">${stats.totalMessages}</div></div>
+      <div class="card"><strong>Detected Users</strong><div id="kpiUsers" class="metric">${Object.keys(stats.users || {}).length}</div></div>
+      <div class="card"><strong>Meetings Joined</strong><div id="kpiMeetings" class="metric">${stats.totalMeetingsJoined}</div></div>
+      <div class="card"><strong>Active Meetings</strong><div class="metric">${stats.activeMeetingConversationIds.length}</div></div>
+      <div class="card"><strong>Total Tokens</strong><div id="kpiTokens" class="metric">${stats.totalEstimatedTokens}</div></div>
+      <div class="card"><strong>Total Cost (USD)</strong><div id="kpiCost" class="metric">$${stats.totalEstimatedCostUsd.toFixed(6)}</div></div>
+    </section>
+    <section class="hero" style="margin-top:12px;">
+      <h2 style="margin-bottom:10px;">Usage Trends</h2>
+      <div class="controls" style="margin-bottom:12px;">
+        <div class="control">
+          <label>Date Range</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button id="range-3" onclick="setRange(3)">3d</button>
+            <button id="range-7" onclick="setRange(7)">7d</button>
+            <button id="range-30" onclick="setRange(30)">30d</button>
+            <button id="range-90" onclick="setRange(90)">90d</button>
+          </div>
+        </div>
+        <div class="control">
+          <label>Tenant Filter</label>
+          <select id="tenantFilter" onchange="onTenantFilterChanged()" style="width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:rgba(1, 10, 12, 0.85);color:var(--text);">
+            <option value="all">All tenants</option>
+            ${tenantOptions}
+          </select>
+        </div>
+        <div class="control">
+          <label>User Filter</label>
+          <select id="userFilter" onchange="renderAllCharts()" style="width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:rgba(1, 10, 12, 0.85);color:var(--text);">
+            <option value="all">All users</option>
+            ${userOptions}
+          </select>
+        </div>
+      </div>
+      <div id="rangeSummary" class="muted" style="margin-bottom:10px;"></div>
+      <div class="chart-grid">
+        <div class="control"><label>Token Usage Trend</label><canvas id="tokensChart" height="170"></canvas></div>
+        <div class="control"><label>Meetings Joined Trend</label><canvas id="meetingsChart" height="170"></canvas></div>
+        <div class="control"><label>Messages Trend</label><canvas id="messagesChart" height="170"></canvas></div>
+        <div class="control"><label>Cost Trend (USD)</label><canvas id="costChart" height="170"></canvas></div>
+      </div>
+    </section>`;
+
+  const script = `
+    const dailyUsage = ${dailyUsageJson};
+    const perUserDailyUsage = ${perUserDailyUsageJson};
+    const usersSnapshot = ${usersSnapshotJson};
+    const statsSnapshot = ${statsSnapshotJson};
+    let currentRange = 30;
+
+    function setRange(days) {
+      currentRange = days;
+      document.querySelectorAll('[id^="range-"]').forEach((btn) => {
+        btn.style.opacity = btn.id === 'range-' + String(days) ? '1' : '0.6';
+      });
+      renderAllCharts();
+    }
+
+    function getDateKeys(rangeDays) {
+      const keys = [];
+      const now = new Date();
+      for (let i = rangeDays - 1; i >= 0; i--) {
+        const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+        const key = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+        keys.push(key);
+      }
+      return keys;
+    }
+
+    function getSeries(rangeDays) {
+      const tenantId = document.getElementById('tenantFilter').value;
+      const userId = document.getElementById('userFilter').value;
+      let source = {};
+
+      if (userId !== 'all') {
+        source = perUserDailyUsage[userId] || {};
+      } else if (tenantId === 'all') {
+        source = dailyUsage || {};
+      } else {
+        source = {};
+        const tenantUsers = Object.entries(usersSnapshot || {})
+          .filter(([, u]) => (u && (u.tenantId || 'unknown-tenant').trim() || 'unknown-tenant') === tenantId)
+          .map(([id]) => id);
+
+        for (const uid of tenantUsers) {
+          const dayMap = perUserDailyUsage[uid] || {};
+          for (const [dayKey, entry] of Object.entries(dayMap)) {
+            if (!source[dayKey]) {
+              source[dayKey] = {
+                totalTokens: 0,
+                inputTokens: 0,
+                outputTokens: 0,
+                messages: 0,
+                meetingsJoined: 0,
+                costUsd: 0,
+              };
+            }
+            source[dayKey].totalTokens += Number(entry.totalTokens || 0);
+            source[dayKey].inputTokens += Number(entry.inputTokens || 0);
+            source[dayKey].outputTokens += Number(entry.outputTokens || 0);
+            source[dayKey].messages += Number(entry.messages || 0);
+            source[dayKey].meetingsJoined += Number(entry.meetingsJoined || 0);
+            source[dayKey].costUsd += Number(entry.costUsd || 0);
+          }
+        }
+      }
+
+      const hasSourceData = Object.keys(source || {}).length > 0;
+
+      if (!hasSourceData) {
+        const today = getDateKeys(1)[0];
+        if (userId === 'all' && tenantId === 'all') {
+          source = {
+            [today]: {
+              totalTokens: Number(statsSnapshot.totalEstimatedTokens || 0),
+              inputTokens: Number(statsSnapshot.totalEstimatedInputTokens || 0),
+              outputTokens: Number(statsSnapshot.totalEstimatedOutputTokens || 0),
+              messages: Number(statsSnapshot.totalMessages || 0),
+              meetingsJoined: 0,
+              costUsd: Number(statsSnapshot.totalEstimatedCostUsd || 0),
+            }
+          };
+        } else if (userId === 'all' && tenantId !== 'all') {
+          const tenantUsers = Object.values(usersSnapshot || {}).filter((u) => ((u?.tenantId || 'unknown-tenant').trim() || 'unknown-tenant') === tenantId);
+          const fallback = tenantUsers.reduce((acc, user) => {
+            const monthMap = user?.monthlyMeetingsJoined || {};
+            const meetingsJoinedApprox = Object.values(monthMap).reduce((a, b) => Number(a) + Number(b || 0), 0);
+            acc.totalTokens += Number(user?.estimatedTotalTokens || 0);
+            acc.inputTokens += Number(user?.estimatedInputTokens || 0);
+            acc.outputTokens += Number(user?.estimatedOutputTokens || 0);
+            acc.messages += Number(user?.totalMessages || 0);
+            acc.meetingsJoined += Number(meetingsJoinedApprox || 0);
+            acc.costUsd += Number(user?.estimatedCostUsd || 0);
+            return acc;
+          }, { totalTokens: 0, inputTokens: 0, outputTokens: 0, messages: 0, meetingsJoined: 0, costUsd: 0 });
+
+          source = {
+            [today]: fallback
+          };
+        } else {
+          const user = usersSnapshot[userId] || {};
+          const monthMap = user.monthlyMeetingsJoined || {};
+          const meetingsJoinedApprox = Object.values(monthMap).reduce((a, b) => Number(a) + Number(b || 0), 0);
+          source = {
+            [today]: {
+              totalTokens: Number(user.estimatedTotalTokens || 0),
+              inputTokens: Number(user.estimatedInputTokens || 0),
+              outputTokens: Number(user.estimatedOutputTokens || 0),
+              messages: Number(user.totalMessages || 0),
+              meetingsJoined: Number(meetingsJoinedApprox || 0),
+              costUsd: Number(user.estimatedCostUsd || 0),
+            }
+          };
+        }
+      }
+
+      const keys = getDateKeys(rangeDays);
+      const labels = keys.map((k) => k.slice(5));
+      const tokens = keys.map((k) => Number((source[k] && source[k].totalTokens) || 0));
+      const meetings = keys.map((k) => Number((source[k] && source[k].meetingsJoined) || 0));
+      const messages = keys.map((k) => Number((source[k] && source[k].messages) || 0));
+      const costs = keys.map((k) => Number((source[k] && source[k].costUsd) || 0));
+      return { labels, tokens, meetings, messages, costs };
+    }
+
+    function drawChart(canvasId, labels, values, lineColor, fillColor) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width = canvas.clientWidth * (window.devicePixelRatio || 1);
+      const h = canvas.height = canvas.clientHeight * (window.devicePixelRatio || 1);
+      const dpr = window.devicePixelRatio || 1;
+      ctx.scale(dpr, dpr);
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      ctx.clearRect(0, 0, width, height);
+
+      const left = 28, right = width - 8, top = 8, bottom = height - 22;
+      const maxVal = Math.max(1, ...values);
+      const stepX = values.length > 1 ? (right - left) / (values.length - 1) : (right - left);
+
+      const allZero = values.every((v) => v === 0);
+      if (allZero) {
+        ctx.fillStyle = '#aebddc';
+        ctx.font = '12px Segoe UI';
+        ctx.fillText('No usage in selected range', left, (top + bottom) / 2);
+        return;
+      }
+
+      ctx.strokeStyle = 'rgba(47,85,151,0.35)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(left, bottom);
+      ctx.lineTo(right, bottom);
+      ctx.stroke();
+
+      ctx.beginPath();
+      values.forEach((v, i) => {
+        const x = left + i * stepX;
+        const y = bottom - ((v / maxVal) * (bottom - top));
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      values.forEach((v, i) => {
+        if (v <= 0) return;
+        const x = left + i * stepX;
+        const y = bottom - ((v / maxVal) * (bottom - top));
+        ctx.beginPath();
+        ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = lineColor;
+        ctx.fill();
+      });
+
+      ctx.lineTo(right, bottom);
+      ctx.lineTo(left, bottom);
+      ctx.closePath();
+      ctx.fillStyle = fillColor;
+      ctx.fill();
+
+      ctx.fillStyle = '#aebddc';
+      ctx.font = '10px Segoe UI';
+      ctx.fillText(labels[0] || '', left, height - 8);
+      ctx.fillText(labels[labels.length - 1] || '', right - 28, height - 8);
+      ctx.fillText(String(maxVal), 2, top + 8);
+    }
+
+    function renderAllCharts() {
+      const { labels, tokens, meetings, messages, costs } = getSeries(currentRange);
+      const totals = {
+        tokens: tokens.reduce((a, b) => a + b, 0),
+        meetings: meetings.reduce((a, b) => a + b, 0),
+        messages: messages.reduce((a, b) => a + b, 0),
+        cost: costs.reduce((a, b) => a + b, 0),
+      };
+      const tenantFilterEl = document.getElementById('tenantFilter');
+      const userFilterEl = document.getElementById('userFilter');
+      const tenantLabel = tenantFilterEl.value === 'all' ? 'All tenants' : tenantFilterEl.value;
+      const userLabel = userFilterEl.value === 'all' ? 'All users' : 'Selected user';
+      document.getElementById('rangeSummary').textContent =
+        tenantLabel + ' | ' + userLabel + ' | Range: ' + currentRange + 'd | Tokens: ' + totals.tokens +
+        ' | Meetings: ' + totals.meetings + ' | Messages: ' + totals.messages +
+        ' | Cost: $' + totals.cost.toFixed(6);
+
+      document.getElementById('kpiMessages').textContent = String(totals.messages);
+      document.getElementById('kpiMeetings').textContent = String(totals.meetings);
+      document.getElementById('kpiTokens').textContent = String(totals.tokens);
+      document.getElementById('kpiCost').textContent = '$' + totals.cost.toFixed(6);
+
+      const tenantId = tenantFilterEl.value;
+      const userId = userFilterEl.value;
+      if (userId !== 'all') {
+        document.getElementById('kpiUsers').textContent = '1';
+      } else if (tenantId === 'all') {
+        document.getElementById('kpiUsers').textContent = String(Object.keys(usersSnapshot || {}).length);
+      } else {
+        const count = Object.values(usersSnapshot || {}).filter((u) => ((u?.tenantId || 'unknown-tenant').trim() || 'unknown-tenant') === tenantId).length;
+        document.getElementById('kpiUsers').textContent = String(count);
+      }
+
+      drawChart('tokensChart', labels, tokens, '#2F5597', 'rgba(47,85,151,0.18)');
+      drawChart('meetingsChart', labels, meetings, '#4c7fd9', 'rgba(76,127,217,0.18)');
+      drawChart('messagesChart', labels, messages, '#6fa1f2', 'rgba(111,161,242,0.16)');
+      drawChart('costChart', labels, costs, '#8ab6ff', 'rgba(138,182,255,0.15)');
+    }
+
+    function onTenantFilterChanged() {
+      const tenantId = document.getElementById('tenantFilter').value;
+      const userFilter = document.getElementById('userFilter');
+      const selectedUser = userFilter.value;
+      let selectedUserStillVisible = selectedUser === 'all';
+
+      Array.from(userFilter.options).forEach((opt) => {
+        if (opt.value === 'all') {
+          opt.hidden = false;
+          return;
+        }
+        const optTenant = opt.getAttribute('data-tenant') || 'unknown-tenant';
+        const visible = tenantId === 'all' || optTenant === tenantId;
+        opt.hidden = !visible;
+        if (visible && opt.value === selectedUser) {
+          selectedUserStillVisible = true;
+        }
+      });
+
+      if (!selectedUserStillVisible) {
+        userFilter.value = 'all';
+      }
+      renderAllCharts();
+    }
+
+    window.addEventListener('resize', () => renderAllCharts());
+    onTenantFilterChanged();
+    setRange(30);
+  `;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(renderAdminLayout('overview', 'Mela Control - Overview', content, adminUser, script));
+});
+
+app.http.get('/admin/users', async (req: any, res: any) => {
+  const adminSession = await requireAdminAuth(req, res, false);
+  if (!adminSession) return;
+  const adminUser = await getCurrentAdminUserProfile(adminSession);
+  const stats = loadBotAdminStats();
+  const monthKey = getMonthKey();
+  const userRows = Object.values(stats.users)
+    .map((u) => {
+      const monthly = u.monthlyMeetingsJoined?.[monthKey] || 0;
+      const effectiveMeetingLimit = u.monthlyMeetingLimitOverride && u.monthlyMeetingLimitOverride > 0
+        ? u.monthlyMeetingLimitOverride
+        : stats.freeTierMonthlyMeetingLimit;
+      const payload = encodeURIComponent(JSON.stringify({
+        userId: u.userId,
+        displayName: u.displayName,
+        tokenPolicy: u.tokenPolicy,
+        tokenLimit: u.tokenLimit,
+        monthlyMeetingLimitOverride: u.monthlyMeetingLimitOverride,
+        blocked: u.blocked,
+        blockReason: u.blockReason || '',
+        usedTokens: u.estimatedTotalTokens,
+        estimatedCostUsd: u.estimatedCostUsd,
+        monthlyUsed: monthly,
+        monthlyLimit: effectiveMeetingLimit,
+      }));
+      return `<tr>
+        <td>${u.displayName}</td>
+        <td>${u.userId}</td>
+        <td>${monthly}/${effectiveMeetingLimit}</td>
+        <td>${u.estimatedTotalTokens}</td>
+        <td>$${u.estimatedCostUsd.toFixed(6)}</td>
+        <td><span class="status-pill ${u.blocked ? 'blocked' : ''}">${u.blocked ? 'Blocked' : 'Active'}</span></td>
+        <td>
+          <button onclick="openUserPolicyModal('${payload}')">Manage</button>
+          <button onclick="toggleUserBlock('${u.userId}', ${u.blocked ? 'false' : 'true'})">${u.blocked ? 'Unblock' : 'Block'}</button>
+        </td>
+      </tr>`;
+    })
+    .join('');
+  const content = `
+    <section class="hero"><h2>User Management</h2><p class="subtitle">Control user status and monthly usage.</p></section>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>User ID</th><th>Monthly Meetings</th><th>Used Tokens</th><th>Estimated Cost</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody>${userRows || '<tr><td colspan="7">No users yet</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div id="userPolicyModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:999;align-items:center;justify-content:center;padding:16px;">
+      <div style="width:min(640px,100%);max-height:90vh;overflow:auto;background:#0e1a30;border:1px solid rgba(47,85,151,0.45);border-radius:12px;padding:16px;box-shadow:0 18px 44px rgba(0,0,0,0.4);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <h3 style="margin:0;">Manage User Policy</h3>
+          <button onclick="closeUserPolicyModal()">Close</button>
+        </div>
+        <div class="muted" id="modalUserMeta"></div>
+        <div class="muted" id="modalBlockReason" style="margin-top:6px;"></div>
+        <div style="margin-top:12px;display:grid;grid-template-columns:1fr;gap:10px;">
+          <div>
+            <label>Token Policy</label>
+            <select id="modalTokenPolicy" style="width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:rgba(1, 10, 12, 0.85);color:var(--text);">
+              <option value="unlimited">Unlimited</option>
+              <option value="limited">Limited</option>
+            </select>
+          </div>
+          <div>
+            <label>Token Assignment (limit)</label>
+            <input id="modalTokenLimit" type="number" min="1" placeholder="Example: 50000" />
+          </div>
+          <div>
+            <label>Monthly Meeting Limit Override</label>
+            <input id="modalMeetingLimit" type="number" min="1" placeholder="Leave blank for default" />
+          </div>
+          <div>
+            <label style="display:flex;gap:8px;align-items:center;">
+              <input id="modalBlocked" type="checkbox" style="width:auto;margin:0;" />
+              Block this user
+            </label>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+              <button type="button" onclick="setModalBlocked(true)">Lock User</button>
+              <button type="button" onclick="setModalBlocked(false)">Unlock User</button>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+          <button onclick="closeUserPolicyModal()">Cancel</button>
+          <button onclick="saveModalUserPolicy()">Save Changes</button>
+        </div>
+      </div>
+    </div>`;
+  const script = `
+    let activeUserPolicy = null;
+
+    async function toggleUserBlock(userId, blocked) {
+      const response = await fetch('/api/admin/users/block-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, blocked })
+      });
+      if (!response.ok) {
+        showToast('Failed to update user status', 'error', 3200);
+        return;
+      }
+      showToast(blocked ? 'User blocked' : 'User unblocked', 'success', 1500);
+      setTimeout(() => location.reload(), 450);
+    }
+
+    function openUserPolicyModal(encodedPayload) {
+      try {
+        activeUserPolicy = JSON.parse(decodeURIComponent(encodedPayload));
+      } catch {
+        showToast('Invalid user policy payload', 'error', 3200);
+        return;
+      }
+
+      document.getElementById('modalUserMeta').textContent =
+        activeUserPolicy.displayName + ' (' + activeUserPolicy.userId + ') | Monthly: ' +
+        activeUserPolicy.monthlyUsed + '/' + activeUserPolicy.monthlyLimit + ' | Tokens used: ' +
+        activeUserPolicy.usedTokens;
+      document.getElementById('modalBlockReason').textContent = activeUserPolicy.blockReason
+        ? ('Block reason: ' + activeUserPolicy.blockReason)
+        : 'Block reason: none';
+
+      document.getElementById('modalTokenPolicy').value = activeUserPolicy.tokenPolicy || 'unlimited';
+      document.getElementById('modalTokenLimit').value = activeUserPolicy.tokenLimit || '';
+      document.getElementById('modalMeetingLimit').value = activeUserPolicy.monthlyMeetingLimitOverride || '';
+      document.getElementById('modalBlocked').checked = !!activeUserPolicy.blocked;
+
+      document.getElementById('userPolicyModal').style.display = 'flex';
+    }
+
+    function setModalBlocked(value) {
+      const cb = document.getElementById('modalBlocked');
+      cb.checked = !!value;
+    }
+
+    function closeUserPolicyModal() {
+      document.getElementById('userPolicyModal').style.display = 'none';
+      activeUserPolicy = null;
+    }
+
+    async function saveModalUserPolicy() {
+      if (!activeUserPolicy) return;
+
+      const tokenPolicy = document.getElementById('modalTokenPolicy').value;
+      const tokenLimitRaw = document.getElementById('modalTokenLimit').value;
+      const meetingLimitRaw = document.getElementById('modalMeetingLimit').value;
+      const blocked = document.getElementById('modalBlocked').checked;
+
+      const payload = {
+        userId: activeUserPolicy.userId,
+        tokenPolicy,
+        tokenLimit: tokenLimitRaw ? Number(tokenLimitRaw) : null,
+        monthlyMeetingLimitOverride: meetingLimitRaw ? Number(meetingLimitRaw) : null,
+      };
+
+      const response = await fetch('/api/admin/users/policy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        showToast('Failed to save policy: ' + (err.error || 'unknown_error'), 'error', 3600);
+        return;
+      }
+
+      const blockResponse = await fetch('/api/admin/users/block-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: activeUserPolicy.userId, blocked })
+      });
+      if (!blockResponse.ok) {
+        showToast('Failed to update user status', 'error', 3200);
+        return;
+      }
+
+      showToast('User policy saved successfully', 'success', 1700);
+      setTimeout(() => location.reload(), 600);
+    }`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(renderAdminLayout('users', 'Mela Control - Users', content, adminUser, script));
+});
+
+app.http.get('/admin/meetings', async (req: any, res: any) => {
+  const adminSession = await requireAdminAuth(req, res, false);
+  if (!adminSession) return;
+  const adminUser = await getCurrentAdminUserProfile(adminSession);
+  const stats = loadBotAdminStats();
+  const meetingRows = Object.values(stats.meetings)
+    .map((m) => `<tr><td>${m.meetingName || 'Meeting'}</td><td>${m.meetingId}</td><td>${m.joinRequests}</td><td>${m.estimatedOutputTokens}</td><td>${m.estimatedTotalTokens}</td><td>$${m.estimatedCostUsd.toFixed(6)}</td><td>${m.users.length}</td></tr>`)
+    .join('');
+  const content = `
+    <section class="hero"><h2>Meeting Usage</h2><p class="subtitle">Aggregated usage for meeting chats only.</p></section>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Meeting Name</th><th>Meeting ID</th><th>Join Requests</th><th>Combined Sent Tokens</th><th>Estimated Total Tokens</th><th>Estimated Cost</th><th>Users</th></tr></thead>
+        <tbody>${meetingRows || '<tr><td colspan="7">No meetings yet</td></tr>'}</tbody>
+      </table>
+    </div>`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(renderAdminLayout('meetings', 'Mela Control - Meetings', content, adminUser));
+});
+
+function summarizeMonthUsage(stats: BotAdminStats, monthKey: string) {
+  const entries = Object.values(stats.dailyUsage || {}).filter((d) => (d.day || '').startsWith(monthKey));
+  const hasDailyHistory = Object.keys(stats.dailyUsage || {}).length > 0;
+  const summary = {
+    messages: 0,
+    meetingsJoined: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+  };
+
+  if (entries.length > 0) {
+    for (const e of entries) {
+      summary.messages += e.messages || 0;
+      summary.meetingsJoined += e.meetingsJoined || 0;
+      summary.inputTokens += e.inputTokens || 0;
+      summary.outputTokens += e.outputTokens || 0;
+      summary.totalTokens += e.totalTokens || 0;
+      summary.costUsd += e.costUsd || 0;
+    }
+    return summary;
+  }
+
+  // If daily history exists, this month genuinely has no usage.
+  if (hasDailyHistory) {
+    return summary;
+  }
+
+  // Fallback for old data without daily history.
+  return {
+    messages: stats.totalMessages || 0,
+    meetingsJoined: stats.totalMeetingsJoined || 0,
+    inputTokens: stats.totalEstimatedInputTokens || 0,
+    outputTokens: stats.totalEstimatedOutputTokens || 0,
+    totalTokens: stats.totalEstimatedTokens || 0,
+    costUsd: stats.totalEstimatedCostUsd || 0,
+  };
+}
+
+function summarizeTenantMonthUsage(stats: BotAdminStats, monthKey: string, tenantId: string) {
+  const summary = {
+    messages: 0,
+    meetingsJoined: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+  };
+
+  const targetTenant = normalizeTenantId(tenantId);
+  const users = stats.users || {};
+  const perUserDaily = stats.perUserDailyUsage || {};
+  const hasAnyDailyHistory = Object.keys(stats.dailyUsage || {}).length > 0;
+
+  for (const [userId, user] of Object.entries(users)) {
+    if (normalizeTenantId(user.tenantId) !== targetTenant) continue;
+    const dayMap = perUserDaily[userId] || {};
+    let hasMonthData = false;
+    for (const entry of Object.values(dayMap)) {
+      if (!(entry.day || '').startsWith(monthKey)) continue;
+      hasMonthData = true;
+      summary.messages += entry.messages || 0;
+      summary.meetingsJoined += entry.meetingsJoined || 0;
+      summary.inputTokens += entry.inputTokens || 0;
+      summary.outputTokens += entry.outputTokens || 0;
+      summary.totalTokens += entry.totalTokens || 0;
+      summary.costUsd += entry.costUsd || 0;
+    }
+
+    if (!hasMonthData && !hasAnyDailyHistory) {
+      // Fallback for historical users before per-day usage tracking existed.
+      summary.messages += user.totalMessages || 0;
+      summary.inputTokens += user.estimatedInputTokens || 0;
+      summary.outputTokens += user.estimatedOutputTokens || 0;
+      summary.totalTokens += user.estimatedTotalTokens || 0;
+      summary.costUsd += user.estimatedCostUsd || 0;
+      summary.meetingsJoined += (user.monthlyMeetingsJoined?.[monthKey] || 0);
+    }
+  }
+
+  return summary;
+}
+
+function summarizeTenantsForMonth(stats: BotAdminStats, monthKey: string, fallbackTenantId: string) {
+  const rows = new Map<string, {
+    tenantId: string;
+    detectedUsers: number;
+    activeUsers: number;
+    messages: number;
+    meetingsJoined: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    costUsd: number;
+  }>();
+
+  const users = stats.users || {};
+  const perUserDaily = stats.perUserDailyUsage || {};
+  const hasAnyDailyHistory = Object.keys(stats.dailyUsage || {}).length > 0;
+  const defaultTenant = normalizeTenantId(fallbackTenantId);
+
+  for (const [userId, user] of Object.entries(users)) {
+    const tenantId = normalizeTenantId(user.tenantId || defaultTenant);
+    if (!rows.has(tenantId)) {
+      rows.set(tenantId, {
+        tenantId,
+        detectedUsers: 0,
+        activeUsers: 0,
+        messages: 0,
+        meetingsJoined: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+      });
+    }
+
+    const row = rows.get(tenantId)!;
+    row.detectedUsers += 1;
+
+    const dayMap = perUserDaily[userId] || {};
+    let hasActivity = false;
+    let hasMonthData = false;
+    for (const entry of Object.values(dayMap)) {
+      if (!(entry.day || '').startsWith(monthKey)) continue;
+      hasMonthData = true;
+      row.messages += entry.messages || 0;
+      row.meetingsJoined += entry.meetingsJoined || 0;
+      row.inputTokens += entry.inputTokens || 0;
+      row.outputTokens += entry.outputTokens || 0;
+      row.totalTokens += entry.totalTokens || 0;
+      row.costUsd += entry.costUsd || 0;
+
+      if ((entry.messages || 0) > 0 || (entry.totalTokens || 0) > 0 || (entry.meetingsJoined || 0) > 0) {
+        hasActivity = true;
+      }
+    }
+
+    if (!hasMonthData && !hasAnyDailyHistory) {
+      // Fallback for historical users before per-day usage tracking existed.
+      row.messages += user.totalMessages || 0;
+      row.meetingsJoined += (user.monthlyMeetingsJoined?.[monthKey] || 0);
+      row.inputTokens += user.estimatedInputTokens || 0;
+      row.outputTokens += user.estimatedOutputTokens || 0;
+      row.totalTokens += user.estimatedTotalTokens || 0;
+      row.costUsd += user.estimatedCostUsd || 0;
+    }
+
+    if (!hasActivity) {
+      // Fallback for users created before per-day entries existed.
+      hasActivity = (user.totalMessages || 0) > 0 || (user.estimatedTotalTokens || 0) > 0 || (user.meetingJoinRequests || 0) > 0;
+    }
+
+    if (hasActivity) {
+      row.activeUsers += 1;
+    }
+  }
+
+  const tenantRows = Array.from(rows.values());
+  if (tenantRows.length === 0) {
+    const globalUsage = summarizeMonthUsage(stats, monthKey);
+    tenantRows.push({
+      tenantId: defaultTenant,
+      detectedUsers: 0,
+      activeUsers: 0,
+      messages: globalUsage.messages,
+      meetingsJoined: globalUsage.meetingsJoined,
+      inputTokens: globalUsage.inputTokens,
+      outputTokens: globalUsage.outputTokens,
+      totalTokens: globalUsage.totalTokens,
+      costUsd: globalUsage.costUsd,
+    });
+  }
+
+  return tenantRows.sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens || a.tenantId.localeCompare(b.tenantId));
+}
+
+function summarizeInvoiceUserCounts(stats: BotAdminStats, monthKey: string): { activeUsers: number; detectedUsers: number } {
+  const detectedUsers = Object.keys(stats.users || {}).length;
+  const activeUserIds = new Set<string>();
+
+  const perUserDaily = stats.perUserDailyUsage || {};
+  for (const [userId, dayMap] of Object.entries(perUserDaily)) {
+    const hasActivityInMonth = Object.values(dayMap || {}).some((d) => {
+      if (!(d.day || '').startsWith(monthKey)) return false;
+      return (d.messages || 0) > 0 || (d.totalTokens || 0) > 0 || (d.meetingsJoined || 0) > 0;
+    });
+    if (hasActivityInMonth) {
+      activeUserIds.add(userId);
+    }
+  }
+
+  // Fallback for pre-history records.
+  if (activeUserIds.size === 0) {
+    for (const [userId, u] of Object.entries(stats.users || {})) {
+      if ((u.totalMessages || 0) > 0 || (u.estimatedTotalTokens || 0) > 0 || (u.meetingJoinRequests || 0) > 0) {
+        activeUserIds.add(userId);
+      }
+    }
+  }
+
+  return {
+    activeUsers: activeUserIds.size,
+    detectedUsers,
+  };
+}
+
+function buildTenantInvoiceHtml(tenantId: string, monthKey: string, usage: ReturnType<typeof summarizeMonthUsage>, activeUsers: number, generatedBy: string) {
+  const invoiceNumber = `INV-${monthKey.replace('-', '')}-${tenantId.slice(0, 6).toUpperCase()}`;
+  const generatedAt = new Date().toISOString();
+  const subtotal = usage.costUsd;
+  const tax = 0;
+  const total = subtotal + tax;
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tenant Invoice ${invoiceNumber}</title>
+  <style>
+    body { font-family: "Segoe UI", Arial, sans-serif; margin: 0; padding: 24px; background: #f5f8ff; color: #1e2f4d; }
+    .sheet { max-width: 960px; margin: 0 auto; background: #fff; border-radius: 14px; border: 1px solid #d6e1fb; overflow: hidden; box-shadow: 0 16px 38px rgba(20, 50, 120, 0.12); }
+    .head { padding: 18px 22px; background: linear-gradient(135deg, #2F5597, #426cb4); color: #fff; display: flex; justify-content: space-between; align-items: start; }
+    .head h1 { margin: 0; font-size: 22px; }
+    .head p { margin: 6px 0 0; opacity: 0.95; }
+    .meta { padding: 18px 22px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; border-bottom: 1px solid #ebf0ff; }
+    .card { border: 1px solid #e7edff; border-radius: 10px; padding: 10px; }
+    .label { color: #60749a; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
+    .value { font-size: 15px; margin-top: 5px; font-weight: 600; }
+    table { width: calc(100% - 44px); margin: 18px 22px 22px; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #edf2ff; padding: 10px 8px; text-align: left; }
+    th { background: #f1f5ff; font-size: 12px; text-transform: uppercase; color: #4f6493; }
+    .totals { margin: 0 22px 22px; width: 320px; margin-left: auto; }
+    .row { display: flex; justify-content: space-between; border-bottom: 1px dashed #dce5fb; padding: 8px 0; }
+    .row.total { font-size: 18px; font-weight: 700; color: #2F5597; border-bottom: none; }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="head">
+      <div>
+        <h1>Mela Control Invoice</h1>
+        <p>Tenant usage billing statement</p>
+      </div>
+      <div>
+        <div>Invoice #: <strong>${invoiceNumber}</strong></div>
+        <div>Month: <strong>${monthKey}</strong></div>
+      </div>
+    </div>
+    <div class="meta">
+      <div class="card"><div class="label">Tenant</div><div class="value">${tenantId}</div></div>
+      <div class="card"><div class="label">Generated By</div><div class="value">${generatedBy}</div></div>
+      <div class="card"><div class="label">Generated At</div><div class="value">${generatedAt}</div></div>
+      <div class="card"><div class="label">Active Users</div><div class="value">${activeUsers}</div></div>
+    </div>
+    <table>
+      <thead><tr><th>Line Item</th><th>Quantity</th><th>Unit</th><th>Amount (USD)</th></tr></thead>
+      <tbody>
+        <tr><td>Input Tokens</td><td>${usage.inputTokens}</td><td>tokens</td><td>-</td></tr>
+        <tr><td>Output Tokens</td><td>${usage.outputTokens}</td><td>tokens</td><td>-</td></tr>
+        <tr><td>Total Tokens</td><td>${usage.totalTokens}</td><td>tokens</td><td>$${usage.costUsd.toFixed(6)}</td></tr>
+        <tr><td>Messages Processed</td><td>${usage.messages}</td><td>messages</td><td>-</td></tr>
+        <tr><td>Meetings Joined</td><td>${usage.meetingsJoined}</td><td>meetings</td><td>-</td></tr>
+      </tbody>
+    </table>
+    <div class="totals">
+      <div class="row"><span>Subtotal</span><span>$${subtotal.toFixed(6)}</span></div>
+      <div class="row"><span>Tax</span><span>$${tax.toFixed(6)}</span></div>
+      <div class="row total"><span>Total</span><span>$${total.toFixed(6)}</span></div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function buildTenantInvoicePdfBuffer(
+  tenantId: string,
+  monthKey: string,
+  usage: ReturnType<typeof summarizeMonthUsage>,
+  activeUsers: number,
+  generatedBy: string
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    try {
+      const invoiceNumber = `INV-${monthKey.replace('-', '')}-${tenantId.slice(0, 6).toUpperCase()}`;
+      const generatedAt = new Date().toISOString();
+      const subtotal = usage.costUsd;
+      const tax = 0;
+      const total = subtotal + tax;
+
+      const doc = new PDFDocument({ size: 'A4', margin: 42 });
+      const chunks: Buffer[] = [];
+      doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const pageWidth = doc.page.width;
+      const contentWidth = pageWidth - 84;
+
+      // Header
+      doc.rect(42, 42, contentWidth, 88).fill('#2F5597');
+      doc.fillColor('#FFFFFF').fontSize(22).font('Helvetica-Bold').text('Mela Control Invoice', 58, 62);
+      doc.fontSize(11).font('Helvetica').text('Tenant usage billing statement', 58, 92);
+      doc.fontSize(10).text(`Invoice #: ${invoiceNumber}`, 370, 62, { width: 220, align: 'right' });
+      doc.fontSize(10).text(`Month: ${monthKey}`, 370, 78, { width: 220, align: 'right' });
+
+      // Meta cards
+      const cardY = 148;
+      const cardW = (contentWidth - 16) / 2;
+      const drawCard = (x: number, y: number, label: string, value: string) => {
+        doc.roundedRect(x, y, cardW, 58, 6).lineWidth(1).strokeColor('#D6E1FB').stroke();
+        doc.fillColor('#60749A').fontSize(9).font('Helvetica-Bold').text(label.toUpperCase(), x + 10, y + 9);
+        doc.fillColor('#1E2F4D').fontSize(11).font('Helvetica').text(value, x + 10, y + 25, { width: cardW - 18 });
+      };
+
+      drawCard(42, cardY, 'Tenant', tenantId);
+      drawCard(42 + cardW + 16, cardY, 'Generated By', generatedBy);
+      drawCard(42, cardY + 70, 'Generated At', generatedAt);
+      drawCard(42 + cardW + 16, cardY + 70, 'Active Users', String(activeUsers));
+
+      // Table
+      let y = cardY + 156;
+      doc.roundedRect(42, y, contentWidth, 28, 4).fill('#F1F5FF');
+      doc.fillColor('#4F6493').fontSize(9).font('Helvetica-Bold');
+      doc.text('Line Item', 52, y + 9);
+      doc.text('Quantity', 300, y + 9);
+      doc.text('Unit', 390, y + 9);
+      doc.text('Amount (USD)', 470, y + 9);
+
+      const rows = [
+        ['Input Tokens', String(usage.inputTokens), 'tokens', '-'],
+        ['Output Tokens', String(usage.outputTokens), 'tokens', '-'],
+        ['Total Tokens', String(usage.totalTokens), 'tokens', `$${usage.costUsd.toFixed(6)}`],
+        ['Messages Processed', String(usage.messages), 'messages', '-'],
+        ['Meetings Joined', String(usage.meetingsJoined), 'meetings', '-'],
+      ];
+
+      y += 30;
+      doc.font('Helvetica').fontSize(10);
+      for (const row of rows) {
+        doc.strokeColor('#EDF2FF').lineWidth(1).moveTo(42, y + 20).lineTo(42 + contentWidth, y + 20).stroke();
+        doc.fillColor('#1E2F4D').text(row[0], 52, y + 6, { width: 220 });
+        doc.text(row[1], 300, y + 6, { width: 70 });
+        doc.text(row[2], 390, y + 6, { width: 70 });
+        doc.text(row[3], 470, y + 6, { width: 120 });
+        y += 24;
+      }
+
+      // Totals
+      const totalsX = 360;
+      const totalsW = contentWidth - (totalsX - 42);
+      y += 16;
+      doc.roundedRect(totalsX, y, totalsW, 74, 6).lineWidth(1).strokeColor('#DCE5FB').stroke();
+      doc.fillColor('#1E2F4D').font('Helvetica').fontSize(10);
+      doc.text('Subtotal', totalsX + 12, y + 12);
+      doc.text(`$${subtotal.toFixed(6)}`, totalsX + totalsW - 130, y + 12, { width: 118, align: 'right' });
+      doc.text('Tax', totalsX + 12, y + 30);
+      doc.text(`$${tax.toFixed(6)}`, totalsX + totalsW - 130, y + 30, { width: 118, align: 'right' });
+      doc.font('Helvetica-Bold').fillColor('#2F5597').fontSize(12);
+      doc.text('Total', totalsX + 12, y + 50);
+      doc.text(`$${total.toFixed(6)}`, totalsX + totalsW - 130, y + 50, { width: 118, align: 'right' });
+
+      doc.end();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+app.http.get('/admin/invoices', async (req: any, res: any) => {
+  const adminSession = await requireAdminAuth(req, res, false);
+  if (!adminSession) return;
+  const adminUser = await getCurrentAdminUserProfile(adminSession);
+  const stats = loadBotAdminStats();
+
+  const currentMonth = getMonthKey();
+  const month = ((req?.query?.month as string) || currentMonth).slice(0, 7);
+  const tenantId = normalizeTenantId(getConfiguredTenantId() || adminUser.tenantId || 'unknown-tenant');
+  const tenantRows = summarizeTenantsForMonth(stats, month, tenantId)
+    .map((row) => {
+      const safeTenant = row.tenantId.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      return `<tr>
+        <td>${safeTenant}</td>
+        <td>${row.activeUsers}</td>
+        <td>${row.detectedUsers}</td>
+        <td>${row.messages}</td>
+        <td>${row.meetingsJoined}</td>
+        <td>${row.totalTokens}</td>
+        <td>$${row.costUsd.toFixed(6)}</td>
+        <td><button onclick="downloadTenantInvoice('${safeTenant}')">Download PDF</button></td>
+      </tr>`;
+    })
+    .join('');
+
+  const content = `
+    <section class="hero"><h2>Tenant Invoice</h2><p class="subtitle">Generate and download usage invoices by month and tenant.</p></section>
+    <section class="controls">
+      <div class="control">
+        <label>Invoice Month</label>
+        <input id="invoiceMonth" type="month" value="${month}" />
+        <button onclick="reloadInvoiceMonth()">Load Month</button>
+      </div>
+      <div class="control">
+        <label>Filter Tenants</label>
+        <input id="tenantFilter" type="text" placeholder="Search tenant id..." oninput="applyTenantFilter()" />
+        <label style="display:flex;gap:8px;align-items:center;margin-top:4px;">
+          <input id="activeOnlyFilter" type="checkbox" style="width:auto;margin:0;" onchange="applyTenantFilter()" />
+          Show active tenants only
+        </label>
+      </div>
+    </section>
+
+    <div class="table-wrap" style="margin-top:14px;">
+      <table>
+        <thead><tr><th>Tenant</th><th>Active Users</th><th>Detected Users</th><th>Messages</th><th>Meetings</th><th>Total Tokens</th><th>Cost (USD)</th><th>Download</th></tr></thead>
+        <tbody id="tenantInvoiceTableBody">${tenantRows || '<tr><td colspan="8">No tenant usage for selected month</td></tr>'}</tbody>
+      </table>
+    </div>`;
+
+  const script = `
+    function reloadInvoiceMonth() {
+      const month = document.getElementById('invoiceMonth').value;
+      const query = month ? ('?month=' + encodeURIComponent(month)) : '';
+      window.location.href = '/admin/invoices' + query;
+    }
+    function downloadTenantInvoice(tenantId) {
+      const month = document.getElementById('invoiceMonth').value;
+      const query = new URLSearchParams();
+      if (month) query.set('month', month);
+      if (tenantId) query.set('tenantId', tenantId);
+      window.location.href = '/api/admin/invoices/download.pdf?' + query.toString();
+    }
+    function applyTenantFilter() {
+      const term = (document.getElementById('tenantFilter').value || '').trim().toLowerCase();
+      const activeOnly = document.getElementById('activeOnlyFilter').checked;
+      const body = document.getElementById('tenantInvoiceTableBody');
+      if (!body) return;
+
+      const rows = Array.from(body.querySelectorAll('tr'));
+      for (const row of rows) {
+        const cols = row.querySelectorAll('td');
+        if (!cols || cols.length < 2) continue;
+
+        const tenantText = (cols[0].textContent || '').toLowerCase();
+        const activeUsers = Number((cols[1].textContent || '0').trim()) || 0;
+        const matchesTerm = !term || tenantText.includes(term);
+        const matchesActive = !activeOnly || activeUsers > 0;
+        row.style.display = matchesTerm && matchesActive ? '' : 'none';
+      }
+    }`;
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(renderAdminLayout('invoices', 'Mela Control - Invoices', content, adminUser, script));
+});
+
+app.http.get('/api/admin/invoices/download', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+    const adminUser = await getCurrentAdminUserProfile(adminSession);
+    const stats = loadBotAdminStats();
+    const currentMonth = getMonthKey();
+    const month = ((req?.query?.month as string) || currentMonth).slice(0, 7);
+    const defaultTenantId = normalizeTenantId(getConfiguredTenantId() || adminUser.tenantId || 'unknown-tenant');
+    const selectedTenantId = normalizeTenantId((req?.query?.tenantId as string) || defaultTenantId);
+    const usage = summarizeTenantMonthUsage(stats, month, selectedTenantId);
+    const tenantSummary = summarizeTenantsForMonth(stats, month, defaultTenantId).find((t) => t.tenantId === selectedTenantId);
+    const activeUsers = tenantSummary?.activeUsers || 0;
+    const html = buildTenantInvoiceHtml(selectedTenantId, month, usage, activeUsers, adminUser.displayName || 'Admin');
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="tenant-invoice-${selectedTenantId}-${month}.html"`);
+    res.status(200).send(html);
+  } catch (error) {
+    logAdminError('server', '/api/admin/invoices/download', error);
+    console.error('[ADMIN_INVOICE_DOWNLOAD] Failed:', error);
+    res.status(500).json({ error: 'failed_to_generate_invoice' });
+  }
+});
+
+app.http.get('/api/admin/invoices/download.pdf', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+    const adminUser = await getCurrentAdminUserProfile(adminSession);
+    const stats = loadBotAdminStats();
+    const currentMonth = getMonthKey();
+    const month = ((req?.query?.month as string) || currentMonth).slice(0, 7);
+    const defaultTenantId = normalizeTenantId(getConfiguredTenantId() || adminUser.tenantId || 'unknown-tenant');
+    const selectedTenantId = normalizeTenantId((req?.query?.tenantId as string) || defaultTenantId);
+    const usage = summarizeTenantMonthUsage(stats, month, selectedTenantId);
+    const tenantSummary = summarizeTenantsForMonth(stats, month, defaultTenantId).find((t) => t.tenantId === selectedTenantId);
+    const activeUsers = tenantSummary?.activeUsers || 0;
+
+    const pdfBuffer = await buildTenantInvoicePdfBuffer(selectedTenantId, month, usage, activeUsers, adminUser.displayName || 'Admin');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="tenant-invoice-${selectedTenantId}-${month}.pdf"`);
+    res.status(200).send(pdfBuffer);
+  } catch (error) {
+    logAdminError('server', '/api/admin/invoices/download.pdf', error);
+    console.error('[ADMIN_INVOICE_PDF_DOWNLOAD] Failed:', error);
+    res.status(500).json({ error: 'failed_to_generate_invoice_pdf' });
+  }
+});
+
+app.http.get('/admin/settings', async (req: any, res: any) => {
+  const adminSession = await requireAdminAuth(req, res, false);
+  if (!adminSession) return;
+  const adminUser = await getCurrentAdminUserProfile(adminSession);
+  const stats = loadBotAdminStats();
+  const content = `
+    <section class="hero"><h2>Settings</h2><p class="subtitle">Plan and capacity controls.</p></section>
+    <section class="controls">
+      <div class="control">
+        <label>Global Limits Enforcement</label>
+        <label style="display:flex;gap:8px;align-items:center;">
+          <input id="enforceGlobalLimitsInput" type="checkbox" style="width:auto;margin:0;" ${stats.enforceGlobalLimits ? 'checked' : ''} />
+          Enable capacity and monthly meeting limits
+        </label>
+        <button onclick="updateEnforceGlobalLimits()">Save Enforcement</button>
+        <div class="muted">When disabled, users have unlimited access unless explicitly blocked or given a limited token policy.</div>
+      </div>
+      <div class="control">
+        <label>Free-tier monthly meetings</label>
+        <input id="freeTierLimitInput" type="number" min="1" max="1000" value="${stats.freeTierMonthlyMeetingLimit}" />
+        <button onclick="updateFreeTierLimit()">Save Free-tier Limit</button>
+        <div class="muted">Applies to new join attempts immediately.</div>
+      </div>
+      <div class="control">
+        <label>Max active users</label>
+        <input id="maxUsersInput" type="number" min="1" max="50000" value="${stats.maxUsers}" />
+        <button onclick="updateMaxUsers()">Save Max Users</button>
+        <div class="muted">Controls first-time access capacity.</div>
+      </div>
+    </section>`;
+  const script = `
+    async function updateEnforceGlobalLimits() {
+      const enabled = document.getElementById('enforceGlobalLimitsInput').checked;
+      const response = await fetch('/api/admin/config/enforce-global-limits', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+      if (!response.ok) {
+        showToast('Failed to update enforcement setting', 'error', 3200);
+        return;
+      }
+      showToast('Enforcement setting updated', 'success', 1700);
+      setTimeout(() => location.reload(), 500);
+    }
+    async function updateFreeTierLimit() {
+      const limit = Number(document.getElementById('freeTierLimitInput').value);
+      const response = await fetch('/api/admin/config/free-tier-limit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit })
+      });
+      if (!response.ok) {
+        showToast('Failed to update free-tier limit', 'error', 3200);
+        return;
+      }
+      showToast('Free-tier limit updated', 'success', 1700);
+      setTimeout(() => location.reload(), 500);
+    }
+    async function updateMaxUsers() {
+      const maxUsers = Number(document.getElementById('maxUsersInput').value);
+      const response = await fetch('/api/admin/config/max-users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxUsers })
+      });
+      if (!response.ok) {
+        showToast('Failed to update max users', 'error', 3200);
+        return;
+      }
+      showToast('Max users updated', 'success', 1700);
+      setTimeout(() => location.reload(), 500);
+    }`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(renderAdminLayout('settings', 'Mela Control - Settings', content, adminUser, script));
+});
 
 // Handle Graph Communications API call-state callback notifications
 // Teams/Graph will POST events here when call state changes (ringing, established, terminated, etc.)
@@ -3402,18 +8408,29 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         const callEntry = activeCallMap.get(callId);
         // Guard: only process the FIRST established event per call (Teams sends duplicates)
         if (callEntry?.establishedAt) {
-          console.log(`[CALLS_WEBHOOK] Duplicate established event for callId=${callId} � ignoring`);
+          console.log(`[CALLS_WEBHOOK] Duplicate established event for callId=${callId} — ignoring`);
         } else if (callEntry) {
           console.log(`[CALLS_WEBHOOK] Call ESTABLISHED - bot is live in meeting. conversationId=${callEntry.conversationId}`);
+          recordMeetingEstablished(
+            callEntry.conversationId,
+            getCachedMeetingContext(callEntry.conversationId)?.subject || 'Meeting'
+          );
           // Record establishment time and cancel any pending retries
           callEntry.establishedAt = Date.now();
+          
+          // Register this as a live transcript session
+          const meetingSubject = getCachedMeetingContext(callEntry.conversationId)?.subject;
+          registerLiveTranscriptSession(callEntry.conversationId, callId, meetingSubject);
+          
           if (callEntry.organizerId && callEntry.joinWebUrl) {
             cacheMeetingContext(
               callEntry.conversationId,
               callEntry.organizerId,
               callEntry.joinWebUrl,
               undefined,
-              { startedAt: callEntry.establishedAt }
+              { startedAt: callEntry.establishedAt },
+              callId,  // persist callId so post-meeting transcribe can use /communications/calls API
+              callEntry.onlineMeetingId
             );
           }
           cancelPendingJoin(callEntry.conversationId);
@@ -3432,15 +8449,17 @@ app.http.post('/api/calls', async (req: any, res: any) => {
               callId,
               callEntry.organizerId,
               callEntry.joinWebUrl,
+              callEntry.onlineMeetingId,
               callEntry.conversationId,
               callEntry.serviceUrl,
               callEntry.establishedAt || Date.now()
             );
           }
           
-          await graphApiHelper.sendProactiveMessage(
+          await sendMeetingStatusNoticeOnce(
             callEntry.serviceUrl,
             callEntry.conversationId,
+            'live_setup',
             `I'm now live in the meeting and setting up transcription. Just ask me to **summarize**, **transcribe**, or generate **minutes** whenever you're ready!`
           );
         }
@@ -3450,12 +8469,21 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         clearPendingTranscriptionStart(callId);
         stopLiveTranscriptPolling(callId);
         
+        // End the live transcript session for this conversation
+        if (conversationId) {
+          endLiveTranscriptSession(conversationId, callId);
+        }
+        
         // Capture call timing before we delete the entry
         const callStartedAt = callEntry?.establishedAt || Date.now();
         const callEndedAt = Date.now();
         
         activeCallMap.delete(callId);
         callToConversationMap.delete(callId);
+        if (conversationId) {
+          clearMeetingStatusNotices(conversationId);
+          recordMeetingTerminated(conversationId);
+        }
         console.log(`[CALLS_WEBHOOK] Call TERMINATED - bot left the meeting (duration: ${(callEndedAt - callStartedAt) / 1000}s)`);
 
         // Fetch the meeting transcript from Graph (Teams stores it server-side)
@@ -3467,6 +8495,9 @@ app.http.post('/api/calls', async (req: any, res: any) => {
             callEntry.joinWebUrl,
             undefined,
             { startedAt: callStartedAt, endedAt: callEndedAt }
+            ,
+            undefined,
+            callEntry.onlineMeetingId
           );
           const orgId = callEntry.organizerId!;
           const webUrl = callEntry.joinWebUrl!;
@@ -3491,13 +8522,37 @@ app.http.post('/api/calls', async (req: any, res: any) => {
                   liveTranscriptMap.set(convId, parsed);
                   saveTranscriptToFile(convId);
                   console.log(`[POST_MEETING_TRANSCRIPT] Saved ${parsed.length} transcript entries`);
-                  // Auto-send AI summary instead of raw transcript
-                  // Use call start time for accurate meeting date
-                  const summary = await generateFormattedSummaryHtml(parsed, 'Meeting', 'Participant', [], new Date(callStartedAt));
+                  // Auto-send AI summary — but only if one hasn't been posted in chat recently
+                  // (to avoid duplicating a summary the user explicitly requested during the meeting)
+                  const recentSummary = lastBotResponseMap.get(convId);
+                  const summaryAlreadyPosted =
+                    recentSummary?.contentType === 'summary' &&
+                    Date.now() - recentSummary.timestamp < 60 * 60 * 1000; // within last hour
+
+                  const summary = summaryAlreadyPosted
+                    ? (recentSummary!.content) // reuse the one already shown in chat
+                    : await generateFormattedSummaryHtml(parsed, 'Meeting', 'Participant', [], new Date(callStartedAt));
+
+                  // ALWAYS show the summary in chat first (even if it was shown before, show it with "Meeting ended!")
                   await graphApiHelper.sendProactiveMessage(
                     svcUrl, convId,
-                    `**Meeting ended!** Here's your summary:\n\n${summary}`
+                    `**Meeting ended!** Here's your AI-generated summary:\n\n${summary}`
                   );
+                  
+                  // Auto-email the final summary to all participants
+                  const emailResult = await autoEmailSummaryToParticipants(
+                    convId,
+                    orgId,
+                    `Meeting Summary from ${config.botDisplayName}`,
+                    summary
+                  );
+                  if (emailResult.sentCount > 0) {
+                    console.log(`[POST_MEETING_EMAIL] Emailed summary to ${emailResult.sentCount} participant(s)`);
+                    await graphApiHelper.sendProactiveMessage(
+                      svcUrl, convId,
+                      `I've also emailed this summary to ${emailResult.sentCount} participant(s)${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`
+                    );
+                  }
                   return; // success
                 } else {
                   console.log(`[POST_MEETING_TRANSCRIPT] VTT content downloaded but no entries parsed`);
@@ -3564,6 +8619,24 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         console.log(`[TRANSCRIPTION_STATE] state=${tState}, callId=${callId}, lastModified=${transcription.lastModifiedDateTime || 'N/A'}`);
         // Dump the full transcription object to discover any extra fields (e.g. content)
         console.log(`[TRANSCRIPTION_STATE_FULL]`, JSON.stringify(transcription));
+
+        // Webhook usually gives transcription state changes, not transcript lines.
+        // When state turns active, kick polling immediately to reduce delay in capturing entries.
+        if (tState === 'active') {
+          const polling = liveTranscriptPollingMap.get(callId);
+          if (polling) {
+            polling.transcriptionActive = true;
+          }
+          if (polling && Date.now() - polling.lastPollAt > 1500) {
+            console.log(`[LIVE_TRANSCRIPT_POLL] Webhook-triggered immediate poll for callId=${callId}`);
+            void pollLiveTranscript(polling);
+          }
+        } else if (tState === 'inactive' || tState === 'notStarted') {
+          const polling = liveTranscriptPollingMap.get(callId);
+          if (polling) {
+            polling.transcriptionActive = false;
+          }
+        }
       }
 
       // Also check the legacy/alternate field names just in case

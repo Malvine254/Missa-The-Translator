@@ -80,6 +80,21 @@ interface ChatMessage {
   createdDateTime: string;
 }
 
+export interface MailMessageSummary {
+  id: string;
+  subject: string;
+  fromName: string;
+  fromAddress: string;
+  receivedDateTime: string;
+  importance: 'low' | 'normal' | 'high';
+  isRead: boolean;
+  bodyPreview: string;
+  conversationId?: string;
+  webLink?: string;
+  categories?: string[];
+  flagged?: boolean;
+}
+
 interface TranscriptionResult {
   status: string;
   id: string;
@@ -88,6 +103,7 @@ interface TranscriptionResult {
 }
 
 interface OnlineMeetingInfo {
+  onlineMeetingId?: string;
   joinWebUrl?: string;
   joinMeetingId?: string;
   passcode?: string;
@@ -111,6 +127,42 @@ class GraphApiHelper {
   private graphClient: AxiosInstance;
   private tokenFactory: (() => Promise<string>) | null = null;
   private static readonly GRAPH_TIMEOUT_MS = 15000;
+  private meetingIdLookupDeniedUntil = new Map<string, number>();
+  private meetingIdLookupInFlight = new Map<string, Promise<string | null>>();
+  private chatTranscriptDeniedUntil = new Map<string, number>();
+  private chatTranscriptSkipLogUntil = new Map<string, number>();
+  private transcriptDownloadDeniedUntil = new Map<string, number>();
+  private transcriptDownloadSkipLogUntil = new Map<string, number>();
+
+  private getMeetingLookupCacheKey(organizerId: string, joinWebUrl: string): string {
+    const normalizedOrganizer = (organizerId || '').trim().toLowerCase();
+    const normalizedJoinUrl = this.normalizeJoinWebUrl(joinWebUrl);
+    return `${normalizedOrganizer}::${normalizedJoinUrl}`;
+  }
+
+  private normalizeJoinWebUrl(joinWebUrl: string): string {
+    const raw = (joinWebUrl || '').trim();
+    if (!raw) return '';
+
+    // Normalize encoded variants and trivial formatting differences so cache keys are stable.
+    let decoded = raw;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {
+      // Keep original if decoding fails.
+    }
+
+    decoded = decoded.replace(/&amp;/gi, '&').replace(/\s+/g, '');
+
+    try {
+      const url = new URL(decoded);
+      // Lowercase host and remove trailing slash on pathname for key stability.
+      const path = url.pathname.replace(/\/+$/, '');
+      return `${url.protocol}//${url.host.toLowerCase()}${path}${url.search}`;
+    } catch {
+      return decoded;
+    }
+  }
 
   private extractJoinWebUrlFromText(text: string): string | null {
     if (!text) return null;
@@ -123,6 +175,41 @@ class GraphApiHelper {
 
     const match = decoded.match(/https:\/\/teams\.microsoft\.com\/l\/meetup-join\/[^\s"'<>]+/i);
     return match ? match[0] : null;
+  }
+
+  /**
+   * Extract the organizer OID from a Teams joinWebUrl.
+   * URL format: https://teams.microsoft.com/l/meetup-join/{threadId}/{organizerOid}?context=...
+   * The context query param also contains {"Tid":"...","Oid":"organizerOid"}
+   */
+  private extractOrganizerIdFromJoinWebUrl(joinWebUrl: string): string | null {
+    if (!joinWebUrl) return null;
+    try {
+      // Method 1: Parse from URL path - format: /l/meetup-join/{threadId}/{organizerOid}
+      const url = new URL(joinWebUrl);
+      const pathParts = url.pathname.split('/').filter(Boolean);
+      // Expected: ['l', 'meetup-join', '{threadId}', '{organizerOid}']
+      if (pathParts.length >= 4 && pathParts[1] === 'meetup-join') {
+        const possibleOid = pathParts[3];
+        // Validate it looks like a GUID (36 chars with dashes)
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(possibleOid)) {
+          return possibleOid;
+        }
+      }
+
+      // Method 2: Parse from context query param
+      const context = url.searchParams.get('context');
+      if (context) {
+        const decoded = decodeURIComponent(context);
+        const parsed = JSON.parse(decoded);
+        if (parsed?.Oid && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.Oid)) {
+          return parsed.Oid;
+        }
+      }
+    } catch (e) {
+      console.warn(`[GRAPH_API] Failed to parse organizer from joinWebUrl: ${e}`);
+    }
+    return null;
   }
 
   private async buildMeetingInfoFromRecentMessages(chatId: string, subject?: string): Promise<OnlineMeetingInfo | null> {
@@ -139,18 +226,22 @@ class GraphApiHelper {
           continue;
         }
 
-        const fallbackUserId = msg?.from?.user?.id;
-        if (!fallbackUserId) {
+        // Extract organizer ID from the joinWebUrl itself (authoritative)
+        const urlOrganizerId = this.extractOrganizerIdFromJoinWebUrl(joinWebUrl);
+        // Fallback to message sender only if URL parsing fails
+        const organizerId = urlOrganizerId || msg?.from?.user?.id;
+        if (!organizerId) {
+          console.warn(`[GRAPH_API] Found joinWebUrl but could not determine organizer (URL parse failed, no msg sender)`);
           continue;
         }
 
         const tenantId = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID;
-        console.log(`[GRAPH_API] Fallback meeting info from chat messages. organizer=${fallbackUserId}, joinWebUrl=present`);
+        console.log(`[GRAPH_API] Fallback meeting info from chat messages. organizer=${organizerId} (from ${urlOrganizerId ? 'URL' : 'msg sender'}), joinWebUrl=present`);
 
         return {
           joinWebUrl,
           organizer: {
-            id: fallbackUserId,
+            id: organizerId,
             tenantId: tenantId || '',
           },
           subject,
@@ -275,15 +366,6 @@ class GraphApiHelper {
         const token = response.data.access_token;
         console.log(`[GRAPH_AUTH] Successfully obtained access token (expires in ${response.data.expires_in} seconds)`);
         
-        // Decode token to verify scopes (diagnostic)
-        try {
-          const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-          console.log(`[GRAPH_TOKEN_SCOPES] Token roles: ${payload.roles?.join(', ') || 'NONE'}`);
-          console.log(`[GRAPH_TOKEN_SCOPES] Token app: ${payload.appid}, tenant: ${payload.tid}`);
-        } catch (e) {
-          console.warn('[GRAPH_TOKEN_SCOPES] Could not decode token for diagnostics');
-        }
-        
         return token;
       } catch (error) {
         console.error(`[GRAPH_AUTH_ERROR] Failed to obtain access token:`, error);
@@ -318,7 +400,7 @@ class GraphApiHelper {
         userPrincipalName: response.data.userPrincipalName,
       };
     } catch (error) {
-      console.warn(`Could not fetch full user info for ${userId}, using activity fallback name when available`);
+      console.log(`[GRAPH_API] Using fallback user profile for ${userId}`);
       return {
         id: userId,
         displayName: '',
@@ -354,6 +436,110 @@ class GraphApiHelper {
     }
   }
 
+  private stripHtmlToText(value: string): string {
+    return (value || '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private mapMailMessage(message: any): MailMessageSummary {
+    const bodyPreview = message?.bodyPreview || this.stripHtmlToText(message?.body?.content || '');
+    return {
+      id: message?.id || '',
+      subject: message?.subject || '(No subject)',
+      fromName: message?.from?.emailAddress?.name || '',
+      fromAddress: message?.from?.emailAddress?.address || '',
+      receivedDateTime: message?.receivedDateTime || '',
+      importance: message?.importance || 'normal',
+      isRead: !!message?.isRead,
+      bodyPreview,
+      conversationId: message?.conversationId,
+      webLink: message?.webLink,
+      categories: Array.isArray(message?.categories) ? message.categories : [],
+      flagged: !!message?.flag?.flagStatus && message.flag.flagStatus !== 'notFlagged',
+    };
+  }
+
+  async getInboxMessages(
+    userId: string,
+    options?: { senderQuery?: string; top?: number; unreadOnly?: boolean }
+  ): Promise<MailMessageSummary[]> {
+    try {
+      if (!this.tokenFactory) {
+        console.warn(`[GRAPH_API] Token factory not available - inbox read disabled`);
+        return [];
+      }
+
+      const top = Math.min(Math.max(options?.top || 10, 1), 25);
+      const select = 'id,subject,from,receivedDateTime,importance,isRead,bodyPreview,conversationId,webLink,categories,flag,body';
+      const response = await this.graphGetWithClientCredentials(
+        `/users/${encodeURIComponent(userId)}/mailFolders/inbox/messages?$top=${top}&$orderby=receivedDateTime desc&$select=${encodeURIComponent(select)}`
+      );
+
+      let messages = (response.data?.value || []).map((message: any) => this.mapMailMessage(message));
+
+      if (options?.senderQuery) {
+        const senderQuery = options.senderQuery.toLowerCase();
+        // Also try without trailing 's' for possessive-like forms ("martins" → "martin")
+        const senderQueryBase = senderQuery.replace(/s$/, '');
+        messages = messages.filter((message: MailMessageSummary) => {
+          const senderText = `${message.fromName} ${message.fromAddress}`.toLowerCase();
+          return senderText.includes(senderQuery) ||
+            (senderQueryBase !== senderQuery && senderText.includes(senderQueryBase));
+        });
+      }
+
+      if (options?.unreadOnly) {
+        messages = messages.filter((message: MailMessageSummary) => !message.isRead);
+      }
+
+      console.log(`[GRAPH_API] Loaded ${messages.length} inbox message(s) for ${userId}`);
+      return messages;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      if (status === 401) {
+        console.warn(`[GRAPH_API] Inbox read failed with 401 - token invalid or missing`);
+      } else if (status === 403) {
+        console.warn(`[GRAPH_API] Inbox read failed with 403`);
+      } else {
+        this.logGraphError(`Failed to read inbox for ${userId}`, error);
+      }
+      return [];
+    }
+  }
+
+  async getMailConversationMessages(
+    userId: string,
+    conversationId: string,
+    top: number = 10
+  ): Promise<MailMessageSummary[]> {
+    try {
+      if (!this.tokenFactory || !conversationId) {
+        return [];
+      }
+
+      const safeConversationId = conversationId.replace(/'/g, "''");
+      const select = 'id,subject,from,receivedDateTime,importance,isRead,bodyPreview,conversationId,webLink,categories,flag,body';
+      // Note: Graph does not allow $filter + $orderby together on messages (400 "restriction too complex").
+      // Fetch without ordering, then sort client-side.
+      const response = await this.graphGetWithClientCredentials(
+        `/users/${encodeURIComponent(userId)}/messages?$top=${Math.min(Math.max(top, 1), 20)}&$filter=${encodeURIComponent(`conversationId eq '${safeConversationId}'`)}&$select=${encodeURIComponent(select)}`
+      );
+
+      const msgs = (response.data?.value || []).map((message: any) => this.mapMailMessage(message)) as MailMessageSummary[];
+      return msgs.sort((a, b) => new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime());
+    } catch (error) {
+      this.logGraphError(`Failed to read mail conversation for ${userId}`, error);
+      return [];
+    }
+  }
+
   /**
    * Read chat messages from a team chat
    */
@@ -376,7 +562,7 @@ class GraphApiHelper {
       if ((error as any)?.response?.status === 401) {
         console.warn(`[GRAPH_API] Received 401 Unauthorized - Graph API credentials not available in local development`);
       } else if ((error as any)?.response?.status === 403) {
-        console.warn(`[GRAPH_API] Received 403 Forbidden - missing Graph application permissions/admin consent for chat read`);
+        console.warn(`[GRAPH_API] Received 403 Forbidden for chat read`);
       } else {
         this.logGraphError(`Failed to fetch chat messages for ${chatId}`, error);
       }
@@ -402,7 +588,7 @@ class GraphApiHelper {
       if ((error as any)?.response?.status === 401) {
         console.warn(`[GRAPH_API] Received 401 Unauthorized for chat info - using fallback`);
       } else if ((error as any)?.response?.status === 403) {
-        console.warn(`[GRAPH_API] Received 403 Forbidden for chat info - missing Graph application permissions/admin consent`);
+        console.warn(`[GRAPH_API] Received 403 Forbidden for chat info`);
       } else {
         this.logGraphError(`Failed to fetch chat info for ${chatId}`, error);
       }
@@ -582,7 +768,7 @@ class GraphApiHelper {
       if ((error as any)?.response?.status === 401) {
         console.warn(`[GRAPH_API] Received 401 Unauthorized for recordings - Graph API not available`);
       } else if ((error as any)?.response?.status === 403) {
-        console.warn(`[GRAPH_API] Received 403 Forbidden for recordings - missing Graph permissions/admin consent`);
+        console.warn(`[GRAPH_API] Received 403 Forbidden for recordings`);
       } else {
         this.logGraphError(`Failed to fetch recordings for ${meetingId}`, error);
       }
@@ -604,10 +790,30 @@ class GraphApiHelper {
 
       let baseInfo: OnlineMeetingInfo | null = null;
       if (meetingInfo) {
-        console.log(`[GRAPH_API] Got meeting info, organizer: ${meetingInfo.organizer?.id}, joinWebUrl: ${meetingInfo.joinWebUrl ? 'present' : 'MISSING'}`);
+        console.log(`[GRAPH_API] Got meeting info from chat:`);
+        console.log(`[GRAPH_API]   - chat organizer ID: ${meetingInfo.organizer?.id || 'NONE'}`);
+        console.log(`[GRAPH_API]   - chat tenantId: ${meetingInfo.organizer?.tenantId || 'NONE'}`);
+        console.log(`[GRAPH_API]   - joinWebUrl: ${meetingInfo.joinWebUrl || 'NONE'}`);
+        
+        // Extract authoritative organizer ID from joinWebUrl (it's encoded in the URL)
+        const urlOrganizerId = this.extractOrganizerIdFromJoinWebUrl(meetingInfo.joinWebUrl);
+        console.log(`[GRAPH_API]   - URL-extracted organizer: ${urlOrganizerId || 'PARSE FAILED'}`);
+        
+        let organizerId = meetingInfo.organizer?.id;
+        let tenantId = meetingInfo.organizer?.tenantId;
+        
+        if (urlOrganizerId && urlOrganizerId !== organizerId) {
+          console.warn(`[GRAPH_API] ⚠️ Organizer ID MISMATCH: chat='${organizerId}' vs URL='${urlOrganizerId}' — using URL value`);
+          organizerId = urlOrganizerId;
+        } else if (urlOrganizerId) {
+          console.log(`[GRAPH_API]   ✓ Organizer IDs match: ${organizerId}`);
+        }
+        
+        console.log(`[GRAPH_API]   → Final organizer ID: ${organizerId}`);
+        
         baseInfo = {
           joinWebUrl: meetingInfo.joinWebUrl,
-          organizer: meetingInfo.organizer,
+          organizer: { id: organizerId, tenantId },
           subject,
         };
       } else {
@@ -636,9 +842,10 @@ class GraphApiHelper {
           if (onlineMeeting?.joinMeetingIdSettings?.joinMeetingId) {
             baseInfo.joinMeetingId = onlineMeeting.joinMeetingIdSettings.joinMeetingId;
             baseInfo.passcode = onlineMeeting.joinMeetingIdSettings.passcode || '';
+            baseInfo.onlineMeetingId = onlineMeeting.id || baseInfo.onlineMeetingId;
             console.log(`[GRAPH_API] Got joinMeetingId: ${baseInfo.joinMeetingId}`);
           } else if (onlineMeeting?.id) {
-            // Store the meeting's graph resource id as fallback identifier
+            baseInfo.onlineMeetingId = onlineMeeting.id;
             console.log(`[GRAPH_API] Online meeting found but no joinMeetingId (id=${onlineMeeting.id})`);
           } else {
             console.warn(`[GRAPH_API] No online meeting found via joinWebUrl filter`);
@@ -653,7 +860,13 @@ class GraphApiHelper {
           }
         } catch (enrichErr: any) {
           const status = enrichErr?.response?.status;
-          console.warn(`[GRAPH_API] Could not fetch joinMeetingId (status=${status}) - will use organizerMeetingInfo fallback`);
+          if (status === 403) {
+            // Application Access Policy not configured - this is expected, use live transcription instead
+            console.log(`[GRAPH_API] joinMeetingId enrichment skipped (403) - will use live transcription`);
+          } else {
+            const errMsg = enrichErr?.response?.data?.error?.message || '';
+            console.warn(`[GRAPH_API] Could not fetch joinMeetingId (status=${status}): ${errMsg}`);
+          }
         }
       }
 
@@ -1021,32 +1234,54 @@ class GraphApiHelper {
    * During active calls, we rely on live transcription polling instead.
    */
   async getOnlineMeetingId(organizerId: string, joinWebUrl: string): Promise<string | null> {
+    const cacheKey = this.getMeetingLookupCacheKey(organizerId, joinWebUrl);
     try {
-      const graphToken = await this.getTokenUsingClientCredentials();  // ← USE GRAPH TOKEN
-      if (!graphToken) return null;
-      const encodedUrl = encodeURIComponent(joinWebUrl);
-      const response = await axios.get(
-        `https://graph.microsoft.com/v1.0/users/${organizerId}/onlineMeetings?$filter=joinWebUrl eq '${decodeURIComponent(encodedUrl)}'`,
-        {
-          headers: { Authorization: `Bearer ${graphToken}` },
-          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
-        }
-      );
-      const meeting = response.data?.value?.[0];
-      if (meeting?.id) {
-        console.log(`[GRAPH_API] Resolved online meeting ID: ${meeting.id}`);
-        return meeting.id;
+      const deniedUntil = this.meetingIdLookupDeniedUntil.get(cacheKey) || 0;
+      if (deniedUntil > Date.now()) {
+        console.log(`[GRAPH_API] Skipping meeting ID lookup due to recent 403 cache for organizer=${organizerId}`);
+        return null;
       }
-      console.warn(`[GRAPH_API] No online meeting found for joinWebUrl`);
-      return null;
+
+      const existingRequest = this.meetingIdLookupInFlight.get(cacheKey);
+      if (existingRequest) {
+        return await existingRequest;
+      }
+
+      const lookupPromise = (async (): Promise<string | null> => {
+        const graphToken = await this.getTokenUsingClientCredentials();  // ← USE GRAPH TOKEN
+        if (!graphToken) return null;
+        const encodedUrl = encodeURIComponent(joinWebUrl);
+        const response = await axios.get(
+          `https://graph.microsoft.com/beta/users/${organizerId}/onlineMeetings?$filter=joinWebUrl eq '${decodeURIComponent(encodedUrl)}'`,
+          {
+            headers: { Authorization: `Bearer ${graphToken}` },
+            timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+          }
+        );
+        const meeting = response.data?.value?.[0];
+        if (meeting?.id) {
+          console.log(`[GRAPH_API] Resolved online meeting ID: ${meeting.id}`);
+          return meeting.id;
+        }
+        console.warn(`[GRAPH_API] No online meeting found for joinWebUrl`);
+        return null;
+      })();
+
+      this.meetingIdLookupInFlight.set(cacheKey, lookupPromise);
+      return await lookupPromise;
     } catch (error: any) {
       const status = error?.response?.status;
       if (status === 403) {
-        console.warn(`[GRAPH_API] Access denied to meeting ID endpoint (403) — will use live transcription or post-meeting fallback`);
+        // Cache for 5 minutes - no Application Access Policy, live transcription is primary
+        this.meetingIdLookupDeniedUntil.set(cacheKey, Date.now() + (5 * 60 * 1000));
+        console.log(`[GRAPH_API] Meeting ID lookup skipped (403 - no Application Access Policy) - using live transcription`);
       } else {
-        console.warn(`[GRAPH_API] Could not resolve online meeting ID (status=${status})`);
+        const errMsg = error?.response?.data?.error?.message || '';
+        console.warn(`[GRAPH_API] Could not resolve meeting ID (status=${status}): ${errMsg}`);
       }
       return null;
+    } finally {
+      this.meetingIdLookupInFlight.delete(cacheKey);
     }
   }
 
@@ -1082,9 +1317,173 @@ class GraphApiHelper {
       return allTranscripts;
     } catch (error: any) {
       const status = error?.response?.status;
+      if (status === 403) {
+        // No Application Access Policy - live transcription is primary
+        console.log(`[GRAPH_API] listMeetingTranscripts skipped (403 - no Application Access Policy)`);
+        return [];
+      }
       const msg = error?.response?.data?.error?.message || error?.message;
       console.warn(`[GRAPH_API] Could not list transcripts (status=${status}): ${msg}`);
       return [];
+    }
+  }
+
+  /**
+   * Fetch the live transcript for an active call using the Communications calls API.
+   * This works without needing a meetingId or joinWebUrl — it uses the bot's own callId.
+   * Ideal for 1:1 calls and Meet Now calls where getAllTranscripts returns no matching results.
+   * GET /beta/communications/calls/{callId}/transcripts
+   * GET /beta/communications/calls/{callId}/transcripts/{id}/content
+   */
+  async fetchCallTranscriptContent(callId: string): Promise<string | null> {
+    try {
+      // Use bot credentials — the bot app (CLIENT_ID) owns the call, so only its
+      // token can access /communications/calls/{callId} resources.
+      const botToken = await this.getTokenUsingBotCredentials();
+      if (!botToken) return null;
+
+      const listUrl = `https://graph.microsoft.com/beta/communications/calls/${callId}/transcripts`;
+      console.log(`[GRAPH_API] Fetching call transcript list for callId=${callId} (using bot credentials)`);
+      const listResp = await axios.get(listUrl, {
+        headers: { Authorization: `Bearer ${botToken}` },
+        timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+      });
+
+      const transcripts: any[] = listResp.data?.value || [];
+      if (transcripts.length === 0) {
+        console.log(`[GRAPH_API] No transcripts yet for callId=${callId} via communications API`);
+        return null;
+      }
+
+      transcripts.sort((a: any, b: any) =>
+        new Date(b.createdDateTime || 0).getTime() - new Date(a.createdDateTime || 0).getTime()
+      );
+      const latest = transcripts[0];
+      console.log(`[GRAPH_API] Found ${transcripts.length} call transcript(s) via communications API, using id=${latest.id}`);
+
+      const contentUrl = `https://graph.microsoft.com/beta/communications/calls/${callId}/transcripts/${latest.id}/content?$format=text/vtt`;
+      const contentResp = await axios.get(contentUrl, {
+        headers: { Authorization: `Bearer ${botToken}`, Accept: 'text/vtt' },
+        timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+      });
+
+      const content = typeof contentResp.data === 'string' ? contentResp.data : JSON.stringify(contentResp.data);
+      console.log(`[GRAPH_API] Downloaded call transcript via communications API (${content.length} chars)`);
+      return content || null;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const msg = error?.response?.data?.error?.message || error?.message;
+      console.warn(`[GRAPH_API] fetchCallTranscriptContent failed (status=${status}): ${msg}`);
+      return null;
+    }
+  }
+
+  /**
+   * Fetch the transcript for a meeting/call using the chat endpoint.
+   * GET /chats/{chatId}/transcripts  (the chatId IS the meeting thread conversation ID)
+   * This is the most universal strategy — works for 1:1 calls, Meet Now, group calls,
+   * and scheduled meetings, without needing a meetingId or organizer lookup.
+   * Requires OnlineMeetingTranscript.Read.All.
+   * @param chatId - The chat/conversation ID
+   * @param targetCallId - Optional callId to filter to only the current call's transcript
+   * @param force - If true, bypass cooldown cache (for explicit user requests)
+   */
+  async fetchChatTranscriptText(chatId: string, targetCallId?: string, force: boolean = false): Promise<string | null> {
+    try {
+      const deniedUntil = this.chatTranscriptDeniedUntil.get(chatId) || 0;
+      if (!force && deniedUntil > Date.now()) {
+        const nextSkipLogAt = this.chatTranscriptSkipLogUntil.get(chatId) || 0;
+        if (Date.now() >= nextSkipLogAt) {
+          this.chatTranscriptSkipLogUntil.set(chatId, Date.now() + 60_000);
+          console.log(`[GRAPH_API] Skipping /chats transcript lookup for ${chatId} during cooldown`);
+        }
+        return null;
+      }
+      
+      // Clear cooldown if force is true (user explicitly requested)
+      if (force && deniedUntil > Date.now()) {
+        console.log(`[GRAPH_API] Force flag set - bypassing cooldown for ${chatId}`);
+        this.chatTranscriptDeniedUntil.delete(chatId);
+        this.chatTranscriptSkipLogUntil.delete(chatId);
+      }
+
+      const graphToken = await this.getTokenUsingClientCredentials();
+      if (!graphToken) return null;
+
+      const encodedChatId = encodeURIComponent(chatId);
+      console.log(`[GRAPH_API] Fetching transcripts via /chats endpoint for: ${chatId}${targetCallId ? ` (filtering for callId=${targetCallId})` : ''}${force ? ' (forced)' : ''}`);
+      const listResp = await axios.get(
+        `https://graph.microsoft.com/beta/chats/${encodedChatId}/transcripts`,
+        {
+          headers: { Authorization: `Bearer ${graphToken}` },
+          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+        }
+      );
+
+      let transcripts: any[] = listResp.data?.value || [];
+      if (transcripts.length === 0) {
+        console.log(`[GRAPH_API] No transcripts found via /chats for ${chatId}`);
+        return null;
+      }
+
+      // Log all transcripts with their metadata for debugging
+      console.log(`[GRAPH_API] Found ${transcripts.length} transcript(s) via /chats:`);
+      for (const t of transcripts) {
+        console.log(`[GRAPH_API]   - id=${t.id}, callId=${t.callId || 'N/A'}, created=${t.createdDateTime}, meetingId=${t.meetingId || 'N/A'}`);
+      }
+
+      // If we have a target callId, filter to only that call's transcript
+      if (targetCallId) {
+        const filtered = transcripts.filter((t: any) => t.callId === targetCallId);
+        if (filtered.length > 0) {
+          console.log(`[GRAPH_API] Filtered to ${filtered.length} transcript(s) matching callId=${targetCallId}`);
+          transcripts = filtered;
+        } else {
+          console.log(`[GRAPH_API] No transcripts match callId=${targetCallId}, will use most recent`);
+        }
+      }
+
+      // Most recent first
+      transcripts.sort((a: any, b: any) =>
+        new Date(b.createdDateTime || 0).getTime() - new Date(a.createdDateTime || 0).getTime()
+      );
+      const latest = transcripts[0];
+      console.log(`[GRAPH_API] Using transcript: id=${latest.id}, callId=${latest.callId || 'N/A'}, created=${latest.createdDateTime}`);
+
+      // Download VTT content
+      const contentResp = await axios.get(
+        `https://graph.microsoft.com/beta/chats/${encodedChatId}/transcripts/${encodeURIComponent(latest.id)}/content?$format=text/vtt`,
+        {
+          headers: { Authorization: `Bearer ${graphToken}`, Accept: 'text/vtt' },
+          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+        }
+      );
+      const content = typeof contentResp.data === 'string' ? contentResp.data : JSON.stringify(contentResp.data);
+      console.log(`[GRAPH_API] Downloaded chat transcript (${content.length} chars)`);
+      return content || null;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const msg = error?.response?.data?.error?.message || error?.message;
+      const isUnsupportedChatTranscriptEndpoint =
+        status === 400 && /Resource not found for the segment 'transcripts'|segment 'transcripts'/i.test(msg || '');
+
+      if (isUnsupportedChatTranscriptEndpoint) {
+        // Hard failure for this chat type. Suppress repeated retries for a while.
+        this.chatTranscriptDeniedUntil.set(chatId, Date.now() + (10 * 60 * 1000));
+        this.chatTranscriptSkipLogUntil.set(chatId, Date.now() + 60_000);
+        console.log(`[GRAPH_API] /chats transcript endpoint unavailable for this chat. Cooling down retries for 10 min.`);
+        return null;
+      }
+
+      if (status === 403) {
+        // No Application Access Policy - suppress noise, live transcription is primary
+        this.chatTranscriptDeniedUntil.set(chatId, Date.now() + (5 * 60 * 1000));
+        console.log(`[GRAPH_API] /chats transcript skipped (403 - no Application Access Policy)`);
+        return null;
+      }
+
+      console.warn(`[GRAPH_API] fetchChatTranscriptText failed for ${chatId} (status=${status}): ${msg}`);
+      return null;
     }
   }
 
@@ -1137,6 +1536,16 @@ class GraphApiHelper {
    * or use the transcript metadata to get meetingId + transcriptId
    */
   async downloadTranscriptById(userId: string, meetingId: string, transcriptId: string): Promise<string | null> {
+    const cacheKey = `${userId}:${meetingId}`;
+    const deniedUntil = this.transcriptDownloadDeniedUntil.get(cacheKey) || 0;
+    if (deniedUntil > Date.now()) {
+      const nextSkipLogAt = this.transcriptDownloadSkipLogUntil.get(cacheKey) || 0;
+      if (Date.now() >= nextSkipLogAt) {
+        this.transcriptDownloadSkipLogUntil.set(cacheKey, Date.now() + 60_000);
+        console.log(`[GRAPH_API] Transcript download denied (cooldown) for user=${userId.substring(0, 8)}...`);
+      }
+      return null;
+    }
     try {
       const graphToken = await this.getTokenUsingClientCredentials();
       if (!graphToken) return null;
@@ -1154,7 +1563,18 @@ class GraphApiHelper {
     } catch (error: any) {
       const status = error?.response?.status;
       const msg = error?.response?.data?.error?.message || error?.message;
-      console.warn(`[GRAPH_API] Could not download transcript by ID (status=${status}): ${msg}`);
+      if (status === 403) {
+        // Cache 403 to prevent repeated log spam (5 min cooldown)
+        this.transcriptDownloadDeniedUntil.set(cacheKey, Date.now() + (5 * 60 * 1000));
+        if (msg?.includes('RSC permission')) {
+          console.warn(`[GRAPH_API] Transcript access denied (403 RSC) - cooldown 5min: ${msg}`);
+          console.warn(`[GRAPH_API] 💡 Fix: Admin must grant 'OnlineMeetingTranscript.Read.All' permission OR meeting organizer re-adds the app.`);
+        } else {
+          console.warn(`[GRAPH_API] Transcript download denied (403) - cooldown 5min: ${msg}`);
+        }
+      } else {
+        console.warn(`[GRAPH_API] Could not download transcript by ID (status=${status}): ${msg}`);
+      }
       return null;
     }
   }
@@ -1210,19 +1630,43 @@ class GraphApiHelper {
   /**
    * Fetch the full transcript text for a meeting.
    * Primary: Try to get meeting ID by joinWebUrl filter, then list its transcripts.
-   * Fallback: If meeting ID lookup fails (403), scan ALL recent transcripts for the organizer.
+   * Scope is intentionally limited to the current meeting/group; no global transcript scans.
    * Returns VTT text or null.
    * @param organizerId - The organizer's user ID
    * @param joinWebUrl - The meeting join URL
    * @param minCreatedTimestamp - Optional timestamp (ms since epoch) for earliest transcript to consider
    * @param maxCreatedTimestamp - Optional timestamp (ms since epoch) for latest transcript to consider (with 5min grace)
    * @param conversationId - Optional conversation/thread ID to match transcripts against (for Meet Now calls)
+   * @param knownMeetingId - Optional pre-resolved meeting ID
+   * @param targetCallId - Optional callId to filter to only the current call's transcript
+   * @param force - If true, bypass cooldown cache (for explicit user requests)
    */
-  async fetchMeetingTranscriptText(organizerId: string, joinWebUrl: string, minCreatedTimestamp?: number, maxCreatedTimestamp?: number, conversationId?: string): Promise<string | null> {
+  async fetchMeetingTranscriptText(
+    organizerId: string,
+    joinWebUrl: string,
+    minCreatedTimestamp?: number,
+    maxCreatedTimestamp?: number,
+    conversationId?: string,
+    knownMeetingId?: string,
+    targetCallId?: string,
+    force: boolean = false
+  ): Promise<string | null> {
     try {
       let transcripts: any[] = [];
       let meetingId: string | null = null;
       
+      // Strategy 0: Direct /chats/{chatId}/transcripts endpoint.
+      // Most reliable path — the meeting conversation thread IS a valid chatId, works for
+      // 1:1 calls, Meet Now, group and scheduled meetings without any meeting ID lookup.
+      if (conversationId) {
+        const chatContent = await this.fetchChatTranscriptText(conversationId, targetCallId, force);
+        if (chatContent) {
+          console.log(`[GRAPH_API] Strategy 0 success: got transcript via /chats for ${conversationId}`);
+          return chatContent;
+        }
+        console.log(`[GRAPH_API] Strategy 0 miss for ${conversationId} — trying meeting ID lookup`);
+      }
+
       // Helper to extract thread ID from base64-encoded meetingId
       const extractThreadIdFromMeetingId = (encodedMeetingId: string): string | null => {
         try {
@@ -1237,15 +1681,21 @@ class GraphApiHelper {
           return null;
         }
       };
-      
-      // Try primary approach: get meeting by joinWebUrl
-      meetingId = await this.getOnlineMeetingId(organizerId, joinWebUrl);
+
+      // Strategy 1: use known meeting ID when available, otherwise resolve by joinWebUrl
+      meetingId = knownMeetingId || null;
+      if (meetingId) {
+        console.log(`[GRAPH_API] Using cached online meeting ID for transcript lookup: ${meetingId}`);
+      } else {
+        meetingId = await this.getOnlineMeetingId(organizerId, joinWebUrl);
+      }
       
       if (meetingId) {
         // Got meeting ID - list transcripts for this specific meeting
         transcripts = await this.listMeetingTranscripts(organizerId, meetingId);
       } else {
         // Fallback: scan ALL transcripts for this organizer (up to 20 most recent)
+        // This enables accessing past meeting transcripts when meeting ID lookup fails
         console.log(`[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan`);
         const allTranscripts = await this.getAllTranscriptsForUser(organizerId, 20);
         
@@ -1267,13 +1717,12 @@ class GraphApiHelper {
               transcripts = matchingTranscripts;
               console.log(`[GRAPH_API] Found ${matchingTranscripts.length} transcripts matching current conversation`);
             } else {
-              console.log(`[GRAPH_API] No transcripts match current conversation thread - this may be a Meet Now call without transcription yet`);
-              // For Meet Now calls, transcripts may take time to appear in Graph API
-              // Don't fall back to unrelated transcripts - return empty
-              transcripts = [];
+              console.log(`[GRAPH_API] No transcripts match current conversation thread - showing all recent transcripts`);
+              // Return all transcripts as fallback so user can still access past meetings
+              transcripts = allTranscripts;
             }
           } else {
-            // No conversationId provided - use time-based filtering only
+            // No conversationId provided - use all transcripts
             transcripts = allTranscripts;
           }
         }
@@ -1374,35 +1823,84 @@ class GraphApiHelper {
   /**
    * Send an email on behalf of the user.
    * Body content can be markdown or plain text - it will be converted to HTML.
+   * Supports single recipient (string) or multiple recipients (string array).
+   * 
+   * @param options.sendIndependently - If true, sends separate emails to each recipient so one failure doesn't affect others
    */
-  async sendEmail(userId: string, toEmail: string, subject: string, body: string): Promise<{ success: boolean; error?: string }> {
+  async sendEmail(
+    userId: string, 
+    toEmail: string | string[], 
+    subject: string, 
+    body: string, 
+    options?: { 
+      replyToEmail?: string; 
+      replyToName?: string;
+      sendIndependently?: boolean;  // Send separate emails to each recipient
+    }
+  ): Promise<{ 
+    success: boolean; 
+    error?: string; 
+    sentTo?: string[];
+    failedRecipients?: Array<{ email: string; error: string; reason?: string }>;
+    partialSuccess?: boolean;  // true if some succeeded and some failed
+  }> {
+    // Normalize to array and filter out empty/invalid emails
+    const recipients = (Array.isArray(toEmail) ? toEmail : [toEmail])
+      .map(e => e?.trim())
+      .filter(e => e && e.includes('@'));
+    
+    if (recipients.length === 0) {
+      return { success: false, error: 'No valid email recipients provided' };
+    }
+
+    // For multiple recipients with sendIndependently, use the independent sending method
+    if (recipients.length > 1 && options?.sendIndependently) {
+      return this.sendEmailsIndependently(userId, recipients, subject, body, options);
+    }
+
+    // Standard batch send to all recipients at once
     try {
       const token = await this.getTokenUsingClientCredentials();
       if (!token) {
         return { success: false, error: 'Failed to acquire Graph token' };
       }
 
-      const url = `https://graph.microsoft.com/v1.0/users/${userId}/sendMail`;
-      console.log(`[GRAPH_API] Sending email from ${userId} to ${toEmail}`);
+      // If a dedicated service sender is configured, use it so cross-tenant users can still receive emails.
+      const senderUserId = config.emailSenderUserId || userId;
+      const url = `https://graph.microsoft.com/v1.0/users/${senderUserId}/sendMail`;
+      console.log(`[GRAPH_API] Sending email from ${senderUserId} to ${recipients.join(', ')}${senderUserId !== userId ? ` (on behalf of ${userId})` : ''}`);
 
       // Convert markdown/plain text to properly formatted HTML
       const htmlBody = markdownToHtml(body);
 
-      await axios.post(url, {
-        message: {
-          subject: subject,
-          body: {
-            contentType: 'HTML',
-            content: htmlBody
-          },
-          toRecipients: [
-            {
-              emailAddress: {
-                address: toEmail
-              }
-            }
-          ]
+      // Build toRecipients array for all recipients
+      const toRecipients = recipients.map(email => ({
+        emailAddress: { address: email }
+      }));
+
+      const message: any = {
+        subject: subject,
+        body: {
+          contentType: 'HTML',
+          content: htmlBody
         },
+        toRecipients
+      };
+
+      // When sending from a service account, set reply-to as the requesting user
+      if (senderUserId !== userId && options?.replyToEmail) {
+        message.replyTo = [
+          {
+            emailAddress: {
+              address: options.replyToEmail,
+              name: options.replyToName || ''
+            }
+          }
+        ];
+      }
+
+      await axios.post(url, {
+        message,
         saveToSentItems: true
       }, {
         headers: {
@@ -1412,12 +1910,206 @@ class GraphApiHelper {
         timeout: GraphApiHelper.GRAPH_TIMEOUT_MS
       });
 
-      console.log(`[GRAPH_API] Email sent successfully to ${toEmail}`);
-      return { success: true };
+      console.log(`[GRAPH_API] Email sent successfully to ${recipients.join(', ')}`);
+      return { success: true, sentTo: recipients };
     } catch (error: any) {
       const errMsg = error?.response?.data?.error?.message || error?.message || 'Unknown error';
       this.logGraphError('sendEmail', error);
+      return { 
+        success: false, 
+        error: errMsg,
+        failedRecipients: recipients.map(email => ({ 
+          email, 
+          error: errMsg,
+          reason: this.categorizeEmailError(errMsg, email)
+        }))
+      };
+    }
+  }
+
+  /**
+   * Reply to an existing email message so the response stays in the same thread.
+   * Uses Graph: POST /users/{id}/messages/{messageId}/reply
+   */
+  async replyToMessageInThread(
+    userId: string,
+    messageId: string,
+    replyBody: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const token = await this.getTokenUsingClientCredentials();
+      if (!token) {
+        return { success: false, error: 'Failed to acquire Graph token' };
+      }
+
+      const trimmedBody = (replyBody || '').trim();
+      if (!trimmedBody) {
+        return { success: false, error: 'Reply body is empty' };
+      }
+
+      const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(userId)}/messages/${encodeURIComponent(messageId)}/reply`;
+      await axios.post(
+        url,
+        { comment: trimmedBody },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+        }
+      );
+
+      console.log(`[GRAPH_API] Replied in-thread to message ${messageId}`);
+      return { success: true };
+    } catch (error: any) {
+      const errMsg = error?.response?.data?.error?.message || error?.message || 'Unknown error';
+      this.logGraphError('replyToMessageInThread', error);
       return { success: false, error: errMsg };
+    }
+  }
+
+  /**
+   * Categorize email error to provide user-friendly reason
+   */
+  private categorizeEmailError(errorMsg: string, email: string): string {
+    const lowerError = errorMsg.toLowerCase();
+    
+    if (lowerError.includes('not found') || lowerError.includes('does not exist') || lowerError.includes('mailbox not found')) {
+      return 'User mailbox not found - may be external to tenant';
+    }
+    if (lowerError.includes('permission') || lowerError.includes('access denied') || lowerError.includes('authorization')) {
+      return 'Permission denied - cross-tenant or restricted mailbox';
+    }
+    if (lowerError.includes('invalid') && lowerError.includes('recipient')) {
+      return 'Invalid email address format';
+    }
+    if (lowerError.includes('blocked') || lowerError.includes('spam') || lowerError.includes('rejected')) {
+      return 'Email blocked by recipient server';
+    }
+    if (lowerError.includes('timeout') || lowerError.includes('timed out')) {
+      return 'Request timed out - try again';
+    }
+    if (lowerError.includes('quota') || lowerError.includes('limit')) {
+      return 'Sending quota exceeded';
+    }
+    
+    // Check if external domain
+    const domain = email.split('@')[1];
+    if (domain && !domain.includes('.onmicrosoft.com')) {
+      return 'External recipient - may require different permissions';
+    }
+    
+    return 'Delivery failed';
+  }
+
+  /**
+   * Send emails independently to each recipient - one failure won't affect others.
+   * Best for post-meeting distribution where some participants may be external.
+   */
+  async sendEmailsIndependently(
+    userId: string,
+    recipients: string[],
+    subject: string,
+    body: string,
+    options?: { replyToEmail?: string; replyToName?: string }
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    sentTo?: string[];
+    failedRecipients?: Array<{ email: string; error: string; reason?: string }>;
+    partialSuccess?: boolean;
+  }> {
+    const token = await this.getTokenUsingClientCredentials();
+    if (!token) {
+      return { 
+        success: false, 
+        error: 'Failed to acquire Graph token',
+        failedRecipients: recipients.map(email => ({ email, error: 'No auth token', reason: 'Authentication failed' }))
+      };
+    }
+
+    const senderUserId = config.emailSenderUserId || userId;
+    const url = `https://graph.microsoft.com/v1.0/users/${senderUserId}/sendMail`;
+    const htmlBody = markdownToHtml(body);
+
+    const sentTo: string[] = [];
+    const failedRecipients: Array<{ email: string; error: string; reason?: string }> = [];
+
+    console.log(`[GRAPH_API] Sending independent emails to ${recipients.length} recipients`);
+
+    // Send to each recipient independently with a small delay to avoid rate limiting
+    for (const email of recipients) {
+      try {
+        const message: any = {
+          subject: subject,
+          body: {
+            contentType: 'HTML',
+            content: htmlBody
+          },
+          toRecipients: [{ emailAddress: { address: email } }]
+        };
+
+        if (senderUserId !== userId && options?.replyToEmail) {
+          message.replyTo = [{
+            emailAddress: {
+              address: options.replyToEmail,
+              name: options.replyToName || ''
+            }
+          }];
+        }
+
+        await axios.post(url, {
+          message,
+          saveToSentItems: false  // Don't save multiple copies to sent items
+        }, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS
+        });
+
+        sentTo.push(email);
+        console.log(`[GRAPH_API] ✓ Email sent to ${email}`);
+
+        // Small delay between sends to avoid rate limiting
+        if (recipients.length > 3) {
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+
+      } catch (error: any) {
+        const errMsg = error?.response?.data?.error?.message || error?.message || 'Unknown error';
+        const reason = this.categorizeEmailError(errMsg, email);
+        failedRecipients.push({ email, error: errMsg, reason });
+        console.warn(`[GRAPH_API] ✗ Failed to send email to ${email}: ${reason}`);
+      }
+    }
+
+    // Determine overall result
+    const allFailed = sentTo.length === 0;
+    const allSucceeded = failedRecipients.length === 0;
+    const partialSuccess = sentTo.length > 0 && failedRecipients.length > 0;
+
+    if (allSucceeded) {
+      console.log(`[GRAPH_API] All ${sentTo.length} emails sent successfully`);
+      return { success: true, sentTo };
+    } else if (partialSuccess) {
+      console.log(`[GRAPH_API] Partial success: ${sentTo.length} sent, ${failedRecipients.length} failed`);
+      return { 
+        success: true, 
+        partialSuccess: true, 
+        sentTo, 
+        failedRecipients,
+        error: `${failedRecipients.length} recipient(s) failed`
+      };
+    } else {
+      console.log(`[GRAPH_API] All ${recipients.length} emails failed`);
+      return { 
+        success: false, 
+        error: 'All emails failed to send', 
+        failedRecipients 
+      };
     }
   }
 
@@ -1519,7 +2211,7 @@ class GraphApiHelper {
       const errCode = error?.response?.data?.error?.code || 'N/A';
       console.error(`[CALENDAR_DEBUG] API Error: status=${status}, code=${errCode}, message=${errMsg}`);
       if (status === 403) {
-        console.error(`[CALENDAR_DEBUG] 403 Forbidden - App likely missing Calendars.Read permission. Grant admin consent in Azure Portal.`);
+        console.error(`[CALENDAR_DEBUG] 403 Forbidden while fetching calendar events.`);
       } else if (status === 404) {
         console.error(`[CALENDAR_DEBUG] 404 Not Found - User ID may not exist or mailbox not provisioned: ${errMsg}`);
       }
@@ -1579,7 +2271,22 @@ class GraphApiHelper {
       }
       
       const joinWebUrl = targetMeeting.onlineMeeting?.joinUrl || targetMeeting.onlineMeetingUrl;
-      const organizerId = targetMeeting.organizer?.emailAddress?.address || userId;
+      const organizerEmail = targetMeeting.organizer?.emailAddress?.address || '';
+
+      // Graph transcript APIs need the organizer's AAD object ID, not email.
+      // Resolve it from the email; fall back to the calling user's ID.
+      let organizerId = userId;
+      if (organizerEmail) {
+        try {
+          const orgInfo = await this.getUserInfo(organizerEmail);
+          if (orgInfo?.id && orgInfo.id !== organizerEmail) {
+            organizerId = orgInfo.id;
+            console.log(`[CALENDAR] Resolved organizer AAD ID: ${organizerId} from ${organizerEmail}`);
+          }
+        } catch {
+          console.warn(`[CALENDAR] Could not resolve organizer AAD ID from ${organizerEmail}, using caller ID ${userId}`);
+        }
+      }
       
       console.log(`[CALENDAR] Found meeting: "${targetMeeting.subject}" with joinUrl`);
       

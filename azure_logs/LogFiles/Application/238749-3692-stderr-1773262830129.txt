@@ -1,0 +1,7 @@
+[GRAPH_API] Access denied to meeting ID endpoint (403) — will use live transcription or post-meeting fallback
+[GRAPH_API] Access denied to meeting ID endpoint (403) — will use live transcription or post-meeting fallback
+[GRAPH_API] Access denied to meeting ID endpoint (403) — will use live transcription or post-meeting fallback
+[GRAPH_API] Access denied to meeting ID endpoint (403) — will use live transcription or post-meeting fallback
+[GRAPH_API] Access denied to meeting ID endpoint (403) — will use live transcription or post-meeting fallback
+[GRAPH_API] Access denied to meeting ID endpoint (403) — will use live transcription or post-meeting fallback
+[GRAPH_API] Access denied to meeting ID endpoint (403) — will use live transcription or post-meeting fallback
