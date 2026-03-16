@@ -36,7 +36,9 @@ $permissions = @(
     "Calls.Initiate.All",
     "CallRecords.Read.All",
     "Calendars.Read",
+    "Mail.Read",
     "Mail.Send",
+    "MailboxSettings.Read",
     "User.Read.All"
 )
 

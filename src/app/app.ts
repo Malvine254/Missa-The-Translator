@@ -16,15 +16,20 @@ import {
   draftReplyFromInboxThread,
   formatEmailResult,
   formatRecipientDisplay,
+  llmSearchInbox,
   parseInboxRequest,
+  smartParseInboxRequest,
   summarizeInboxMessages,
 } from "./emailCapabilities";
-
-// Import the new modular auto-transcription system (Graph Beta API)
-import * as autoTranscription from './autoTranscription';
-
-// Feature flag: Use the new auto-transcription module vs legacy inline code
-const USE_NEW_AUTO_TRANSCRIPTION = (process.env.USE_NEW_AUTO_TRANSCRIPTION || 'true').toLowerCase() === 'true';
+import {
+  IntentAgent,
+  createIntentAgent,
+  getConversationState,
+  recordBotResponse as recordAgentBotResponse,
+  type AgentDecision,
+  type AgentContext,
+  type IntentLabel as AgentIntentLabel,
+} from "./intentAgent";
 
 const ENABLE_VERBOSE_CONSOLE = (process.env.ENABLE_VERBOSE_CONSOLE || 'false').toLowerCase() === 'true';
 const baseConsoleLog = console.log.bind(console);
@@ -35,6 +40,25 @@ const ESSENTIAL_LOG_PREFIXES = [
   '[TRANSCRIPT]',
   '[TEAMS_SEND_OK]',
   '[TEAMS_SEND_FAIL]',
+  '[CALLS_WEBHOOK]',
+  '[CALLS_API]',
+  '[CALLS_AUTH]',
+  '[TRANSCRIPTION]',
+  '[LIVE_TRANSCRIPT', // matches [LIVE_TRANSCRIPT], [LIVE_TRANSCRIPT_POLL], etc.
+  '[LIVE_SESSION]',
+  '[GRAPH_API]',
+  '[GRAPH_AUTH]',
+  '[TRANSCRIPT_DIAG]',
+  '[TRANSCRIPT_SUB]',
+  '[VTT_PARSER]',
+  '[STREAM_PREVIEW]',
+  '[STREAM_STATS]',
+  '[PARTICIPANTS]',
+  '[AUTO_LEAVE]',
+  '[JOIN_FLOW]',
+  '[JOIN_RETRY]',
+  '[STATUS_NOTICE]',
+  '[CACHE_UPDATE]',
 ];
 
 function shouldKeepConsoleLog(args: any[]): boolean {
@@ -94,9 +118,13 @@ const storage = new LocalStorage();
 // Keep up to 5 recent responses for better context resolution
 interface LastBotResponse {
   content: string;
-  contentType: 'calendar' | 'summary' | 'minutes' | 'transcript' | 'meeting_overview' | 'insights' | 'general';
+  contentType: 'calendar' | 'summary' | 'minutes' | 'transcript' | 'meeting_overview' | 'insights' | 'general' | 'inbox_email';
   subject?: string;
   timestamp: number;
+  recipientType?: 'self' | 'other' | 'multiple' | 'all_participants' | null;
+  recipientNames?: string[];
+  recipientEmails?: string[];
+  sourceRequest?: string;
 }
 const lastBotResponseMap = new Map<string, LastBotResponse>();
 const botResponseHistoryMap = new Map<string, LastBotResponse[]>(); // Keep last 5 responses per conversation
@@ -118,6 +146,15 @@ interface InboxContext {
 }
 
 const inboxContextMap = new Map<string, InboxContext>();
+
+/** Track the last clarification question the bot asked in each conversation */
+interface PendingClarification {
+  question: string;
+  aboutPerson?: string;
+  aboutTopic?: string;
+  timestamp: number;
+}
+const pendingClarificationMap = new Map<string, PendingClarification>();
 
 function normalizeRecipientName(value: string): string {
   return (value || '')
@@ -490,6 +527,7 @@ function saveBotAdminStats() {
 function loadBotAdminStats(): BotAdminStats {
   if (botAdminStats) return botAdminStats;
   try {
+    let transcriptSource: 'A' | 'B' | 'C' | 'none' = 'none';
     ensureAdminDataDir();
     if (fs.existsSync(BOT_ADMIN_STATS_FILE)) {
       const raw = fs.readFileSync(BOT_ADMIN_STATS_FILE, 'utf-8');
@@ -960,6 +998,24 @@ function removeAtMentions(text: string): string {
  *   00:00:05.500 --> 00:00:10.000
  *   <v Another Speaker>More text</v>
  */
+function parseVTT(vtt: string): string {
+  if (!vtt) return '';
+  return vtt
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      return !!trimmed &&
+        !trimmed.startsWith('WEBVTT') &&
+        !trimmed.startsWith('NOTE') &&
+        !trimmed.includes('-->') &&
+        !/^\d+$/.test(trimmed);
+    })
+    .map((line) => line.replace(/<v\s+[^>]+>/g, '').replace(/<\/v>/g, '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
 function parseVttToEntries(vttContent: string): TranscriptEntry[] {
   const entries: TranscriptEntry[] = [];
   
@@ -1185,7 +1241,153 @@ function buildTranscriptMarkdown(
 }
 
 /**
- * Poll for transcript availability from Graph API.
+ * Search all cached transcripts (files + meeting history) for a matching meeting by joinWebUrl.
+ * Returns the transcript text if found in cache, null otherwise.
+ */
+function findCachedTranscriptByJoinUrl(joinWebUrl: string, afterTime?: number): string | null {
+  try {
+    const tolerance = 5 * 60 * 1000; // 5 minutes tolerance for time filtering
+    let bestMatch: { content: string; startTime: number } | null = null;
+
+    // 1. Check meeting history across all conversations for a matching joinWebUrl
+    const historyStore = readMeetingHistoryStore();
+    for (const [, entries] of Object.entries(historyStore)) {
+      for (const entry of entries) {
+        if (entry.joinWebUrl && areJoinUrlsEquivalent(entry.joinWebUrl, joinWebUrl)) {
+          // If afterTime is specified, skip transcripts from older call sessions
+          if (afterTime && entry.startTime < afterTime - tolerance) {
+            continue;
+          }
+          if (entry.transcriptFilePath && fs.existsSync(entry.transcriptFilePath)) {
+            const content = fs.readFileSync(entry.transcriptFilePath, 'utf-8').trim();
+            if (content && content.length > 50) {
+              if (!bestMatch || entry.startTime > bestMatch.startTime) {
+                bestMatch = { content, startTime: entry.startTime };
+              }
+            }
+          }
+        }
+      }
+    }
+    // Also check in-memory history
+    for (const [, entries] of meetingHistoryMap) {
+      for (const entry of entries) {
+        if (entry.joinWebUrl && areJoinUrlsEquivalent(entry.joinWebUrl, joinWebUrl)) {
+          if (afterTime && entry.startTime < afterTime - tolerance) {
+            continue;
+          }
+          if (entry.transcriptFilePath && fs.existsSync(entry.transcriptFilePath)) {
+            const content = fs.readFileSync(entry.transcriptFilePath, 'utf-8').trim();
+            if (content && content.length > 50) {
+              if (!bestMatch || entry.startTime > bestMatch.startTime) {
+                bestMatch = { content, startTime: entry.startTime };
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (bestMatch) {
+      console.log(`[CACHE_FIRST] Found latest cached transcript (startTime=${new Date(bestMatch.startTime).toISOString()})`);
+      return bestMatch.content;
+    }
+
+    // 2. Check transcriptMetaCache for matching meeting
+    for (const [, meta] of transcriptMetaCache) {
+      if (meta.filePath && fs.existsSync(meta.filePath)) {
+        // If afterTime is specified, skip old transcripts
+        if (afterTime && meta.fetchedAt < afterTime - tolerance) {
+          continue;
+        }
+        const content = fs.readFileSync(meta.filePath, 'utf-8').trim();
+        if (content && content.length > 50) {
+          // Check if the file header contains the joinWebUrl's meeting thread
+          const threadId = extractMeetingThreadId(joinWebUrl);
+          if (threadId && content.includes(threadId)) {
+            console.log(`[CACHE_FIRST] Found cached transcript via meta cache: ${meta.filePath}`);
+            return content;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[CACHE_FIRST] Error searching cached transcripts:`, err);
+  }
+  return null;
+}
+
+/**
+ * Parse cached transcript text (our formatted file format) back into TranscriptEntry[].
+ * Format: "Speaker Name (H:MM:SS)\n  - text\n"
+ */
+function parseCachedTranscriptToEntries(content: string): TranscriptEntry[] {
+  const entries: TranscriptEntry[] = [];
+  // Match lines like: "Malvine Owuor (0:01:02)"
+  const speakerLineRegex = /^(.+?)\s+\((\d+:\d{2}:\d{2})\)\s*$/;
+  const textLineRegex = /^\s+-\s+(.+)$/;
+
+  const lines = content.split('\n');
+  let currentSpeaker = '';
+  let currentTimestamp = '';
+
+  for (const line of lines) {
+    const speakerMatch = line.match(speakerLineRegex);
+    if (speakerMatch) {
+      currentSpeaker = speakerMatch[1].trim();
+      currentTimestamp = speakerMatch[2];
+      continue;
+    }
+    const textMatch = line.match(textLineRegex);
+    if (textMatch && currentSpeaker) {
+      entries.push({
+        speaker: currentSpeaker,
+        text: textMatch[1].trim(),
+        timestamp: currentTimestamp,
+        isFinal: true,
+      });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Cache-first transcript fetch. Checks local file cache before hitting Graph API.
+ * Always returns parsed TranscriptEntry[] for consistent handling by callers.
+ * Also returns raw VTT content when fetched from Graph (for callers that need it).
+ */
+async function fetchTranscriptCacheFirst(
+  organizerId: string,
+  joinWebUrl: string,
+  startTime?: number,
+  endTime?: number
+): Promise<{ entries: TranscriptEntry[]; vttContent: string | null; fromCache: boolean }> {
+  // 1. Check local cache first (instant) — pass startTime to filter old call sessions
+  const cached = findCachedTranscriptByJoinUrl(joinWebUrl, startTime);
+  if (cached) {
+    const entries = parseCachedTranscriptToEntries(cached);
+    if (entries.length > 0) {
+      console.log(`[CACHE_FIRST] Returning ${entries.length} cached entries — skipping Graph API`);
+      return { entries, vttContent: null, fromCache: true };
+    }
+    // Cache hit but couldn't parse — fall through to Graph
+    console.log(`[CACHE_FIRST] Cache hit but parsed 0 entries, falling through to Graph API`);
+  }
+
+  // 2. Fall back to Graph API
+  console.log(`[CACHE_FIRST] No cache hit, fetching from Graph API...`);
+  const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+    organizerId,
+    joinWebUrl,
+    startTime,
+    endTime
+  );
+  const entries = vttContent ? parseVttToEntries(vttContent) : [];
+  return { entries, vttContent, fromCache: false };
+}
+
+/**
+ * Poll for transcript availability — checks cache first, then Graph API.
  * Retries multiple times with increasing delays until transcript is ready or timeout.
  * @param organizerId - Meeting organizer's user ID
  * @param joinWebUrl - Meeting join URL
@@ -1201,27 +1403,28 @@ async function pollForTranscriptReady(
   startTime?: number,
   endTime?: number,
   maxAttempts: number = 6,
-  initialDelayMs: number = 5000,
-  conversationId?: string,
-  targetCallId?: string
-): Promise<{ success: boolean; vttContent: string | null; attempts: number; error?: string }> {
+  initialDelayMs: number = 5000
+): Promise<{ success: boolean; vttContent: string | null; attempts: number; error?: string; fromCache?: boolean }> {
+  // CACHE-FIRST: Check local files before any Graph API calls
+  const cached = findCachedTranscriptByJoinUrl(joinWebUrl, startTime);
+  if (cached) {
+    console.log(`[TRANSCRIPT_POLL] Cache hit! Returning cached transcript (${cached.length} chars) — no Graph API needed`);
+    return { success: true, vttContent: cached, attempts: 0, fromCache: true };
+  }
+
   let attempts = 0;
   let delayMs = initialDelayMs;
 
   while (attempts < maxAttempts) {
     attempts++;
-    console.log(`[TRANSCRIPT_POLL] Attempt ${attempts}/${maxAttempts} to fetch transcript (conversationId=${conversationId || 'N/A'}, callId=${targetCallId || 'N/A'})...`);
+    console.log(`[TRANSCRIPT_POLL] Attempt ${attempts}/${maxAttempts} to fetch transcript...`);
 
     try {
       const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
         organizerId,
         joinWebUrl,
         startTime,
-        endTime,
-        conversationId,  // Pass conversationId to enable RSC Strategy 0
-        undefined,       // knownMeetingId
-        targetCallId,    // Pass callId to filter to correct transcript
-        true             // force=true to bypass cooldown (explicit user request)
+        endTime
       );
 
       if (vttContent) {
@@ -1262,6 +1465,10 @@ function saveTranscriptToFile(conversationId: string) {
   void saveTranscriptToFileAsync(conversationId);
 }
 
+// Pin transcript file paths per meeting so ongoing saves always update the same file
+// Key: meetingKey (callId or onlineMeetingId or conversationId), Value: file path
+const pinnedTranscriptPaths = new Map<string, string>();
+
 /** Async implementation of transcript saving - non-blocking I/O */
 async function saveTranscriptToFileAsync(conversationId: string): Promise<void> {
   try {
@@ -1282,21 +1489,39 @@ async function saveTranscriptToFileAsync(conversationId: string): Promise<void> 
     const meetingStartTime = meetingContext?.callStartedAt || (liveSession ? Date.now() : Date.now());
     const meetingId = generateMeetingId(conversationId, meetingStartTime);
 
-    // Build a clean filename from meeting ID + conversation ID + date
-    const safeId = conversationId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
-    const now = new Date();
-    const dateStr = now.toISOString().slice(0, 10);
-    const hourStr = String(now.getHours()).padStart(2, '0');
-    const prefix = isLive ? 'live_transcript' : 'transcript';
-    // Include hour to make filename more unique for multiple meetings on same day
-    const filePath = path.join(TRANSCRIPTS_DIR, `${prefix}_${dateStr}_${hourStr}_${safeId}.txt`);
+    // Build a unique filename tied to this specific meeting instance
+    // Use callId (unique per call) or onlineMeetingId as the primary identifier
+    const callId = liveSession?.callId || meetingContext?.callId || '';
+    const onlineMeetingId = meetingContext?.onlineMeetingId || '';
+    // Primary key: callId if available, else onlineMeetingId, else conversation-based fallback
+    const meetingKey = callId
+      ? callId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50)
+      : onlineMeetingId
+        ? onlineMeetingId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50)
+        : conversationId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
+
+    // PINNING: Reuse the same file path for the entire lifetime of this meeting.
+    // Only create a new path if we've never saved for this meetingKey before.
+    let filePath = pinnedTranscriptPaths.get(meetingKey);
+    if (!filePath) {
+      const safeSubject = meetingSubject.replace(/[^a-zA-Z0-9 _-]/g, '').trim().replace(/\s+/g, '_').slice(0, 40) || 'meeting';
+      const startDate = new Date(meetingStartTime);
+      const dateStr = startDate.toISOString().slice(0, 10);
+      const hourMin = `${String(startDate.getHours()).padStart(2, '0')}_${String(startDate.getMinutes()).padStart(2, '0')}`;
+      const prefix = isLive ? 'live' : 'transcript';
+      // Format: {prefix}_{date}_{startTime}_{subject}_{meetingKey}.txt
+      filePath = path.join(TRANSCRIPTS_DIR, `${prefix}_${dateStr}_${hourMin}_${safeSubject}_${meetingKey}.txt`);
+      pinnedTranscriptPaths.set(meetingKey, filePath);
+      console.log(`[TRANSCRIPT_FILE] Pinned file path for meeting ${meetingKey}: ${filePath}`);
+    }
 
     // Calculate approximate meeting duration from last timestamp
     const lastTimestamp = finalEntries[finalEntries.length - 1]?.timestamp || '';
-    const formattedDate = now.toLocaleDateString('en-US', {
+    const meetingDate = new Date(meetingStartTime);
+    const formattedDate = meetingDate.toLocaleDateString('en-US', {
       year: 'numeric', month: 'long', day: 'numeric'
     });
-    const formattedTime = now.toLocaleTimeString('en-US', {
+    const formattedTime = meetingDate.toLocaleTimeString('en-US', {
       hour: 'numeric', minute: '2-digit'
     });
 
@@ -1378,26 +1603,54 @@ function getSafeConversationId(conversationId: string): string {
   return conversationId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
 }
 
-function findLatestTranscriptFilePath(conversationId: string): string | null {
+function findLatestTranscriptFilePath(
+  conversationId: string,
+  meetingIdentifiers?: { callId?: string; onlineMeetingId?: string }
+): string | null {
   try {
     if (!fs.existsSync(TRANSCRIPTS_DIR)) {
       return null;
     }
 
-    const safeId = getSafeConversationId(conversationId);
-    // Look for both regular and live transcript files
-    const matches = fs
-      .readdirSync(TRANSCRIPTS_DIR)
-      .filter((name) => 
-        (name.startsWith('transcript_') || name.startsWith('live_transcript_')) && 
-        name.endsWith(`_${safeId}.txt`)
-      )
-      .map((name) => path.join(TRANSCRIPTS_DIR, name));
+    const allFiles = fs.readdirSync(TRANSCRIPTS_DIR);
+    let matches: string[] = [];
+
+    // 1. BEST: Match by callId or onlineMeetingId (exact meeting)
+    if (meetingIdentifiers?.callId) {
+      const safeCallId = meetingIdentifiers.callId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
+      matches = allFiles
+        .filter((name) => name.includes(safeCallId) && name.endsWith('.txt'))
+        .map((name) => path.join(TRANSCRIPTS_DIR, name));
+      if (matches.length > 0) {
+        console.log(`[TRANSCRIPT_CACHE] Found ${matches.length} file(s) by callId`);
+      }
+    }
+    if (matches.length === 0 && meetingIdentifiers?.onlineMeetingId) {
+      const safeMeetingId = meetingIdentifiers.onlineMeetingId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
+      matches = allFiles
+        .filter((name) => name.includes(safeMeetingId) && name.endsWith('.txt'))
+        .map((name) => path.join(TRANSCRIPTS_DIR, name));
+      if (matches.length > 0) {
+        console.log(`[TRANSCRIPT_CACHE] Found ${matches.length} file(s) by onlineMeetingId`);
+      }
+    }
+
+    // 2. FALLBACK: Match by conversation ID (legacy files or no meeting ID available)
+    if (matches.length === 0) {
+      const safeId = getSafeConversationId(conversationId);
+      matches = allFiles
+        .filter((name) =>
+          (name.startsWith('transcript_') || name.startsWith('live_') || name.startsWith('cached_')) &&
+          name.includes(safeId) && name.endsWith('.txt')
+        )
+        .map((name) => path.join(TRANSCRIPTS_DIR, name));
+    }
 
     if (matches.length === 0) {
       return null;
     }
 
+    // Return most recently modified
     matches.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
     return matches[0];
   } catch (error) {
@@ -1406,9 +1659,12 @@ function findLatestTranscriptFilePath(conversationId: string): string | null {
   }
 }
 
-function loadCachedTranscriptText(conversationId: string): string | null {
+function loadCachedTranscriptText(
+  conversationId: string,
+  meetingIdentifiers?: { callId?: string; onlineMeetingId?: string }
+): string | null {
   try {
-    const latestPath = findLatestTranscriptFilePath(conversationId);
+    const latestPath = findLatestTranscriptFilePath(conversationId, meetingIdentifiers);
     if (!latestPath) return null;
 
     const content = fs.readFileSync(latestPath, 'utf-8').trim();
@@ -1656,6 +1912,12 @@ function endLiveTranscriptSession(conversationId: string, callId?: string) {
   const existing = liveTranscriptSessions.get(conversationId);
   if (existing && (!callId || existing.callId === callId)) {
     liveTranscriptSessions.delete(conversationId);
+    // Clear pinned file path so next meeting on same thread gets a fresh file
+    const endedCallId = callId || existing.callId;
+    if (endedCallId) {
+      const safeCallId = endedCallId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
+      pinnedTranscriptPaths.delete(safeCallId);
+    }
     console.log(`[LIVE_SESSION] Ended live transcript session for conversation=${conversationId}`);
   }
 }
@@ -2112,6 +2374,79 @@ function transcriptEntriesToPlainText(entries: TranscriptEntry[]): string {
 }
 
 /**
+ * Parse a transcript text back into TranscriptEntry objects.
+ * Handles multiple formats:
+ *   - "Speaker (timestamp): text"
+ *   - "[Speaker]: text"
+ *   - "Speaker: text"
+ */
+function parseTranscriptTextToEntries(text: string): TranscriptEntry[] {
+  if (!text || text.trim() === '') return [];
+  
+  const entries: TranscriptEntry[] = [];
+  const lines = text.split('\n');
+  // VTT timestamp placeholder for entries without timing
+  const defaultTimestamp = '00:00:00.000';
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    
+    // Try: "Speaker (00:00:00.000): text"
+    let match = trimmed.match(/^(.+?)\s*\((\d{2}:\d{2}:\d{2}\.\d{3})\):\s*(.+)$/);
+    if (match) {
+      entries.push({
+        speaker: match[1].trim(),
+        text: match[3].trim(),
+        timestamp: match[2], // Keep original timestamp
+        isFinal: true,
+      });
+      continue;
+    }
+    
+    // Try: "Speaker (H:MM:SS): text" (compact format without ms)
+    match = trimmed.match(/^(.+?)\s*\((\d{1,2}:\d{2}:\d{2})\):\s*(.+)$/);
+    if (match) {
+      // Pad the compact timestamp to VTT format
+      const parts = match[2].split(':');
+      const paddedTs = `${parts[0].padStart(2, '0')}:${parts[1]}:${parts[2]}.000`;
+      entries.push({
+        speaker: match[1].trim(),
+        text: match[3].trim(),
+        timestamp: paddedTs,
+        isFinal: true,
+      });
+      continue;
+    }
+    
+    // Try: "[Speaker]: text"
+    match = trimmed.match(/^\[(.+?)\]:\s*(.+)$/);
+    if (match) {
+      entries.push({
+        speaker: match[1].trim(),
+        text: match[2].trim(),
+        timestamp: defaultTimestamp,
+        isFinal: true,
+      });
+      continue;
+    }
+    
+    // Try: "Speaker: text"
+    match = trimmed.match(/^(.+?):\s*(.+)$/);
+    if (match && match[1].length < 50) { // Limit speaker name length to avoid false positives
+      entries.push({
+        speaker: match[1].trim(),
+        text: match[2].trim(),
+        timestamp: defaultTimestamp,
+        isFinal: true,
+      });
+    }
+  }
+  
+  return entries;
+}
+
+/**
  * Extract specific parts of transcript based on speaker, topic, or time range.
  * Used when user requests like "what John said", "first 10 minutes", "budget discussion".
  */
@@ -2470,6 +2805,135 @@ async function generateMinutesHtml(
   }
 }
 
+/**
+ * Follow-up detection patterns - words/phrases that indicate the user is referring to something just discussed.
+ */
+const FOLLOWUP_INDICATORS = [
+  // Pronouns referring back
+  /\b(it|that|this|the|those|these)\s+(call|meeting|email|event|appointment|schedule|message)\b/i,
+  /\bthe\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(call|meeting|one)\b/i,
+  /\b(it|that|this)\b.*\b(start|end|begin|finish|last|duration|time|when|where|who)\b/i,
+  // Implicit references
+  /\bwhat\s+(time|is)\s+(it|that)\b/i,
+  /\bwhen\s+(does|is|will)\s+(it|that)\b/i,
+  /\bwho\s+(is|are|was|were)\s+(in|on|at)\s+(it|that|the)\b/i,
+  /\b(end|start|begin|finish)\s+time\b/i,
+  /\b(how long|duration|length)\b/i,
+  // Corrections and clarifications
+  /\bi\s+meant\b/i,
+  /\bnot\s+(today|yesterday|tomorrow)\b.*\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i,
+  /\bthe\s+(one|call|meeting)\s+(on|at|for)\b/i,
+  // Follow-up questions
+  /\bwhat\s+about\b/i,
+  /\band\s+(what|when|where|who|how)\b/i,
+  /\balso\b/i,
+];
+
+interface FollowupEnrichment {
+  isFollowup: boolean;
+  enrichedQuery: string;
+  originalQuery: string;
+  contextUsed: string | null;
+}
+
+/**
+ * Fast follow-up detection and query enrichment.
+ * Detects if the user's message is a follow-up to a recent conversation
+ * and enriches the query with context so handlers can properly resolve references.
+ */
+async function detectAndEnrichFollowup(
+  userMessage: string,
+  recentTurns: Array<{ role: string; content: string }>,
+  tracking?: { userId: string; displayName: string; meetingId: string }
+): Promise<FollowupEnrichment> {
+  const trimmedMsg = (userMessage || '').trim();
+  if (!trimmedMsg || recentTurns.length === 0) {
+    return { isFollowup: false, enrichedQuery: trimmedMsg, originalQuery: trimmedMsg, contextUsed: null };
+  }
+
+  // Fast check: does the message match any follow-up patterns?
+  const matchesPattern = FOLLOWUP_INDICATORS.some(pattern => pattern.test(trimmedMsg));
+  
+  // Also check for short queries that likely need context (less than 8 words)
+  const wordCount = trimmedMsg.split(/\s+/).length;
+  const isShortQuery = wordCount <= 8;
+  
+  // Check for implicit references (no explicit subject)
+  const hasNoExplicitSubject = !/\b(my|the\s+\w+\s+(meeting|call|email))\b/i.test(trimmedMsg) && 
+                               /\b(when|what|who|where|how|end|start|time)\b/i.test(trimmedMsg);
+  
+  if (!matchesPattern && !isShortQuery && !hasNoExplicitSubject) {
+    return { isFollowup: false, enrichedQuery: trimmedMsg, originalQuery: trimmedMsg, contextUsed: null };
+  }
+
+  // Get the last bot response for context
+  const lastBotResponse = recentTurns.filter(t => t.role === 'assistant').pop();
+  const lastUserMessage = recentTurns.filter(t => t.role === 'user').slice(-2, -1)[0]; // Second to last user message
+  
+  if (!lastBotResponse) {
+    return { isFollowup: false, enrichedQuery: trimmedMsg, originalQuery: trimmedMsg, contextUsed: null };
+  }
+
+  // Use LLM to quickly determine if this is a follow-up and extract context
+  const contextSnippet = lastBotResponse.content.slice(0, 800);
+  const prevUserSnippet = lastUserMessage?.content?.slice(0, 200) || '';
+
+  try {
+    const prompt = new ChatPrompt({
+      messages: [
+        {
+          role: 'user',
+          content: `Quickly analyze if this is a follow-up question and enrich it with context.
+
+PREVIOUS USER MESSAGE: "${prevUserSnippet}"
+BOT'S LAST RESPONSE: "${contextSnippet}"
+CURRENT USER MESSAGE: "${trimmedMsg}"
+
+Is the current message a follow-up referring to something in the previous exchange?
+
+If YES, rewrite the current message to be self-contained by including the relevant context.
+Examples:
+- "what is the end time for the call" + context about "Monday Armely call at 4pm" → "what is the end time for the Monday Armely Weekly Status Call"
+- "who else is invited" + context about "Project Sync meeting" → "who else is invited to the Project Sync meeting"
+- "send it to my email" + context about a summary → "send the meeting summary to my email"
+
+If NO, return the original message unchanged.
+
+Respond with JSON only: {"is_followup": true|false, "enriched_query": "the enriched or original query", "context_summary": "brief description of context used, or null"}`
+        }
+      ],
+      instructions: 'You are a fast context resolver. Determine if the message refers to previous context and enrich it if needed. Be concise. Output valid JSON only.',
+      model: new OpenAIChatModel({
+        model: config.azureOpenAIDeploymentName,
+        apiKey: config.azureOpenAIKey,
+        endpoint: config.azureOpenAIEndpoint,
+        apiVersion: '2024-10-21',
+      }),
+    });
+
+    const response = await sendPromptWithTracking(prompt, '', tracking ? {
+      ...tracking,
+      estimatedInputText: `${prevUserSnippet}\n${contextSnippet}\n${trimmedMsg}`,
+    } : undefined);
+    
+    const rawResponse = (response.content || '').trim();
+    const jsonStr = rawResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const result = JSON.parse(jsonStr);
+    
+    console.log(`[FOLLOWUP] Detected: ${result.is_followup}, Enriched: "${result.enriched_query?.slice(0, 100)}"`);
+    
+    return {
+      isFollowup: result.is_followup === true,
+      enrichedQuery: result.enriched_query || trimmedMsg,
+      originalQuery: trimmedMsg,
+      contextUsed: result.context_summary || null,
+    };
+  } catch (error) {
+    console.error(`[FOLLOWUP] Error in enrichment:`, error);
+    return { isFollowup: false, enrichedQuery: trimmedMsg, originalQuery: trimmedMsg, contextUsed: null };
+  }
+}
+
 type IntentLabel =
   | 'join_meeting'
   | 'summarize'
@@ -2531,6 +2995,11 @@ async function classifyIntent(
           `- "reply to Marin", "draft a response", "respond after analyzing that email" = reply_email\n` +
           `- Follow-up pronouns like "respond to him/her", "reply to them" = reply_email if prior context shows an email/inbox result\n` +
           `- Corrections like "I meant X not Y", "not X, I meant Y" = re-use prior context intent (reply_email if replying, check_inbox if browsing inbox)\n` +
+          `- **EMAIL CONTENT FOLLOW-UPS**: If user asks about content/details of something someone "sent" or an email shown earlier = check_inbox\n` +
+          `  - "what was the email about", "what did [name] send", "what was in that email" = check_inbox\n` +
+          `  - "what was the meeting X sent" (asking about EMAIL content, not a live meeting) = check_inbox\n` +
+          `  - "tell me more about that email", "what's in the summary leonard sent" = check_inbox\n` +
+          `  - Key indicator: asking about what someone SENT (past tense) = likely email, not live meeting\n` +
           `- If user asks to EMAIL/SEND something without asking to CREATE new content first = send_email\n` +
           `- "send to my inbox", "email me", "send it", "forward this" = send_email\n` +
           `- "send the last summary to email" = send_email (not summarize!)\n` +
@@ -2668,20 +3137,27 @@ async function getTranscriptWithContext(conversationId: string): Promise<{
     return result;
   }
 
-  // 3. THIRD: Check file cache (saved transcripts from this conversation)
-  const cachedFile = loadCachedTranscriptText(conversationId);
+  // 3. THIRD: Check file cache (saved transcripts from this meeting)
+  // Use meeting identifiers for precise lookup instead of just conversation ID
+  const meetingContext = getCachedMeetingContext(conversationId);
+  const meetingIds = {
+    callId: liveSession?.callId || meetingContext?.callId,
+    onlineMeetingId: meetingContext?.onlineMeetingId,
+  };
+  const cachedFile = loadCachedTranscriptText(conversationId, meetingIds);
   if (cachedFile) {
-    console.log(`[TRANSCRIPT_FETCH] Using file cache for conversation`);
+    console.log(`[TRANSCRIPT_FETCH] Using file cache for conversation (callId=${meetingIds.callId || 'none'}, meetingId=${meetingIds.onlineMeetingId || 'none'})`);
     result.text = cachedFile;
     result.source = 'file_cache';
     result.isLive = false;
     // Estimate entry count from content
     result.entryCount = (cachedFile.match(/\n\s+-\s/g) || []).length || 1;
+    result.meetingSubject = meetingContext?.subject;
+    result.callId = meetingIds.callId;
     return result;
   }
 
   // 4. FOURTH: Check background worker cache (pre-fetched transcripts)
-  const meetingContext = getCachedMeetingContext(conversationId);
   if (meetingContext?.onlineMeetingId) {
     const cachedMetas = getCachedTranscriptMeta(meetingContext.onlineMeetingId);
     if (cachedMetas.length > 0) {
@@ -2715,8 +3191,7 @@ async function getTranscriptWithContext(conversationId: string): Promise<{
       meetingInfo.organizer.id,
       meetingInfo.joinWebUrl,
       transcriptWindow.min,
-      transcriptWindow.max,
-      conversationId // Match by conversation thread
+      transcriptWindow.max
     );
     if (vttContent) {
       const parsed = parseVttToEntries(vttContent);
@@ -2813,18 +3288,23 @@ async function answerMeetingQuestionWithContext(
           `1. Answer the question directly based ONLY on the provided context\n` +
           `2. If asking about a specific person (e.g., "what did John say"), search for their name variations (John, John Smith, J. Smith)\n` +
           `3. If the information isn't in the context, clearly state that\n` +
-          `4. Quote relevant parts when helpful\n` +
-          `5. If asking about time ("first 10 minutes", "at the end"), use timestamps if available\n\n` +
-          `Format your response:\n` +
-          `## Answer\n[Direct answer to the question]\n\n` +
-          `## Supporting Details\n[Relevant quotes or context that support the answer]\n\n` +
-          `## Confidence\n[High/Medium/Low - based on how well the context answers the question]`
+          `4. Synthesize and paraphrase — do NOT copy-paste raw transcript lines or dump verbatim quotes\n` +
+          `5. Only reference timestamps if the user specifically asks about timing\n` +
+          `6. Tell the story naturally, as a knowledgeable colleague would explain it\n\n` +
+          `How to format your response:\n` +
+          `- Write a natural, conversational answer — no rigid section headers like "Answer", "Supporting Details", "Confidence"\n` +
+          `- Summarize what was said in your own words, weaving in key phrases or short quotes only when they add flavor (not entire paragraphs)\n` +
+          `- If the speaker told a story, joke, or anecdote, retell it concisely and naturally — capture the essence, not every line\n` +
+          `- Keep it focused and readable — a few well-written paragraphs, not a wall of bullet points\n` +
+          `- If you're unsure the context fully answers the question, mention that briefly at the end`
       },
     ],
     instructions:
-      'You are a meeting analyst. Answer questions precisely using ONLY the provided context. ' +
+      'You are a friendly meeting assistant. Answer questions using ONLY the provided context. ' +
       'If a speaker name is mentioned, try fuzzy matching (first name, last name, partial match). ' +
-      'Never make up information not in the context. Be concise but thorough.',
+      'Never make up information not in the context. ' +
+      'Be smart about what matters — read the raw transcript, understand it, and give a clear, natural answer. ' +
+      'Do NOT dump raw transcript lines with timestamps. Paraphrase and synthesize instead.',
     model: new OpenAIChatModel({
       model: config.azureOpenAIDeploymentName,
       apiKey: config.azureOpenAIKey,
@@ -2853,49 +3333,172 @@ interface PendingJoin {
 const pendingJoinMap = new Map<string, PendingJoin>();
 
 const RETRY_INTERVAL_MS = 15_000;  // 15 seconds between retries
-const MAX_RETRIES = 20;            // 20 retries � 15s = 5 minutes
+const MAX_RETRIES = 20;            // 20 retries ~ 15s = 5 minutes
 
-interface TranscriptionStartupState {
-  attemptCount: number;
-  maxAttempts: number;
-  inProgress: boolean;
-  started: boolean;
-  timerId?: ReturnType<typeof setTimeout>;
-  failureNotified: boolean;
+/**
+ * Run a one-time diagnostic when a call is established.
+ * Tries each transcript API once and logs the exact result/error so we can see
+ * which permissions are missing or what error Graph returns.
+ */
+async function runTranscriptDiagnostic(
+  conversationId: string,
+  callId: string,
+  organizerId?: string,
+  onlineMeetingId?: string
+) {
+  console.log(`[TRANSCRIPT_DIAG] ===== Running transcript API diagnostic for callId=${callId} =====`);
+
+  // Test 1: /chats/{chatId}/transcripts with graph token
+  try {
+    const graphToken = await (graphApiHelper as any).getTokenUsingClientCredentials();
+    if (!graphToken) {
+      console.log(`[TRANSCRIPT_DIAG] Test 1 SKIP: No graph client credentials token available`);
+    } else {
+      const encoded = encodeURIComponent(conversationId);
+      const url = `https://graph.microsoft.com/v1.0/chats/${encoded}/transcripts`;
+      console.log(`[TRANSCRIPT_DIAG] Test 1: GET ${url}`);
+      const axios = require('axios');
+      const resp = await axios.get(url, {
+        headers: { Authorization: `Bearer ${graphToken}` },
+        timeout: 10000,
+      });
+      const count = resp.data?.value?.length ?? 0;
+      console.log(`[TRANSCRIPT_DIAG] Test 1 OK: /chats transcripts returned ${count} item(s) (status=${resp.status})`);
+    }
+  } catch (err: any) {
+    const st = err?.response?.status;
+    const msg = err?.response?.data?.error?.message || err?.message;
+    const code = err?.response?.data?.error?.code || '';
+    console.log(`[TRANSCRIPT_DIAG] Test 1 FAIL: /chats transcripts -> status=${st}, code=${code}, message=${msg}`);
+  }
+
+  // Test 2: /users/{org}/onlineMeetings/{mid}/transcripts with graph token
+  if (organizerId && onlineMeetingId) {
+    try {
+      const graphToken = await (graphApiHelper as any).getTokenUsingClientCredentials();
+      if (graphToken) {
+        const url = `https://graph.microsoft.com/v1.0/users/${organizerId}/onlineMeetings/${onlineMeetingId}/transcripts`;
+        console.log(`[TRANSCRIPT_DIAG] Test 2: GET ${url}`);
+        const axios = require('axios');
+        const resp = await axios.get(url, {
+          headers: { Authorization: `Bearer ${graphToken}` },
+          timeout: 10000,
+        });
+        const count = resp.data?.value?.length ?? 0;
+        console.log(`[TRANSCRIPT_DIAG] Test 2 OK: /onlineMeetings transcripts returned ${count} item(s) (status=${resp.status})`);
+      }
+    } catch (err: any) {
+      const st = err?.response?.status;
+      const msg = err?.response?.data?.error?.message || err?.message;
+      const code = err?.response?.data?.error?.code || '';
+      console.log(`[TRANSCRIPT_DIAG] Test 2 FAIL: /onlineMeetings transcripts -> status=${st}, code=${code}, message=${msg}`);
+    }
+  }
+
+  console.log(`[TRANSCRIPT_DIAG] ===== Diagnostic complete =====`);
 }
 
-const transcriptionStartupMap = new Map<string, TranscriptionStartupState>();
-const TRANSCRIPTION_RETRY_DELAYS_MS = [0, 5_000, 10_000, 20_000, 30_000, 45_000];
+/**
+ * Attempt to start transcription on the call via Graph API.
+ * Transcript retrieval is done through onlineMeetings transcript endpoints.
+ * Retry a few times with delay since the call may not be fully ready immediately.
+ */
+async function attemptBotStartTranscription(callId: string, conversationId: string, serviceUrl: string) {
+  const MAX_START_ATTEMPTS = 3;
+  const START_RETRY_DELAY_MS = 5000;
+
+  for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt++) {
+    console.log(`[TRANSCRIPTION] Attempting to start transcription on callId=${callId} (attempt ${attempt}/${MAX_START_ATTEMPTS})`);
+    const success = await graphApiHelper.startTranscription(callId);
+    if (success) {
+      console.log(`[TRANSCRIPTION] Bot-initiated transcription started successfully on callId=${callId}`);
+      // Reset polling state on successful transcription start
+      const polling = liveTranscriptPollingMap.get(callId);
+      if (polling) {
+        polling.consecutiveEmptyPolls = 0;
+      }
+      return;
+    }
+
+    if (attempt < MAX_START_ATTEMPTS) {
+      console.log(`[TRANSCRIPTION] Will retry in ${START_RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(resolve => setTimeout(resolve, START_RETRY_DELAY_MS));
+    }
+  }
+  console.log(`[TRANSCRIPTION] Could not start transcription after ${MAX_START_ATTEMPTS} attempts. User can still enable manually in Teams.`);
+}
+
+/**
+ * Create a Graph subscription to receive notifications when transcripts are created on a chat.
+ * POST /subscriptions with resource=/chats/{chatId}/transcripts
+ */
+async function createTranscriptSubscription(chatId: string, callId: string) {
+  try {
+    const graphToken = await (graphApiHelper as any).getTokenUsingClientCredentials();
+    const botToken = await (graphApiHelper as any).getTokenUsingBotCredentials();
+    const token = graphToken || botToken;
+    if (!token) {
+      console.log(`[TRANSCRIPT_SUB] No token available for subscription creation`);
+      return;
+    }
+
+    const botEndpoint = process.env.BOT_ENDPOINT;
+    if (!botEndpoint) {
+      console.log(`[TRANSCRIPT_SUB] No BOT_ENDPOINT configured - cannot create subscription`);
+      return;
+    }
+
+    const encoded = encodeURIComponent(chatId);
+    const expirationDateTime = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+
+    const payload = {
+      changeType: 'created',
+      notificationUrl: `${botEndpoint}/api/transcriptNotifications`,
+      resource: `/chats/${encoded}/transcripts`,
+      expirationDateTime,
+      clientState: callId, // Use callId as client state for verification
+    };
+
+    console.log(`[TRANSCRIPT_SUB] Creating subscription for /chats/${chatId}/transcripts`);
+    const axios = require('axios');
+    const resp = await axios.post(
+      'https://graph.microsoft.com/v1.0/subscriptions',
+      payload,
+      {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        timeout: 15000,
+      }
+    );
+    console.log(`[TRANSCRIPT_SUB] Subscription created: id=${resp.data?.id}, expires=${resp.data?.expirationDateTime}`);
+  } catch (err: any) {
+    const st = err?.response?.status;
+    const msg = err?.response?.data?.error?.message || err?.message;
+    console.log(`[TRANSCRIPT_SUB] Subscription creation failed (status=${st}): ${msg} — polling will continue as fallback`);
+  }
+}
+
+
 
 interface LiveTranscriptPollingState {
   callId: string;
   organizerId: string;
   joinWebUrl: string;
-  onlineMeetingId?: string;
   conversationId: string;
   serviceUrl: string;
   callStartTime: number;
   pollingTimerId?: ReturnType<typeof setTimeout>;
-  inFlight: boolean;
-  lastPollAt: number;
-  transcriptionActive: boolean;
   lastFetchedLineCount: number;
   consecutiveEmptyPolls: number;
   userNotifiedAboutDelay: boolean;
-  transcriptDetectedNotified: boolean;
-  meetingLookupCooldownUntil: number;
-  meetingLookupBackoffMs: number;
 }
 
 const liveTranscriptPollingMap = new Map<string, LiveTranscriptPollingState>();
-const LIVE_TRANSCRIPT_POLL_INTERVAL_IDLE_MS = 10_000;
-const LIVE_TRANSCRIPT_POLL_INTERVAL_ACTIVE_MS = 3_000;
+const LIVE_TRANSCRIPT_POLL_INTERVAL_MS = 10_000; // 10 seconds — poll via fetchMeetingTranscriptText
 
 type MeetingStatusNoticeKey =
   | 'live_setup'
-  | 'transcription_enabled_waiting'
-  | 'transcription_pending_lines'
-  | 'transcript_detected';
+  | 'transcript_detected'
+  | 'transcription_enabled_waiting';
 
 const meetingStatusNoticeMap = new Map<string, Set<MeetingStatusNoticeKey>>();
 
@@ -2922,105 +3525,14 @@ function clearMeetingStatusNotices(conversationId: string) {
   meetingStatusNoticeMap.delete(conversationId);
 }
 
-function clearTranscriptionRetryTimer(callId: string) {
-  const state = transcriptionStartupMap.get(callId);
-  if (state?.timerId) {
-    clearTimeout(state.timerId);
-    state.timerId = undefined;
+function clearMeetingStatusNotice(conversationId: string, key: MeetingStatusNoticeKey) {
+  const sent = meetingStatusNoticeMap.get(conversationId);
+  if (sent) {
+    sent.delete(key);
   }
 }
 
-function clearPendingTranscriptionStart(callId: string) {
-  clearTranscriptionRetryTimer(callId);
-  transcriptionStartupMap.delete(callId);
-}
 
-async function attemptAutoStartTranscription(
-  callId: string,
-  source: string,
-  callEntryOverride?: ActiveCall
-) {
-  const callEntry = callEntryOverride || activeCallMap.get(callId);
-  if (!callEntry) {
-    clearPendingTranscriptionStart(callId);
-    return;
-  }
-
-  let state = transcriptionStartupMap.get(callId);
-  if (!state) {
-    state = {
-      attemptCount: 0,
-      maxAttempts: TRANSCRIPTION_RETRY_DELAYS_MS.length,
-      inProgress: false,
-      started: false,
-      failureNotified: false,
-    };
-    transcriptionStartupMap.set(callId, state);
-  }
-
-  if (state.started || state.inProgress || state.timerId) {
-    return;
-  }
-
-  if (state.attemptCount >= state.maxAttempts) {
-    if (!state.failureNotified) {
-      state.failureNotified = true;
-      await graphApiHelper.sendProactiveMessage(
-        callEntry.serviceUrl,
-        callEntry.conversationId,
-        `I wasn't able to auto-start Teams transcription. Make sure meeting policy allows it and the bot has the right permissions. You can still start transcription manually in Teams if needed.`
-      );
-    }
-    return;
-  }
-
-  state.inProgress = true;
-  state.attemptCount++;
-  const attemptNumber = state.attemptCount;
-  console.log(`[TRANSCRIPTION_AUTO] Attempt ${attemptNumber}/${state.maxAttempts} for callId=${callId} (source=${source})`);
-
-  try {
-    const started = await graphApiHelper.startTranscription(callId);
-    if (started) {
-      state.started = true;
-      state.inProgress = false;
-      // Keep state.started latched so participant updates do not trigger duplicate starts.
-      clearTranscriptionRetryTimer(callId);
-      await sendMeetingStatusNoticeOnce(
-        callEntry.serviceUrl,
-        callEntry.conversationId,
-        'transcription_enabled_waiting',
-        `Live transcription has been turned on. I'm now waiting for transcript data from Teams.`
-      );
-      return;
-    }
-  } catch (error) {
-    console.warn(`[TRANSCRIPTION_AUTO] startTranscription threw for callId=${callId}:`, error);
-  }
-
-  state.inProgress = false;
-  if (state.attemptCount >= state.maxAttempts) {
-    if (!state.failureNotified) {
-      state.failureNotified = true;
-      await graphApiHelper.sendProactiveMessage(
-        callEntry.serviceUrl,
-        callEntry.conversationId,
-        `I wasn't able to auto-start Teams transcription. Make sure meeting policy allows it and the bot has the right permissions. You can start transcription manually in Teams if needed.`
-      );
-    }
-    return;
-  }
-
-  const nextDelay = TRANSCRIPTION_RETRY_DELAYS_MS[Math.min(state.attemptCount, TRANSCRIPTION_RETRY_DELAYS_MS.length - 1)];
-  console.log(`[TRANSCRIPTION_AUTO] Scheduling retry in ${nextDelay / 1000}s for callId=${callId}`);
-  state.timerId = setTimeout(() => {
-    const latestState = transcriptionStartupMap.get(callId);
-    if (latestState) {
-      latestState.timerId = undefined;
-    }
-    void attemptAutoStartTranscription(callId, 'retry-timer');
-  }, nextDelay);
-}
 
 function stopLiveTranscriptPolling(callId: string) {
   const polling = liveTranscriptPollingMap.get(callId);
@@ -3030,153 +3542,81 @@ function stopLiveTranscriptPolling(callId: string) {
   liveTranscriptPollingMap.delete(callId);
 }
 
-async function pollLiveTranscript(state: LiveTranscriptPollingState) {
-  if (state.inFlight) {
-    return;
+function extractMeetingCallIdFromActivityPayload(activity: any): string | null {
+  const idRegex = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+  const callIdRegex = /"callId"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i;
+  const uriXmlRegex = /<Id\s+type="callId"\s+value="([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"\s*\/?>/i;
+
+  const text = typeof activity?.text === 'string' ? activity.text : '';
+  const candidates: string[] = [text];
+
+  // Teams can send system metadata as non-text payloads.
+  const payloadParts = [activity?.value, activity?.channelData, activity?.entities, activity?.attachments];
+  for (const part of payloadParts) {
+    if (part == null) continue;
+    try {
+      candidates.push(typeof part === 'string' ? part : JSON.stringify(part));
+    } catch {
+      // Ignore serialization failures for individual payload fragments.
+    }
   }
-  state.inFlight = true;
-  state.lastPollAt = Date.now();
 
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const xmlMatch = raw.match(uriXmlRegex);
+    if (xmlMatch?.[1]) return xmlMatch[1].toLowerCase();
+
+    const jsonMatch = raw.match(callIdRegex);
+    if (jsonMatch?.[1]) return jsonMatch[1].toLowerCase();
+
+    // Last-resort fallback when payload is malformed but still contains a callId token near "callId".
+    if (/callId/i.test(raw)) {
+      const anyId = raw.match(idRegex);
+      if (anyId?.[1]) return anyId[1].toLowerCase();
+    }
+  }
+
+  return null;
+}
+
+async function pollLiveTranscript(state: LiveTranscriptPollingState) {
   try {
-    // Strategy A: /chats/{chatId}/transcripts — most universal, works for all call types:
-    // 1:1 calls, Meet Now, group and scheduled meetings. The conversationId IS the chatId.
-    // Pass callId to filter to only the current call's transcript (not previous meetings)
-    let vttContent = await graphApiHelper.fetchChatTranscriptText(state.conversationId, state.callId);
-    if (vttContent) {
-      console.log(`[LIVE_TRANSCRIPT_POLL] Got transcript via /chats endpoint (callId=${state.callId})`);
-    }
-
-    // Strategy B: Communications calls API — direct callId path, bot must be in the call.
-    if (!vttContent) {
-      vttContent = await graphApiHelper.fetchCallTranscriptContent(state.callId);
-      if (vttContent) {
-        // When the call endpoint is producing live data, keep using it as the
-        // primary path and cool down scheduled-meeting lookup attempts.
-        state.meetingLookupCooldownUntil = Date.now() + (5 * 60 * 1000);
-        console.log(`[LIVE_TRANSCRIPT_POLL] Got transcript via communications API (callId=${state.callId})`);
-      }
-    }
-
-    // Strategy C: Graph online-meetings endpoint (meetingId lookup → transcript list).
-    // NOTE: This path uses /users/{userId}/onlineMeetings/... which requires Application Access Policy.
-    // Since we only have RSC permissions (OnlineMeetingTranscript.Read.Chat), skip this path
-    // to avoid 403 errors. The /chats/{chatId}/transcripts endpoint (Strategy A) works with RSC.
-    // Uncomment below if you have Application Access Policy configured.
-    /*
-    const canTryMeetingLookup = Date.now() >= state.meetingLookupCooldownUntil;
-    if (!vttContent && canTryMeetingLookup) {
-      vttContent = await graphApiHelper.fetchMeetingTranscriptText(
-        state.organizerId,
-        state.joinWebUrl,
-        undefined,
-        undefined,
-        state.conversationId,
-        state.onlineMeetingId,
-        state.callId
-      );
-      if (vttContent) {
-        state.meetingLookupBackoffMs = 2 * 60 * 1000;
-        state.meetingLookupCooldownUntil = 0;
-        console.log(`[LIVE_TRANSCRIPT_POLL] Got transcript via Graph meeting endpoint (callId=${state.callId})`);
-      } else {
-        state.meetingLookupCooldownUntil = Date.now() + state.meetingLookupBackoffMs;
-        state.meetingLookupBackoffMs = Math.min(state.meetingLookupBackoffMs * 2, 15 * 60 * 1000);
-      }
-    }
-    */
+    // Live transcript retrieval via fetchMeetingTranscriptText:
+    // - Uses callStartTime filter to get transcripts from THIS session only
+    // - Always downloads VTT (content updates even when transcript ID stays the same)
+    // - Tracks progress via lastFetchedLineCount, not transcript ID
+    const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+      state.organizerId,
+      state.joinWebUrl,
+      state.callStartTime
+    );
 
     if (!vttContent) {
       state.consecutiveEmptyPolls++;
       console.log(`[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=${state.callId} (empty polls: ${state.consecutiveEmptyPolls})`);
       
-      // After 3 attempts (30 seconds), notify once that transcript data is still pending.
+      // After 3 attempts (30 seconds), note delay silently.
       if (state.consecutiveEmptyPolls === 3 && !state.userNotifiedAboutDelay) {
         state.userNotifiedAboutDelay = true;
-        await sendMeetingStatusNoticeOnce(
-          state.serviceUrl,
-          state.conversationId,
-          'transcription_pending_lines',
-          `Transcription is enabled, but I haven't detected transcript lines yet. I'll keep checking automatically.`
-        );
-      }
-
-      // After 15 idle empty polls (~150 seconds) with no transcription signal, attempt to
-      // re-trigger transcription start. Teams sometimes silently drops the initial request.
-      if (state.consecutiveEmptyPolls === 15 && !state.transcriptionActive) {
-        console.log(`[LIVE_TRANSCRIPT_POLL] 15 empty polls with no active transcription — re-triggering transcription start for callId=${state.callId}`);
-        const startupState = transcriptionStartupMap.get(state.callId);
-        if (startupState) {
-          // Reset so attemptAutoStartTranscription will accept a new attempt
-          startupState.started = false;
-          startupState.inProgress = false;
-          startupState.timerId = undefined;
-          startupState.attemptCount = 0;
-          startupState.failureNotified = false;
-        }
-        void attemptAutoStartTranscription(state.callId, 'poll-retry');
       }
     } else {
       // Parse the full VTT content
       const allEntries = parseVttToEntries(vttContent);
       const convEntries = liveTranscriptMap.get(state.conversationId) || [];
       
-      // Register/update the live transcript session (this is an active call)
-      const meetingContext = getCachedMeetingContext(state.conversationId);
-      registerLiveTranscriptSession(state.conversationId, state.callId, meetingContext?.subject);
-      
       // Check if we got new entries since last poll
       if (allEntries.length > state.lastFetchedLineCount) {
         const newEntries = allEntries.slice(state.lastFetchedLineCount);
         console.log(`[LIVE_TRANSCRIPT_POLL] Got ${newEntries.length} new entries (total now: ${allEntries.length})`);
-
-        // Log each new transcript entry so user can see what's being captured
-        for (const entry of newEntries) {
-          console.log(`[LIVE_TRANSCRIPT] [${entry.timestamp}] ${entry.speaker}: "${entry.text}"`);
-        }
         
-        // Show a streaming preview of the latest captured words (first 80 chars of last 3 entries)
-        const previewEntries = newEntries.slice(-3);
-        const previewText = previewEntries
-          .map(e => `${e.speaker}: ${e.text.substring(0, 60)}${e.text.length > 60 ? '...' : ''}`)
-          .join(' | ');
-        console.log(`[STREAM_PREVIEW] 🎙️ ${previewText.substring(0, 200)}${previewText.length > 200 ? '...' : ''}`);
-        console.log(`[STREAM_STATS] Total captured: ${allEntries.length} lines, ${allEntries.reduce((sum, e) => sum + e.text.length, 0)} chars`);
-
-        if (!state.transcriptDetectedNotified) {
-          state.transcriptDetectedNotified = true;
-          await sendMeetingStatusNoticeOnce(
-            state.serviceUrl,
-            state.conversationId,
-            'transcript_detected',
-            `Live transcript detected. I'm now capturing what participants are saying in real time.`
-          );
-        }
+        // First time getting data after empty polls - silently continue (no spam)
         
         convEntries.push(...newEntries);
         liveTranscriptMap.set(state.conversationId, convEntries);
         state.lastFetchedLineCount = allEntries.length;
         state.consecutiveEmptyPolls = 0; // Reset counter
         
-        // Update the transcript metadata cache with live data (every poll cycle ~3-10s)
-        const liveCacheKey = `live:${state.conversationId}:${state.callId}`;
-        const totalCharCount = allEntries.reduce((sum, e) => sum + e.text.length, 0);
-        transcriptMetaCache.set(liveCacheKey, {
-          transcriptId: `live_${state.callId}`,
-          meetingId: state.onlineMeetingId || state.conversationId,
-          organizerId: state.organizerId,
-          createdDateTime: new Date(state.callStartTime).toISOString(),
-          filePath: '', // Will be set when saved to file
-          fetchedAt: Date.now(),
-          charCount: totalCharCount,
-          entryCount: allEntries.length,
-          isLive: true,
-          meetingSubject: meetingContext?.subject,
-          conversationId: state.conversationId,
-          callId: state.callId,
-        });
-        console.log(`[CACHE_UPDATE] Live transcript cache updated: ${allEntries.length} entries, ${totalCharCount} chars`);
-        
-        // Save updated transcript to file (non-blocking)
+        // Save updated transcript to file
         saveTranscriptToFile(state.conversationId);
       } else {
         console.log(`[LIVE_TRANSCRIPT_POLL] No new entries since last poll (current: ${allEntries.length})`);
@@ -3184,26 +3624,22 @@ async function pollLiveTranscript(state: LiveTranscriptPollingState) {
     }
   } catch (error) {
     console.warn(`[LIVE_TRANSCRIPT_POLL_ERROR] Error polling transcript for callId=${state.callId}:`, error);
-  } finally {
-    state.inFlight = false;
   }
 
-  // Schedule next poll (faster when transcription is active or entries already detected)
+  // Schedule next poll
   if (liveTranscriptPollingMap.has(state.callId)) {
-    const nextIntervalMs = (state.transcriptionActive || state.lastFetchedLineCount > 0)
-      ? LIVE_TRANSCRIPT_POLL_INTERVAL_ACTIVE_MS
-      : LIVE_TRANSCRIPT_POLL_INTERVAL_IDLE_MS;
     state.pollingTimerId = setTimeout(() => {
       void pollLiveTranscript(state);
-    }, nextIntervalMs);
+    }, LIVE_TRANSCRIPT_POLL_INTERVAL_MS);
   }
 }
+
+/* REPLACED: old pollLiveTranscript was removed — simplified to single fetchMeetingTranscriptText call */
 
 function startLiveTranscriptPolling(
   callId: string,
   organizerId: string,
   joinWebUrl: string,
-  onlineMeetingId: string | undefined,
   conversationId: string,
   serviceUrl: string,
   callStartTime: number
@@ -3214,25 +3650,18 @@ function startLiveTranscriptPolling(
     callId,
     organizerId,
     joinWebUrl,
-    onlineMeetingId,
     conversationId,
     serviceUrl,
     callStartTime,
-    inFlight: false,
-    lastPollAt: 0,
-    transcriptionActive: false,
     lastFetchedLineCount: 0,
     consecutiveEmptyPolls: 0,
     userNotifiedAboutDelay: false,
-    transcriptDetectedNotified: false,
-    meetingLookupCooldownUntil: 0,
-    meetingLookupBackoffMs: 2 * 60 * 1000,
   };
 
   liveTranscriptPollingMap.set(callId, state);
-  console.log(`[LIVE_TRANSCRIPT_POLL] Starting live transcript polling for callId=${callId}, idle=${LIVE_TRANSCRIPT_POLL_INTERVAL_IDLE_MS / 1000}s active=${LIVE_TRANSCRIPT_POLL_INTERVAL_ACTIVE_MS / 1000}s`);
+  console.log(`[LIVE_TRANSCRIPT_POLL] Starting live transcript polling for callId=${callId}, interval=${LIVE_TRANSCRIPT_POLL_INTERVAL_MS / 1000}s`);
   
-  // Start polling immediately, then every 10s
+  // Start polling immediately, then every 5s
   void pollLiveTranscript(state);
 }
 
@@ -3275,8 +3704,8 @@ async function scheduleJoinRetry(conversationId: string) {
         activeCallMap.set(callResult.id, {
           conversationId,
           serviceUrl: pending.serviceUrl,
-          organizerId: meetingInfo.organizer?.id,
-          joinWebUrl: meetingInfo.joinWebUrl,
+          organizerId: meetingInfo.organizer?.id || getCachedMeetingContext(conversationId)?.organizerId,
+          joinWebUrl: meetingInfo.joinWebUrl || getCachedMeetingContext(conversationId)?.joinWebUrl,
           onlineMeetingId: (meetingInfo as any)?.onlineMeetingId,
         });
         // Don't delete from pendingJoinMap yet � webhook will do it on 'established' or final failure
@@ -3401,34 +3830,493 @@ function detectEmailRequest(message: string): { wantsEmail: boolean; emailAddres
   return { wantsEmail: wantsEmail || sendToAllAttendees, emailAddress, sendToAllAttendees };
 }
 
+async function resolveCalendarAttendeesForRequest(
+  userId: string,
+  requestText: string,
+  conversationId?: string,
+  meetingJoinUrl?: string // NEW: pass joinWebUrl to match exact meeting
+): Promise<{ emails: string[]; names: string[]; meetingSubject?: string }> {
+  try {
+    // DEBUG - March 16 2026 - FORCE RESTART
+    process.stdout.write(`\n[CALENDAR_ATTENDEES] ========== STARTING V2 ==========\n`);
+    process.stdout.write(`[CALENDAR_ATTENDEES] userId=${userId}\n`);
+    process.stdout.write(`[CALENDAR_ATTENDEES] meetingJoinUrl=${meetingJoinUrl ? 'YES' : 'NONE'}\n`);
+    process.stdout.write(`[CALENDAR_ATTENDEES] conversationId=${conversationId || 'NONE'}\n`);
+    
+    const now = new Date();
+    // Look back 7 days and forward 14 days - more focused range
+    const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const end = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+    console.log(`[CALENDAR_ATTENDEES] Date range: ${start.toISOString()} to ${end.toISOString()}`);
+    
+    // If we have a joinWebUrl, try to get it from conversation context
+    let targetJoinUrl = meetingJoinUrl || '';
+    let conversationSubject = '';
+    if (conversationId) {
+      const context = getCachedMeetingContext(conversationId);
+      if (context?.joinWebUrl && !targetJoinUrl) targetJoinUrl = context.joinWebUrl;
+      conversationSubject = (context?.subject || '').toLowerCase();
+      if (!targetJoinUrl || !conversationSubject) {
+        const graphInfo = await resolveMeetingInfoForConversation(conversationId);
+        if (graphInfo?.joinWebUrl && !targetJoinUrl) targetJoinUrl = graphInfo.joinWebUrl;
+        if (graphInfo?.subject && !conversationSubject) conversationSubject = (graphInfo.subject || '').toLowerCase();
+      }
+      if (targetJoinUrl) {
+        console.log(`[CALENDAR_ATTENDEES] Have meeting joinWebUrl to match: ${targetJoinUrl.slice(0, 80)}...`);
+      }
+      if (conversationSubject) {
+        console.log(`[CALENDAR_ATTENDEES] Conversation subject: "${conversationSubject}"`);
+      }
+    }
+    
+    const calendarResult = await graphApiHelper.getCalendarEvents(userId, start.toISOString(), end.toISOString());
+    if (!calendarResult.success) {
+      console.log(`[CALENDAR_ATTENDEES] API failed: ${calendarResult.error}`);
+      return { emails: [], names: [] };
+    }
+    if (!calendarResult.events?.length) {
+      console.log(`[CALENDAR_ATTENDEES] No calendar events found in date range`);
+      return { emails: [], names: [] };
+    }
+    console.log(`[CALENDAR_ATTENDEES] Found ${calendarResult.events.length} total calendar events`);
+    
+    // Debug: Show ALL events and why they might be filtered out
+    const allEventSubjects = calendarResult.events.map((e: any) => e.subject).join(' | ');
+    console.log(`[CALENDAR_ATTENDEES] ALL ${calendarResult.events.length} events: ${allEventSubjects.slice(0, 500)}`);
+    
+    // Check if "Test with Someone" is in raw results
+    const testMeeting = calendarResult.events.find((e: any) => 
+      (e.subject || '').toLowerCase().includes('test with someone')
+    );
+    if (testMeeting) {
+      console.log(`[CALENDAR_ATTENDEES] FOUND "Test with Someone" in raw results!`);
+      console.log(`[CALENDAR_ATTENDEES]   - onlineMeeting: ${JSON.stringify(testMeeting.onlineMeeting || 'NONE')}`);
+      console.log(`[CALENDAR_ATTENDEES]   - onlineMeetingUrl: ${testMeeting.onlineMeetingUrl || 'NONE'}`);
+      console.log(`[CALENDAR_ATTENDEES]   - attendees: ${JSON.stringify(testMeeting.attendees || 'NONE')}`);
+    } else {
+      console.log(`[CALENDAR_ATTENDEES] ⚠️ "Test with Someone" NOT in raw ${calendarResult.events.length} results!`);
+    }
+
+    const teamsMeetings = calendarResult.events.filter((evt: any) =>
+      (evt.onlineMeeting?.joinUrl || evt.onlineMeetingUrl) && Array.isArray(evt.attendees) && evt.attendees.length > 0
+    );
+    if (teamsMeetings.length === 0) {
+      console.log(`[CALENDAR_ATTENDEES] No Teams meetings with attendees found. Events without online meeting links or attendees were filtered out.`);
+      return { emails: [], names: [] };
+    }
+    console.log(`[CALENDAR_ATTENDEES] Found ${teamsMeetings.length} Teams meetings with attendees`);
+    
+    // List ALL meeting subjects to help debug
+    const allSubjects = teamsMeetings.map((e: any) => e.subject).join(' | ');
+    console.log(`[CALENDAR_ATTENDEES] ALL meeting subjects: ${allSubjects}`);
+
+    // PRIORITY 1: If we have a joinWebUrl, find EXACT match first
+    if (targetJoinUrl) {
+      const targetThreadId = extractMeetingThreadId(targetJoinUrl);
+      process.stdout.write(`[CALENDAR_ATTENDEES] Looking for joinWebUrl match. Target threadId: "${targetThreadId}"\n`);
+      
+      // Debug: show first few calendar meeting URLs and their thread IDs
+      teamsMeetings.slice(0, 5).forEach((evt: any, i: number) => {
+        const evtUrl = evt.onlineMeeting?.joinUrl || evt.onlineMeetingUrl || '';
+        const evtThreadId = extractMeetingThreadId(evtUrl);
+        process.stdout.write(`[CALENDAR_ATTENDEES] Cal[${i}] "${evt.subject}": threadId="${evtThreadId || 'NONE'}"\n`);
+      });
+      
+      const exactMatch = teamsMeetings.find((evt: any) => {
+        const evtUrl = evt.onlineMeeting?.joinUrl || evt.onlineMeetingUrl || '';
+        const evtThreadId = extractMeetingThreadId(evtUrl);
+        // Match by thread ID (most reliable)
+        if (targetThreadId && evtThreadId && targetThreadId === evtThreadId) {
+          return true;
+        }
+        // Fallback: full URL comparison
+        const normalizedTarget = normalizeMeetingJoinUrl(targetJoinUrl);
+        const evtNorm = normalizeMeetingJoinUrl(evtUrl);
+        return evtNorm === normalizedTarget;
+      });
+      
+      if (exactMatch) {
+        process.stdout.write(`[CALENDAR_ATTENDEES] ✓ Found EXACT joinWebUrl match: "${exactMatch.subject}"\n`);
+        const uniqueRecipients = new Map<string, string>();
+        for (const attendee of exactMatch.attendees || []) {
+          const email = (attendee?.emailAddress?.address || '').trim().toLowerCase();
+          const name = (attendee?.emailAddress?.name || email).trim();
+          if (!email || !email.includes('@')) continue;
+          if (!uniqueRecipients.has(email)) {
+            uniqueRecipients.set(email, name);
+          }
+        }
+        process.stdout.write(`[CALENDAR_ATTENDEES] Found ${uniqueRecipients.size} attendees for "${exactMatch.subject}"\n`);
+        return {
+          emails: Array.from(uniqueRecipients.keys()),
+          names: Array.from(uniqueRecipients.values()),
+          meetingSubject: exactMatch.subject || undefined,
+        };
+      } else {
+        process.stdout.write(`[CALENDAR_ATTENDEES] ✗ No joinWebUrl match, trying subject match...\n`);
+      }
+    }
+    
+    // PRIORITY 2: Try EXACT subject match using conversation subject (group name)
+    // This handles cases where joinWebUrl doesn't match but subject does
+    if (conversationSubject) {
+      process.stdout.write(`[CALENDAR_ATTENDEES] Looking for exact subject match: "${conversationSubject}"\n`);
+      // List first 5 meeting subjects for comparison
+      teamsMeetings.slice(0, 5).forEach((evt: any, i: number) => {
+        process.stdout.write(`[CALENDAR_ATTENDEES] Cal[${i}] subject: "${evt.subject}"\n`);
+      });
+      const subjectMatch = teamsMeetings.find((evt: any) => {
+        const evtSubject = (evt.subject || '').toLowerCase().trim();
+        return evtSubject === conversationSubject;
+      });
+      
+      if (subjectMatch) {
+        console.log(`[CALENDAR_ATTENDEES] ✓ Found EXACT subject match: "${subjectMatch.subject}"`);
+        const uniqueRecipients = new Map<string, string>();
+        for (const attendee of subjectMatch.attendees || []) {
+          const email = (attendee?.emailAddress?.address || '').trim().toLowerCase();
+          const name = (attendee?.emailAddress?.name || email).trim();
+          if (!email || !email.includes('@')) continue;
+          if (!uniqueRecipients.has(email)) {
+            uniqueRecipients.set(email, name);
+          }
+        }
+        console.log(`[CALENDAR_ATTENDEES] Found ${uniqueRecipients.size} attendees for "${subjectMatch.subject}"`);
+        return {
+          emails: Array.from(uniqueRecipients.keys()),
+          names: Array.from(uniqueRecipients.values()),
+          meetingSubject: subjectMatch.subject || undefined,
+        };
+      } else {
+        console.log(`[CALENDAR_ATTENDEES] ✗ No exact subject match found for "${conversationSubject}"`);
+        // List available meeting subjects for debugging
+        const availableSubjects = teamsMeetings.slice(0, 10).map((evt: any) => evt.subject).join(', ');
+        console.log(`[CALENDAR_ATTENDEES] Available meetings: ${availableSubjects}`);
+      }
+    }
+    
+    // If we had a conversation context (joinWebUrl or subject), don't fall back to fuzzy matching
+    if (targetJoinUrl || conversationSubject) {
+      console.log(`[CALENDAR_ATTENDEES] No exact match found. NOT falling back to fuzzy matching to avoid wrong meeting.`);
+      return { emails: [], names: [] };
+    }
+    
+    // PRIORITY 3: ONLY use fuzzy matching if we DON'T have any conversation context
+    // This is for cases like "list attendees for Monday standup" where user specifies a meeting
+
+    // Fall back to keyword/subject matching
+    const requestLower = (requestText || '').toLowerCase();
+    const weekdayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const requestedWeekday = weekdayNames.find((day) => requestLower.includes(day));
+    const wantsTomorrow = /\btomorrow\b/i.test(requestText);
+    const wantsToday = /\btoday\b/i.test(requestText);
+    const wantsLast = /\b(last|previous|recent)\b/i.test(requestText);
+
+    const stopWords = new Set([
+      'list', 'show', 'get', 'all', 'attendees', 'participants', 'emails', 'email',
+      'name', 'names', 'and', 'their', 'for', 'the', 'meeting', 'group', 'please',
+      'last', 'previous', 'recent', 'current', 'this'
+    ]);
+    const requestTokens: string[] = (requestLower.match(/[a-z0-9]+/g) || [])
+      .filter((token: string) => token.length > 2 && !stopWords.has(token));
+
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    const scoreMeeting = (evt: any): number => {
+      const subject = (evt.subject || '').toLowerCase();
+      const startTime = new Date(evt.start?.dateTime || 0);
+      const endTime = new Date(evt.end?.dateTime || evt.start?.dateTime || 0);
+      let score = 0;
+
+      // Conversation context matching (highest priority)
+      if (conversationSubject) {
+        if (subject === conversationSubject) score += 120;
+        else if (subject.includes(conversationSubject) || conversationSubject.includes(subject)) score += 90;
+      }
+
+      // Request keyword matching
+      if (requestTokens.length > 0) {
+        const tokenMatches = requestTokens.filter((token) => subject.includes(token)).length;
+        score += tokenMatches * 20;
+        if (tokenMatches >= Math.min(2, requestTokens.length)) score += 25;
+      }
+
+      // Day-specific matching
+      if (requestedWeekday && startTime.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase() === requestedWeekday) {
+        score += 40;
+      }
+      if (wantsTomorrow) {
+        const tomorrow = new Date(todayStart);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        if (startTime.toDateString() === tomorrow.toDateString()) score += 40;
+      }
+      if (wantsToday && startTime.toDateString() === todayStart.toDateString()) {
+        score += 35;
+      }
+
+      // Active meeting gets high priority
+      if (startTime <= now && endTime >= now) score += 50;
+      
+      // "Last/recent meeting" - boost recently ended meetings
+      if (wantsLast && endTime < now && now.getTime() - endTime.getTime() < 24 * 60 * 60 * 1000) {
+        score += 45;
+      }
+      
+      // Today's meetings get a baseline boost
+      if (startTime.toDateString() === todayStart.toDateString()) {
+        score += 15;
+      }
+      
+      // Upcoming meeting (within 6 hours) gets a small boost
+      if (startTime > now && startTime.getTime() - now.getTime() < 6 * 60 * 60 * 1000) score += 10;
+      
+      // Penalize old meetings (more than 3 days ago)
+      if (endTime < now && now.getTime() - endTime.getTime() > 3 * 24 * 60 * 60 * 1000) score -= 10;
+
+      return score;
+    };
+
+    const rankedMeetings = teamsMeetings
+      .map((evt: any) => ({ evt, score: scoreMeeting(evt) }))
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        // Tie-breaker: prefer closest to now (active > just ended > upcoming)
+        const aStart = new Date(a.evt.start?.dateTime || 0).getTime();
+        const bStart = new Date(b.evt.start?.dateTime || 0).getTime();
+        return Math.abs(aStart - now.getTime()) - Math.abs(bStart - now.getTime());
+      });
+
+    console.log(`[CALENDAR_ATTENDEES] Meeting rankings: ${rankedMeetings.slice(0, 5).map(m => `"${m.evt.subject}" (score=${m.score})`).join(', ')}`);
+
+    // Determine if user explicitly specified search criteria (keywords, day names, dates)
+    const hasExplicitUserAnchor = requestTokens.length > 0 || !!requestedWeekday || wantsTomorrow || wantsToday || wantsLast;
+    const bestMatch = rankedMeetings[0];
+    
+    // Only reject if USER explicitly specified criteria that didn't match well
+    // Conversation context alone shouldn't block selection - just use best available meeting
+    if (!bestMatch || (hasExplicitUserAnchor && bestMatch.score < 30)) {
+      // If no good match and no explicit criteria, fall back to the most recently ended meeting
+      if (!hasExplicitUserAnchor && rankedMeetings.length > 0) {
+        // Find the most recently ended meeting by end time
+        const recentlyEnded = rankedMeetings
+          .filter(m => new Date(m.evt.end?.dateTime || 0).getTime() <= now.getTime())
+          .sort((a, b) => new Date(b.evt.end?.dateTime || 0).getTime() - new Date(a.evt.end?.dateTime || 0).getTime());
+        if (recentlyEnded.length > 0) {
+          console.log(`[CALENDAR_ATTENDEES] No explicit criteria — defaulting to most recently ended meeting: "${recentlyEnded[0].evt.subject}"`);
+          // Use this meeting instead of failing
+          const fallback = recentlyEnded[0];
+          rankedMeetings[0] = fallback;
+        } else {
+          console.log(`[CALENDAR_ATTENDEES] No suitable match found. hasExplicitUserAnchor=${hasExplicitUserAnchor}, bestScore=${bestMatch?.score ?? 'none'}`);
+          return { emails: [], names: [] };
+        }
+      } else {
+        console.log(`[CALENDAR_ATTENDEES] No suitable match found. hasExplicitUserAnchor=${hasExplicitUserAnchor}, bestScore=${bestMatch?.score ?? 'none'}`);
+        return { emails: [], names: [] };
+      }
+    }
+
+    const targetMeeting = bestMatch.evt;
+    console.log(`[CALENDAR_ATTENDEES] Selected meeting: "${targetMeeting.subject}" (score=${bestMatch.score})`);
+    console.log(`[CALENDAR_ATTENDEES] Meeting has ${(targetMeeting.attendees || []).length} attendees in calendar`);
+
+    const uniqueRecipients = new Map<string, string>();
+    for (const attendee of targetMeeting.attendees || []) {
+      const email = (attendee?.emailAddress?.address || '').trim().toLowerCase();
+      const name = (attendee?.emailAddress?.name || email).trim();
+      if (!email || !email.includes('@')) continue;
+      if (!uniqueRecipients.has(email)) {
+        uniqueRecipients.set(email, name);
+      }
+    }
+
+    console.log(`[CALENDAR_ATTENDEES] Found ${uniqueRecipients.size} attendees for "${targetMeeting.subject}"`);
+
+    return {
+      emails: Array.from(uniqueRecipients.keys()),
+      names: Array.from(uniqueRecipients.values()),
+      meetingSubject: targetMeeting.subject || undefined,
+    };
+  } catch (error) {
+    console.warn('[CALENDAR_ATTENDEES] Calendar attendee resolution failed:', error);
+    return { emails: [], names: [] };
+  }
+}
+
+function normalizeMeetingJoinUrl(joinUrl?: string): string {
+  const raw = (joinUrl || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    const path = decodeURIComponent(parsed.pathname || '').toLowerCase().replace(/\/+$/, '');
+    return `${host}${path}`;
+  } catch {
+    return raw.toLowerCase();
+  }
+}
+
+/**
+ * Extract the meeting thread ID from a Teams joinWebUrl.
+ * Returns the thread ID portion like "19:meeting_abc123@thread.v2" or empty string.
+ */
+function extractMeetingThreadId(joinUrl?: string): string {
+  if (!joinUrl) return '';
+  try {
+    // URL-decode the path
+    const decoded = decodeURIComponent(joinUrl);
+    // Match the meeting thread ID pattern: 19:meeting_[base64]@thread.v2
+    const match = decoded.match(/19:meeting_[A-Za-z0-9_-]+@thread\.v2/i);
+    return match ? match[0].toLowerCase() : '';
+  } catch {
+    return '';
+  }
+}
+
+function areJoinUrlsEquivalent(left?: string, right?: string): boolean {
+  const a = normalizeMeetingJoinUrl(left);
+  const b = normalizeMeetingJoinUrl(right);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+async function resolveCalendarAttendeesForConversationOnly(
+  userId: string,
+  conversationId: string
+): Promise<{ emails: string[]; names: string[]; meetingSubject?: string }> {
+  try {
+    console.log(`[CALENDAR_ATTENDEES_STRICT] Starting for conversation ${conversationId}`);
+    const meetingInfo = await resolveMeetingInfoForConversation(conversationId);
+    const targetJoinUrl = meetingInfo?.joinWebUrl || getCachedMeetingContext(conversationId)?.joinWebUrl;
+    const meetingSubjectFromChat = meetingInfo?.subject || getCachedMeetingContext(conversationId)?.subject;
+    
+    if (!targetJoinUrl && !meetingSubjectFromChat) {
+      console.log(`[CALENDAR_ATTENDEES_STRICT] No joinWebUrl or subject for conversation ${conversationId}`);
+      return { emails: [], names: [] };
+    }
+    
+    const targetThreadId = extractMeetingThreadId(targetJoinUrl);
+    console.log(`[CALENDAR_ATTENDEES_STRICT] Looking for threadId="${targetThreadId}" or subject="${meetingSubjectFromChat}"`);
+
+    // Use same date range as list_attendees: 7 days back, 14 days forward
+    const now = new Date();
+    const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const end = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+    const calendarResult = await graphApiHelper.getCalendarEvents(userId, start.toISOString(), end.toISOString());
+    if (!calendarResult.success || !calendarResult.events?.length) {
+      console.log(`[CALENDAR_ATTENDEES_STRICT] No calendar events found`);
+      return { emails: [], names: [] };
+    }
+
+    const teamsMeetings = calendarResult.events.filter((evt: any) =>
+      (evt.onlineMeeting?.joinUrl || evt.onlineMeetingUrl) && Array.isArray(evt.attendees) && evt.attendees.length > 0
+    );
+    console.log(`[CALENDAR_ATTENDEES_STRICT] Found ${teamsMeetings.length} Teams meetings with attendees`);
+
+    // PRIORITY 1: Match by thread ID (most reliable)
+    let targetMeeting = teamsMeetings.find((evt: any) => {
+      const evtUrl = evt.onlineMeeting?.joinUrl || evt.onlineMeetingUrl || '';
+      const evtThreadId = extractMeetingThreadId(evtUrl);
+      return targetThreadId && evtThreadId && targetThreadId === evtThreadId;
+    });
+
+    // PRIORITY 2: Match by exact subject if thread ID didn't match
+    if (!targetMeeting && meetingSubjectFromChat) {
+      const subjectLower = meetingSubjectFromChat.toLowerCase().trim();
+      targetMeeting = teamsMeetings.find((evt: any) => 
+        (evt.subject || '').toLowerCase().trim() === subjectLower
+      );
+      if (targetMeeting) {
+        console.log(`[CALENDAR_ATTENDEES_STRICT] Matched by subject: "${targetMeeting.subject}"`);
+      }
+    }
+
+    if (!targetMeeting) {
+      console.log(`[CALENDAR_ATTENDEES_STRICT] No exact meeting match found for conversation ${conversationId}`);
+      return { emails: [], names: [] };
+    }
+
+    const uniqueRecipients = new Map<string, string>();
+    for (const attendee of targetMeeting.attendees || []) {
+      const email = (attendee?.emailAddress?.address || '').trim().toLowerCase();
+      const name = (attendee?.emailAddress?.name || email).trim();
+      if (!email || !email.includes('@')) continue;
+      if (!uniqueRecipients.has(email)) {
+        uniqueRecipients.set(email, name);
+      }
+    }
+
+    console.log(`[CALENDAR_ATTENDEES_STRICT] Found ${uniqueRecipients.size} attendees for meeting "${targetMeeting.subject || 'unknown'}"`);
+    return {
+      emails: Array.from(uniqueRecipients.keys()),
+      names: Array.from(uniqueRecipients.values()),
+      meetingSubject: targetMeeting.subject || undefined,
+    };
+  } catch (error) {
+    console.warn('[CALENDAR_ATTENDEES_STRICT] Failed to resolve attendees for current conversation:', error);
+    return { emails: [], names: [] };
+  }
+}
+
 async function autoEmailSummaryToParticipants(
   chatId: string,
   senderUserId: string,
   summarySubject: string,
   summaryBody: string
 ): Promise<{ sentCount: number; failedCount: number; skippedCount: number }> {
-  const members = await graphApiHelper.getChatMembersDetailed(chatId);
-  if (!members.length) {
-    return { sentCount: 0, failedCount: 0, skippedCount: 0 };
-  }
-
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const uniqueRecipients = new Map<string, string>();
 
+  // 1. Get chat members
+  const members = await graphApiHelper.getChatMembersDetailed(chatId);
   for (const m of members) {
     const nameLower = (m.displayName || '').toLowerCase();
     if (nameLower.includes('bot') || nameLower === 'assistant') {
       continue;
     }
-
     const email = (m.email || '').trim().toLowerCase();
-    if (!emailRegex.test(email)) {
-      continue;
-    }
-    if (!uniqueRecipients.has(email)) {
+    if (emailRegex.test(email) && !uniqueRecipients.has(email)) {
       uniqueRecipients.set(email, m.displayName || email);
     }
   }
+
+  // 2. Get calendar attendees for THIS conversation's exact meeting only.
+  // Never use broad/fuzzy meeting selection for auto-email.
+  try {
+    const calendarResult = await resolveCalendarAttendeesForConversationOnly(senderUserId, chatId);
+    if (calendarResult.emails?.length) {
+      console.log(`[AUTO_EMAIL] Found ${calendarResult.emails.length} calendar attendees for current meeting (subject: ${calendarResult.meetingSubject || 'unknown'})`);
+      for (let i = 0; i < calendarResult.emails.length; i++) {
+        const email = (calendarResult.emails[i] || '').trim().toLowerCase();
+        const name = calendarResult.names[i] || email;
+        // Skip bot-like names
+        const nameLower = name.toLowerCase();
+        if (nameLower.includes('bot') || nameLower === 'assistant') continue;
+        if (emailRegex.test(email) && !uniqueRecipients.has(email)) {
+          uniqueRecipients.set(email, name);
+          console.log(`[AUTO_EMAIL] Added calendar attendee: ${name} <${email}>`);
+        }
+      }
+    }
+  } catch (calErr) {
+    console.warn('[AUTO_EMAIL] Could not fetch calendar attendees:', calErr);
+  }
+
+  if (!uniqueRecipients.size) {
+    return { sentCount: 0, failedCount: 0, skippedCount: 0 };
+  }
+
+  // Safety brake: prevent accidental broad fan-out.
+  const maxAutoEmailRecipients = Math.max(1, Number(process.env.MAX_AUTO_EMAIL_RECIPIENTS || 25));
+  if (uniqueRecipients.size > maxAutoEmailRecipients) {
+    console.warn(
+      `[AUTO_EMAIL] BLOCKED: recipient count ${uniqueRecipients.size} exceeds safety cap ${maxAutoEmailRecipients}. ` +
+      `No emails sent for conversation ${chatId}.`
+    );
+    return { sentCount: 0, failedCount: 0, skippedCount: uniqueRecipients.size };
+  }
+
+  console.log(`[AUTO_EMAIL] Sending to ${uniqueRecipients.size} unique recipients (current chat + current meeting calendar only)`);
 
   let sentCount = 0;
   let failedCount = 0;
@@ -3538,27 +4426,9 @@ startTranscriptBackgroundWorker();
   graphApiHelper.setTokenFactory(graphTokenFactory);
 }
 
-// Initialize the new modular auto-transcription system
-if (USE_NEW_AUTO_TRANSCRIPTION) {
-  console.log('[INIT] Initializing new auto-transcription module (Graph Beta API)');
-  autoTranscription.initAutoTranscription(
-    // Token getter - use the public bot token method
-    async () => graphApiHelper.getBotToken(),
-    // Message sender - use proactive message sending
-    async (serviceUrl: string, conversationId: string, message: string) => {
-      await graphApiHelper.sendProactiveMessage(serviceUrl, conversationId, message);
-    },
-    // Optional config overrides
-    {
-      enabled: true,
-      defaultLanguage: 'en-US',
-      notifyUsers: true,
-      logLevel: 'info',
-    }
-  );
-} else {
-  console.log('[INIT] Using legacy auto-transcription (inline code)');
-}
+// Create the smart Intent Agent for routing decisions
+const intentAgent = createIntentAgent(sendPromptWithTracking);
+console.log('[INIT] Intent Agent created - smart routing enabled');
 
 // Helper to send typing indicator
 async function sendTypingIndicator(sendFn: any): Promise<void> {
@@ -3579,8 +4449,14 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
         ? outgoing
         : (outgoing?.text || outgoing?.summary || '[non-text activity]');
       console.log(`[TEAMS_SEND_OK] conversation=${activity?.conversation?.id || 'unknown'} preview="${getTruncatedLogPreview(String(text || ''))}"`);
-    } catch (error) {
-      console.error(`[TEAMS_SEND_FAIL] conversation=${activity?.conversation?.id || 'unknown'}`, error);
+    } catch (error: any) {
+      const status = error?.response?.status || error?.response?.statusCode;
+      console.error(`[TEAMS_SEND_FAIL] conversation=${activity?.conversation?.id || 'unknown'} status=${status || 'unknown'}`);
+      // Don't crash the handler on 403 (stale conversation) or 429 (throttled)
+      if (status === 403 || status === 429) {
+        console.warn(`[TEAMS_SEND_FAIL] Non-fatal ${status} — conversation may be stale or throttled`);
+        return;
+      }
       throw error;
     }
   };
@@ -3596,6 +4472,18 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
   console.log(`[MESSAGE] Received from ${activity.from.id}: ${activity.text}`);
   console.log(`[CONTEXT] Conversation: ${activity.conversation.id}, Is Group: ${activity.conversation.isGroup}`);
   console.log(`[STORAGE] Loaded ${messages.length} user messages, ${sharedMessages.length} shared messages, ${llmMessages.length} llm messages`);
+
+  // Ignore system metadata payloads; user intents come from normal text messages.
+  const msgText = activity.text || '';
+  const looksSystemPayload =
+    !msgText.trim() ||
+    msgText.includes('<URIObject') ||
+    msgText.includes('"callId"') ||
+    msgText.trim().startsWith('{') ||
+    !!extractMeetingCallIdFromActivityPayload(activity);
+  if (looksSystemPayload) {
+    return;
+  }
 
   try {
     // Get user's display name for personalization
@@ -3668,6 +4556,16 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
       (conversationIdLower.includes('meeting_') ||
        conversationIdLower.includes('meeting') ||
        conversationIdLower.includes('spaces'));
+
+    // In group/meeting chats, only respond when the bot is @mentioned
+    if (isGroupConversation && !botMentioned) {
+      console.log(`[MESSAGE] Ignoring group chat message — bot not @mentioned`);
+      storage.set(conversationKey, messages);
+      storage.set(sharedConversationKey, sharedMessages);
+      storage.set(llmConversationKey, llmMessages);
+      return;
+    }
+
     // Build recent context for the intent classifier so it handles follow-ups and corrections naturally
     const recentLlmTurns = llmMessages.slice(-6).map((m: any) =>
       `${m.role === 'user' ? 'User' : 'Bot'}: ${(m.content || '').slice(0, 300)}`
@@ -3679,12 +4577,185 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
     if (_lastRespSnap?.subject) stateLines.push(`Bot last response subject: ${_lastRespSnap.subject}`);
     const classifyContext = [recentLlmTurns, stateLines.join('\n')].filter(Boolean).join('\n\n');
 
-    const detectedIntent = await classifyIntent(cleanText, isMeetingConversation, {
+    // === SMART INTENT AGENT ROUTING ===
+    // Build agent context for smart decision making
+    const agentContext: AgentContext = {
+      userId: requesterId,
+      userName: userName,
+      conversationId: activity.conversation.id,
+      isMeetingConversation,
+      meetingInfo: meetingId ? {
+        subject: getCachedMeetingContext(activity.conversation.id)?.subject,
+        hasActiveCall: Array.from(activeCallMap.values()).some(c => c.conversationId === activity.conversation.id),
+        hasTranscript: (liveTranscriptMap.get(activity.conversation.id)?.length || 0) > 0,
+      } : undefined,
+      inboxContext: _inboxCtxSnap ? {
+        lastSender: _inboxCtxSnap.lastMatchedSenderName,
+        lastSubject: _inboxCtxSnap.lastMessages?.[0]?.subject || undefined,
+        recentSenders: _inboxCtxSnap.contacts?.map(c => c.displayName) || [],
+        justShowedInbox: _inboxCtxSnap.updatedAt > Date.now() - 5 * 60 * 1000,
+      } : undefined,
+      lastBotResponse: _lastRespSnap ? {
+        contentType: _lastRespSnap.contentType,
+        content: _lastRespSnap.content?.slice(0, 500),
+        subject: _lastRespSnap.subject,
+        timestamp: _lastRespSnap.timestamp,
+      } : undefined,
+      pendingClarification: (() => {
+        const pending = pendingClarificationMap.get(activity.conversation.id);
+        if (pending && Date.now() - pending.timestamp < 5 * 60 * 1000) {
+          return {
+            question: pending.question,
+            aboutPerson: pending.aboutPerson,
+            aboutTopic: pending.aboutTopic,
+          };
+        }
+        return undefined;
+      })(),
+    };
+
+    // Always use full LLM intent reasoning for action routing.
+    let effectiveQuery = cleanText;
+    const agentDecision: AgentDecision = await intentAgent.analyze(cleanText, agentContext, {
       userId: requesterId,
       displayName: actorName,
       meetingId,
-    }, classifyContext || undefined);
-    console.log(`[INTENT] Detected intent: ${detectedIntent}`);
+    });
+    effectiveQuery = agentDecision.refinedQuery || cleanText;
+    
+    console.log(`[INTENT_AGENT] Decision: ${agentDecision.intent} (${agentDecision.confidence}) - ${agentDecision.reasoning.slice(0, 100)}`);
+
+    // Clear pending clarification now that we received a new message
+    pendingClarificationMap.delete(activity.conversation.id);
+
+    // Handle clarification requests
+    if (agentDecision.needsClarification && agentDecision.clarificationQuestion) {
+      console.log(`[INTENT_AGENT] Requesting clarification: ${agentDecision.clarificationQuestion}`);
+      await send(new MessageActivity(agentDecision.clarificationQuestion).addAiGenerated().addFeedback());
+      recordAgentBotResponse(activity.conversation.id, agentDecision.clarificationQuestion);
+
+      // Record clarification context for follow-up resolution
+      pendingClarificationMap.set(activity.conversation.id, {
+        question: agentDecision.clarificationQuestion,
+        aboutPerson: agentDecision.parameters.personReference,
+        aboutTopic: agentDecision.parameters.contentType || agentDecision.intent,
+        timestamp: Date.now(),
+      });
+      storage.set(conversationKey, messages);
+      storage.set(sharedConversationKey, sharedMessages);
+      storage.set(llmConversationKey, llmMessages);
+      return;
+    }
+
+    // Handle list_attendees intent (new intent from agent)
+    if (agentDecision.intent === 'list_attendees') {
+      console.log(`\n\n======== LIST_ATTENDEES HANDLER START ========`);
+      console.log(`[ATTENDEES] Processing attendee list request via Intent Agent`);
+      await sendTypingIndicator(send);
+
+      const uniqueAttendees = new Map<string, string>(); // email -> name
+      let meetingSubject: string | undefined;
+      let meetingJoinUrl: string | undefined;
+      const sources: string[] = [];
+
+      // STEP 1: If in a group/meeting chat, get chat members AND meeting info
+      let chatInfo: any = null;
+      if (isMeetingConversation || activity.conversation.conversationType === 'groupChat') {
+        console.log(`[ATTENDEES] STEP1: In meeting/group chat - fetching chat members and meeting info`);
+        const chatMembers = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
+        chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
+        console.log(`[ATTENDEES] STEP1: chatInfo received: subject="${chatInfo?.subject || 'NONE'}", joinWebUrl=${chatInfo?.joinWebUrl ? 'YES' : 'NO'}`);
+        
+        for (const m of chatMembers) {
+          const nameLower = (m.displayName || '').toLowerCase();
+          if (nameLower.includes('bot') || nameLower === 'assistant') continue;
+          const email = (m.email || '').trim().toLowerCase();
+          if (email && email.includes('@') && !uniqueAttendees.has(email)) {
+            uniqueAttendees.set(email, m.displayName || email);
+          }
+        }
+        if (chatInfo?.subject) {
+          meetingSubject = chatInfo.subject;
+          console.log(`[ATTENDEES] STEP1: Using subject from chatInfo: "${meetingSubject}"`);
+        }
+        if (chatInfo?.joinWebUrl) {
+          meetingJoinUrl = chatInfo.joinWebUrl;
+          console.log(`[ATTENDEES] STEP1: Have meeting joinWebUrl for exact calendar match`);
+        }
+        if (uniqueAttendees.size > 0) {
+          sources.push('chat');
+          console.log(`[ATTENDEES] Found ${uniqueAttendees.size} members from chat`);
+        }
+      }
+
+      // STEP 2: Get calendar attendees using joinWebUrl for EXACT meeting match
+      // This ensures we get the right meeting's attendees, not just any meeting
+      console.log(`[ATTENDEES] ========== STEP 2: CALENDAR LOOKUP ==========`);
+      console.log(`[ATTENDEES] meetingJoinUrl to match: ${meetingJoinUrl ? meetingJoinUrl.slice(0, 80) + '...' : 'NONE'}`);
+      console.log(`[ATTENDEES] meetingSubject so far: "${meetingSubject || 'NONE'}"`);
+      console.log(`[ATTENDEES] Calling resolveCalendarAttendeesForRequest...`);
+      const calendarResult = await resolveCalendarAttendeesForRequest(
+        activity.from.aadObjectId || activity.from.id,
+        effectiveQuery || activity.text || '',
+        activity.conversation.id,
+        meetingJoinUrl // Pass joinWebUrl for exact matching
+      );
+      console.log(`[ATTENDEES] Calendar result: ${calendarResult.emails.length} emails, subject="${calendarResult.meetingSubject || 'NONE'}"`);
+      
+      if (calendarResult.emails.length > 0) {
+        let addedFromCalendar = 0;
+        for (let i = 0; i < calendarResult.emails.length; i++) {
+          const email = calendarResult.emails[i].toLowerCase();
+          const name = calendarResult.names[i] || email;
+          if (!uniqueAttendees.has(email)) {
+            uniqueAttendees.set(email, name);
+            addedFromCalendar++;
+          }
+        }
+        if (addedFromCalendar > 0) {
+          sources.push('calendar');
+          console.log(`[ATTENDEES] Added ${addedFromCalendar} attendees from calendar`);
+        }
+        if (!meetingSubject && calendarResult.meetingSubject) {
+          meetingSubject = calendarResult.meetingSubject;
+        }
+      }
+
+      const attendeeResult = {
+        emails: Array.from(uniqueAttendees.keys()),
+        names: Array.from(uniqueAttendees.values()),
+        meetingSubject
+      };
+      const source = sources.join('+') || 'unknown';
+
+      if (!attendeeResult.emails.length) {
+        await send(new MessageActivity(
+          `I couldn't find attendee email addresses for that meeting. ` +
+          `Try specifying the meeting day or title, for example: "list attendees for Monday standup".`
+        ).addAiGenerated().addFeedback());
+      } else {
+        const lines = attendeeResult.emails.map((email, index) => {
+          const name = attendeeResult.names[index] || email;
+          return `${name}: ${email}`;
+        });
+        const header = attendeeResult.meetingSubject
+          ? `**Attendees for ${attendeeResult.meetingSubject}:**`
+          : `**Meeting attendees:**`;
+
+        await send(new MessageActivity(`${header}\n${lines.join('\n')}`).addAiGenerated().addFeedback());
+        recordAgentBotResponse(activity.conversation.id, `Listed ${attendeeResult.emails.length} attendees (source: ${source})`);
+      }
+
+      storage.set(conversationKey, messages);
+      storage.set(sharedConversationKey, sharedMessages);
+      storage.set(llmConversationKey, llmMessages);
+      return;
+    }
+
+    // Map agent intent to existing handler
+    const detectedIntent = agentDecision.intent as typeof detectedIntent;
+    console.log(`[INTENT] Using agent decision: ${detectedIntent}`);
+    
     const meetingAutoJoinKey = `meeting-autojoin/${activity.conversation.id}`;
     const hasAutoJoinedMeeting = storage.get(meetingAutoJoinKey) === true;
 
@@ -3717,8 +4788,126 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
       console.log(`[ACTION] Processing summarization request`);
       await sendTypingIndicator(send);
       
+      // ── Reformat path: user wants to reformat last summary/minutes/transcript ────
+      const _lastSummaryResp = lastBotResponseMap.get(activity.conversation.id);
+      const isSummaryReformatRequest = agentDecision.parameters?.isReformatRequest &&
+        _lastSummaryResp &&
+        ['summary', 'minutes', 'transcript', 'insights', 'meeting_overview'].includes(_lastSummaryResp.contentType) &&
+        (Date.now() - _lastSummaryResp.timestamp) < 15 * 60 * 1000; // Within 15 minutes
+      
+      if (isSummaryReformatRequest && _lastSummaryResp?.content) {
+        console.log(`[SUMMARIZE] Reformat request for ${_lastSummaryResp.contentType}, formatStyle=${agentDecision.parameters?.formatStyle}`);
+        const formatStyle = agentDecision.parameters?.formatStyle || 'shorter';
+        const formatInstruction = formatStyle === 'shorter' 
+          ? 'Rewrite this in a natural conversational style and make it much shorter. Keep only the key takeaways, decisions, and action items.'
+          : formatStyle === 'longer'
+          ? 'Expand this naturally with more context and detail while keeping the same facts.'
+          : formatStyle === 'bullets'
+          ? 'Reformat this as clear, conversational bullet points grouped by topic.'
+          : 'Reformat this naturally as requested';
+        
+        const reformatPrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content: `${formatInstruction}
+
+Original content:
+${_lastSummaryResp.content}
+
+User request: "${effectiveQuery || activity.text}"`
+            }
+          ],
+          instructions: `You are reformatting a meeting ${_lastSummaryResp.contentType}. 
+CRITICAL: Work ONLY with the original content provided - do NOT add information not present.
+Apply the formatting instruction precisely.
+Use a natural, human conversational tone. Avoid rigid or repetitive template wording.`,
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21'
+          })
+        });
+        
+        const reformatted = await sendPromptWithTracking(reformatPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: _lastSummaryResp.content,
+        });
+        
+        const reformattedContent = reformatted.content || _lastSummaryResp.content;
+        await send(new MessageActivity(reformattedContent).addAiGenerated().addFeedback());
+        
+        // Update with reformatted version for chained follow-ups
+        recordBotResponse(activity.conversation.id, {
+          content: reformattedContent,
+          contentType: _lastSummaryResp.contentType,
+          subject: _lastSummaryResp.subject,
+          timestamp: Date.now(),
+        });
+        
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      }
+      
+      // ── Follow-up question path: answer questions about cached summary/transcript ────
+      // This handles "what did X say", "tell me more about Y", "focus on action items" etc
+      const isFollowUpOnSummary = agentDecision.parameters?.isReformatRequest &&
+        _lastSummaryResp &&
+        ['summary', 'minutes', 'transcript', 'insights', 'meeting_overview'].includes(_lastSummaryResp.contentType) &&
+        (Date.now() - _lastSummaryResp.timestamp) < 15 * 60 * 1000 &&
+        /\b(what did|who said|tell me|what about|more about|explain|focus|mentioned|action items?|decisions?|key points?|highlights?)\b/i.test(effectiveQuery || activity.text || '');
+      
+      if (isFollowUpOnSummary && _lastSummaryResp?.content) {
+        console.log(`[SUMMARIZE] Follow-up question on cached ${_lastSummaryResp.contentType}`);
+        
+        const answerPrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content: `Based on this meeting ${_lastSummaryResp.contentType}, answer the user's question.
+
+Meeting content:
+${_lastSummaryResp.content}
+
+User question: "${effectiveQuery || activity.text}"`
+            }
+          ],
+          instructions: `You are answering a follow-up question about a meeting ${_lastSummaryResp.contentType}.
+CRITICAL: Answer ONLY based on the content provided - do NOT make up information.
+If the question cannot be answered from the content, say so clearly.
+Keep the response focused and concise.`,
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21'
+          })
+        });
+        
+        const answer = await sendPromptWithTracking(answerPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: _lastSummaryResp.content,
+        });
+        
+        await send(new MessageActivity(answer.content || "I couldn't find that information in the meeting content.").addAiGenerated().addFeedback());
+        
+        // Keep the same cached response for further follow-ups
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      }
+      
       // Check if user also wants to email the result
-      const emailRequest = detectEmailRequest(cleanText || activity.text || '');
+      // effectiveQuery already contains follow-up context if applicable
+      const emailRequest = detectEmailRequest(effectiveQuery || activity.text || '');
       let generatedSummary = '';
       
       try {
@@ -3735,13 +4924,14 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
 Yesterday: ${yesterday.toISOString().split('T')[0]} (${yesterday.toLocaleDateString('en-US', { weekday: 'long' })})
 Last week: ${lastWeekStart.toISOString().split('T')[0]} to ${today.toISOString().split('T')[0]}`;
         
+        // effectiveQuery already contains follow-up context if applicable
         const targetExtractPrompt = new ChatPrompt({
           messages: [
             {
               role: 'user',
               content: `Determine what the user wants summarized.
 
-User request: "${cleanText || activity.text}"
+User request: "${effectiveQuery || activity.text}"
 User is currently in a meeting chat: ${isMeetingConversation ? 'YES' : 'NO'}
 
 ${dateContext}
@@ -3759,16 +4949,18 @@ RESPOND WITH JSON:
           instructions: `DECISION LOGIC (follow in order):
 
 1. If user is in a meeting chat (YES above):
-   - Default to target="current" unless they explicitly name a different date
-   - Generic phrases like "summarize", "summary" refer to current session
+   - Default to target="current" unless they explicitly name a DIFFERENT meeting or date
+   - Generic phrases like "summarize", "summary", "recap" refer to current session
    
 2. If user is NOT in a meeting chat:
-   - "summarize", "the meeting", "last meeting" → target="last_meeting"
-   - With specific date ("yesterday", "March 10") → target="past_meeting" with meeting_date
+   - "summarize", "the meeting", "last meeting", "last call", "previous meeting", "what was discussed", "what happened" → target="last_meeting" with meeting_date=null
+   - ONLY set target="past_meeting" when user gives an EXPLICIT PAST date like "yesterday", "March 10", "last Friday"
 
-3. Set target="past_meeting" when user mentions a specific calendar date
+3. CRITICAL: "last meeting" / "last call" / "most recent meeting" = target="last_meeting" with meeting_date=null. Do NOT set meeting_date to today or the current time.
    
-4. Set target="specific_chat" only when user names a specific group/channel by title
+4. meeting_date must be a DATE ONLY string like "2026-03-14" — never include time components.
+
+5. Set target="specific_chat" only when user names a specific group/channel by title
 
 Output valid JSON only.`,
           model: new OpenAIChatModel({
@@ -3796,6 +4988,18 @@ Output valid JSON only.`,
         }
         
         console.log(`[SUMMARIZE] Target analysis: ${JSON.stringify(targetInfo)}`);
+        
+        // Code-level defense: if LLM returns past_meeting with today's date or no date,
+        // treat it as last_meeting (search last 7 days instead of one specific day)
+        if (targetInfo.target === 'past_meeting') {
+          const today = new Date().toISOString().split('T')[0];
+          const dateOnly = targetInfo.meeting_date?.split('T')[0];
+          if (!dateOnly || dateOnly === today) {
+            console.log(`[SUMMARIZE] Correcting past_meeting (date=${targetInfo.meeting_date}) → last_meeting`);
+            targetInfo.target = 'last_meeting';
+            targetInfo.meeting_date = null;
+          }
+        }
         
         // Handle past meeting by date - find and fetch transcript
         if (targetInfo.target === 'past_meeting' && targetInfo.meeting_date) {
@@ -3902,86 +5106,93 @@ Output valid JSON only.`,
         
         // --- LAST MEETING LOOKUP (most recent from calendar) ---
         if (targetInfo.target === 'last_meeting' || (!isMeetingConversation && targetInfo.target === 'current')) {
-          console.log(`[SUMMARIZE] Looking up most recent meeting from calendar`);
+          console.log(`[SUMMARIZE] Looking up recent meetings from calendar`);
           const userId = activity.from.aadObjectId || activity.from.id;
           
-          // Find most recent Teams meeting
-          const pastMeeting = await graphApiHelper.findPastMeeting(userId, undefined, targetInfo.meeting_subject || undefined);
+          // Find multiple recent meetings so we can try each until one has a transcript
+          const pastMeetings = await graphApiHelper.findPastMeetings(userId, undefined, targetInfo.meeting_subject || undefined, 5);
           
-          if (pastMeeting.success && pastMeeting.meeting) {
-            console.log(`[SUMMARIZE] Found most recent meeting: "${pastMeeting.meeting.subject}"`);
+          if (pastMeetings.success && pastMeetings.meetings.length > 0) {
+            let foundTranscript = false;
             
-            await send(new MessageActivity(
-              `Found your most recent meeting: "**${pastMeeting.meeting.subject}**". Generating summary...`
-            ).addAiGenerated());
-            
-            // Poll for transcript
-            const pollResult = await pollForTranscriptReady(
-              pastMeeting.meeting.organizerId,
-              pastMeeting.meeting.joinWebUrl,
-              pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
-              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
-              6, 5000
-            );
-            
-            if (pollResult.success && pollResult.vttContent) {
-              const parsed = parseVttToEntries(pollResult.vttContent);
-              if (parsed.length > 0) {
-                console.log(`[SUMMARIZE] Got ${parsed.length} transcript entries from last meeting`);
-                generatedSummary = await generateFormattedSummaryHtml(
-                  parsed,
-                  pastMeeting.meeting.subject,
-                  userName,
-                  [],
-                  pastMeeting.meeting.start,
-                  { userId: requesterId, displayName: actorName, meetingId }
-                );
-                
-                await send(new MessageActivity(generatedSummary).addAiGenerated().addFeedback());
-                
-                recordBotResponse(activity.conversation.id, {
-                  content: generatedSummary,
-                  contentType: 'summary',
-                  subject: `Meeting Summary: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
-                  timestamp: Date.now()
-                });
-                
-                // Handle email if requested
-                if (emailRequest.wantsEmail) {
-                  if (emailRequest.sendToAllAttendees) {
-                    const emailResult = await autoEmailSummaryToParticipants(
-                      activity.conversation.id,
-                      activity.from.aadObjectId || activity.from.id,
-                      `Meeting Summary: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
-                      generatedSummary
-                    );
-                    if (emailResult.sentCount > 0) {
-                      await send(new MessageActivity(`Done! I've emailed this summary to **${emailResult.sentCount} attendee(s)**.`).addAiGenerated());
-                    }
-                  } else if (emailRequest.emailAddress) {
-                    const sendResult = await graphApiHelper.sendEmail(
-                      activity.from.aadObjectId || activity.from.id,
-                      emailRequest.emailAddress,
-                      `Meeting Summary: ${pastMeeting.meeting.subject} — ${config.botDisplayName}`,
-                      generatedSummary
-                    );
-                    if (sendResult.success) {
-                      await send(new MessageActivity(`Done! I've emailed this summary to **${emailRequest.emailAddress}**.`).addAiGenerated());
+            for (const meeting of pastMeetings.meetings) {
+              console.log(`[SUMMARIZE] Trying meeting: "${meeting.subject}"`);
+              
+              const pollResult = await pollForTranscriptReady(
+                meeting.organizerId,
+                meeting.joinWebUrl,
+                meeting.start ? new Date(meeting.start).getTime() : undefined,
+                meeting.end ? new Date(meeting.end).getTime() : undefined,
+                3, // fewer retries per meeting since we're trying multiple
+                3000
+              );
+              
+              if (pollResult.success && pollResult.vttContent) {
+                const parsed = parseVttToEntries(pollResult.vttContent);
+                if (parsed.length > 0) {
+                  console.log(`[SUMMARIZE] Got ${parsed.length} transcript entries from "${meeting.subject}"`);
+                  
+                  await send(new MessageActivity(
+                    `Found transcript for "**${meeting.subject}**". Generating summary...`
+                  ).addAiGenerated());
+                  
+                  generatedSummary = await generateFormattedSummaryHtml(
+                    parsed,
+                    meeting.subject,
+                    userName,
+                    [],
+                    meeting.start,
+                    { userId: requesterId, displayName: actorName, meetingId }
+                  );
+                  
+                  await send(new MessageActivity(generatedSummary).addAiGenerated().addFeedback());
+                  
+                  recordBotResponse(activity.conversation.id, {
+                    content: generatedSummary,
+                    contentType: 'summary',
+                    subject: `Meeting Summary: ${meeting.subject} — ${config.botDisplayName}`,
+                    timestamp: Date.now()
+                  });
+                  
+                  // Handle email if requested
+                  if (emailRequest.wantsEmail) {
+                    if (emailRequest.sendToAllAttendees) {
+                      const emailResult = await autoEmailSummaryToParticipants(
+                        activity.conversation.id,
+                        activity.from.aadObjectId || activity.from.id,
+                        `Meeting Summary: ${meeting.subject} — ${config.botDisplayName}`,
+                        generatedSummary
+                      );
+                      if (emailResult.sentCount > 0) {
+                        await send(new MessageActivity(`Done! I've emailed this summary to **${emailResult.sentCount} attendee(s)**.`).addAiGenerated());
+                      }
+                    } else if (emailRequest.emailAddress) {
+                      const sendResult = await graphApiHelper.sendEmail(
+                        activity.from.aadObjectId || activity.from.id,
+                        emailRequest.emailAddress,
+                        `Meeting Summary: ${meeting.subject} — ${config.botDisplayName}`,
+                        generatedSummary
+                      );
+                      if (sendResult.success) {
+                        await send(new MessageActivity(`Done! I've emailed this summary to **${emailRequest.emailAddress}**.`).addAiGenerated());
+                      }
                     }
                   }
+                  
+                  foundTranscript = true;
+                  break;
                 }
-                
-                storage.set(conversationKey, messages);
-                storage.set(sharedConversationKey, sharedMessages);
-                storage.set(llmConversationKey, llmMessages);
-                return;
               }
+              console.log(`[SUMMARIZE] No transcript for "${meeting.subject}", trying next...`);
             }
             
-            await send(new MessageActivity(
-              `I found your recent meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
-              `${pollResult.error || 'Transcription may not have been enabled during the call.'}`
-            ).addAiGenerated().addFeedback());
+            if (!foundTranscript) {
+              console.log(`[SUMMARIZE] No transcripts found in ${pastMeetings.meetings.length} recent meetings`);
+              await send(new MessageActivity(
+                `No transcripts are available for your recent meetings. Transcription needs to be enabled during the call for me to generate a summary.`
+              ).addAiGenerated().addFeedback());
+            }
+            
             storage.set(conversationKey, messages);
             storage.set(sharedConversationKey, sharedMessages);
             storage.set(llmConversationKey, llmMessages);
@@ -3990,7 +5201,7 @@ Output valid JSON only.`,
             // Only show error if not in meeting chat (if in meeting chat, let it fall through to current conversation logic)
             await send(new MessageActivity(
               `I couldn't find any recent Teams meetings in your calendar. ` +
-              `${pastMeeting.error || 'Try specifying a date like "summarize yesterday\'s meeting".'}`
+              `${pastMeetings.error || 'Try specifying a date like "summarize yesterday\'s meeting".'}`
             ).addAiGenerated().addFeedback());
             storage.set(conversationKey, messages);
             storage.set(sharedConversationKey, sharedMessages);
@@ -4028,8 +5239,38 @@ Output valid JSON only.`,
         }
 
         // First, try to get meeting transcript for summary (only for current conversation)
-        const liveEntries = targetInfo.target === 'current' ? liveTranscriptMap.get(activity.conversation.id) : undefined;
-        const transcriptEntries = liveEntries?.filter(e => e.isFinal) || [];
+        let liveEntries = targetInfo.target === 'current' ? liveTranscriptMap.get(activity.conversation.id) : undefined;
+        let transcriptEntries = liveEntries?.filter(e => e.isFinal) || [];
+
+        // If no local entries but bot is in an active call, force-fetch transcript from onlineMeetings.
+        if (transcriptEntries.length === 0 && targetInfo.target === 'current') {
+          const activeCall = Array.from(activeCallMap.entries()).find(
+            ([_, call]) => call.conversationId === activity.conversation.id && !call.terminatedAt
+          );
+          if (activeCall) {
+            const [activeCallId] = activeCall;
+            console.log(`[SUMMARIZE] Bot in active call ${activeCallId} but no cached entries. Force-fetching from onlineMeetings transcript API...`);
+            const meetingInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
+            if (meetingInfo?.organizer?.id && meetingInfo?.joinWebUrl) {
+              const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
+              const fetchResult = await fetchTranscriptCacheFirst(
+                meetingInfo.organizer.id,
+                meetingInfo.joinWebUrl,
+                transcriptWindow.min,
+                transcriptWindow.max
+              );
+              if (fetchResult.entries.length > 0) {
+                console.log(`[SUMMARIZE] Force-fetch got ${fetchResult.entries.length} entries (fromCache=${fetchResult.fromCache})`);
+                liveTranscriptMap.set(activity.conversation.id, fetchResult.entries);
+                saveTranscriptToFile(activity.conversation.id);
+                transcriptEntries = fetchResult.entries.filter(e => e.isFinal);
+              }
+            }
+            if (transcriptEntries.length === 0) {
+              console.log(`[SUMMARIZE] Force-fetch returned no transcript data for active call ${activeCallId}`);
+            }
+          }
+        }
 
         if (transcriptEntries.length > 0) {
           console.log(`[SUMMARIZE] Found ${transcriptEntries.length} transcript entries, generating AI summary...`);
@@ -4132,20 +5373,18 @@ Output valid JSON only.`,
         // Try to fetch transcript from Graph API for past meetings
         const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
         if (chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
-          console.log(`[SUMMARIZE] Attempting to fetch transcript from Graph API`);
+          console.log(`[SUMMARIZE] Checking cache, then Graph API...`);
           const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
-          const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+          const sumFetchResult = await fetchTranscriptCacheFirst(
             chatInfo.organizer.id,
             chatInfo.joinWebUrl,
             transcriptWindow.min,
-            transcriptWindow.max,
-            activity.conversation.id // Match by conversation thread
+            transcriptWindow.max
           );
           
-          if (vttContent) {
-            const parsed = parseVttToEntries(vttContent);
-            if (parsed.length > 0) {
-              console.log(`[SUMMARIZE] Got ${parsed.length} entries from Graph transcript`);
+          if (sumFetchResult.entries.length > 0) {
+            const parsed = sumFetchResult.entries;
+              console.log(`[SUMMARIZE] Got ${parsed.length} entries (fromCache=${sumFetchResult.fromCache})`);
               liveTranscriptMap.set(activity.conversation.id, parsed);
               saveTranscriptToFile(activity.conversation.id);
               
@@ -4220,7 +5459,6 @@ Output valid JSON only.`,
               return;
             }
           }
-        }
         
         // No transcript found anywhere - generate natural response
         const noTranscriptMsg = isMeetingConversation
@@ -4254,19 +5492,16 @@ Output valid JSON only.`,
 
         // If no local transcript, fetch from Graph API
         if (finalEntries.length === 0) {
-          console.log(`[GRAPH] No local transcript, fetching from Graph API...`);
+          console.log(`[GRAPH] No local transcript, checking cache then Graph API...`);
           const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
           if (chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
-            const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+            const graphFetchResult = await fetchTranscriptCacheFirst(
               chatInfo.organizer.id,
-              chatInfo.joinWebUrl,
-              undefined,
-              undefined,
-              activity.conversation.id // Match by conversation thread
+              chatInfo.joinWebUrl
             );
-            if (vttContent) {
-              transcriptEntries = parseVttToEntries(vttContent);
-              console.log(`[GRAPH] Fetched ${transcriptEntries.length} transcript entries from Graph`);
+            if (graphFetchResult.entries.length > 0) {
+              transcriptEntries = graphFetchResult.entries;
+              console.log(`[GRAPH] Got ${transcriptEntries.length} transcript entries (fromCache=${graphFetchResult.fromCache})`);
             }
           }
         } else {
@@ -4349,6 +5584,68 @@ Output valid JSON only.`,
     if (detectedIntent === 'transcribe') {
       console.log(`[ACTION] Processing transcription request`);
       await sendTypingIndicator(send);
+      
+      // ── Reformat/Follow-up path: use cached content instead of re-fetching ────
+      const _lastTranscriptResp = lastBotResponseMap.get(activity.conversation.id);
+      const isTranscriptFollowUp = agentDecision.parameters?.isReformatRequest &&
+        _lastTranscriptResp &&
+        ['transcript', 'summary', 'minutes', 'insights', 'meeting_overview'].includes(_lastTranscriptResp.contentType) &&
+        (Date.now() - _lastTranscriptResp.timestamp) < 15 * 60 * 1000;
+      
+      if (isTranscriptFollowUp && _lastTranscriptResp?.content) {
+        console.log(`[TRANSCRIBE] Follow-up on cached ${_lastTranscriptResp.contentType}, using cached content`);
+        const formatStyle = agentDecision.parameters?.formatStyle || 'shorter';
+        const isQuestion = /\b(what did|who said|tell me|what about|more about|explain|focus|mentioned)\b/i.test(effectiveQuery || activity.text || '');
+        const rewriteInstruction = formatStyle === 'shorter'
+          ? 'Rewrite this in a natural conversational style and make it much shorter. Keep only the key points and outcomes.'
+          : formatStyle === 'longer'
+          ? 'Expand this naturally with more context and detail while staying accurate.'
+          : formatStyle === 'bullets'
+          ? 'Rewrite this as conversational bullet points grouped by topic.'
+          : 'Reformat this naturally as requested.';
+        
+        const followUpPrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content: isQuestion 
+                ? `Based on this transcript content, answer the user's question.\n\nContent:\n${_lastTranscriptResp.content}\n\nUser question: "${effectiveQuery || activity.text}"`
+                : `${rewriteInstruction}\n\n${_lastTranscriptResp.content}\n\nUser request: "${effectiveQuery || activity.text}"`
+            }
+          ],
+          instructions: isQuestion 
+            ? 'Answer based ONLY on the provided content. Do not make up information.'
+            : 'Reformat naturally and conversationally while preserving facts. Do not add information not present.',
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21'
+          })
+        });
+        
+        const followUpResult = await sendPromptWithTracking(followUpPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: _lastTranscriptResp.content,
+        });
+        
+        await send(new MessageActivity(followUpResult.content || _lastTranscriptResp.content).addAiGenerated().addFeedback());
+        if (!isQuestion) {
+          recordBotResponse(activity.conversation.id, {
+            content: followUpResult.content || _lastTranscriptResp.content,
+            contentType: _lastTranscriptResp.contentType,
+            subject: _lastTranscriptResp.subject,
+            timestamp: Date.now(),
+          });
+        }
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      }
+      
       try {
         console.log(`[TRANSCRIBE_DEBUG] Step 1-2: Processing transcript request`);
 
@@ -4356,11 +5653,12 @@ Output valid JSON only.`,
         const today = new Date();
         const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
         
+        // effectiveQuery already contains follow-up context if applicable
         const targetExtractPrompt = new ChatPrompt({
           messages: [
             {
               role: 'user',
-              content: `User message: "${cleanText || activity.text}"
+              content: `User message: "${effectiveQuery || activity.text}"
 
 Context:
 - Today: ${today.toISOString().split('T')[0]} (${today.toLocaleDateString('en-US', { weekday: 'long' })})
@@ -4377,10 +5675,11 @@ Extract what meeting the user wants transcribed:
           ],
           instructions: `DECISION LOGIC:
 1. If user is in a meeting chat and says generic "transcribe", "get transcript" → target="current"
-2. If user says "last meeting", "previous meeting", "the meeting" (NOT in meeting chat) → target="last_meeting"
-3. If user mentions a specific date like "yesterday", "last Friday", "March 10" → target="past_meeting" with the date
-4. If user mentions a meeting name/subject → include in meeting_subject
-5. If NOT in meeting chat and no date given → target="last_meeting" (find most recent)
+2. If user says "last meeting", "previous meeting", "the meeting", "last call" (NOT in meeting chat) → target="last_meeting" with meeting_date=null
+3. ONLY set target="past_meeting" when user gives an EXPLICIT PAST date like "yesterday", "last Friday", "March 10" — never use today or the current time
+4. meeting_date must be a DATE ONLY string like "2026-03-14" — never include time components
+5. If user mentions a meeting name/subject → include in meeting_subject
+6. If NOT in meeting chat and no date given → target="last_meeting" (find most recent)
 
 Output valid JSON only.`,
           model: new OpenAIChatModel({
@@ -4395,7 +5694,7 @@ Output valid JSON only.`,
           userId: requesterId,
           displayName: actorName,
           meetingId,
-          estimatedInputText: cleanText || activity.text || '',
+          estimatedInputText: effectiveQuery || activity.text || '',
         });
         const jsonStr = (targetResponse.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         let targetInfo: { target: string; meeting_date: string | null; meeting_subject: string | null } = { 
@@ -4408,6 +5707,17 @@ Output valid JSON only.`,
         }
         
         console.log(`[TRANSCRIBE] Target analysis: ${JSON.stringify(targetInfo)}`);
+
+        // Code-level defense: past_meeting with today's date → last_meeting
+        if (targetInfo.target === 'past_meeting') {
+          const today = new Date().toISOString().split('T')[0];
+          const dateOnly = targetInfo.meeting_date?.split('T')[0];
+          if (!dateOnly || dateOnly === today) {
+            console.log(`[TRANSCRIBE] Correcting past_meeting (date=${targetInfo.meeting_date}) → last_meeting`);
+            targetInfo.target = 'last_meeting';
+            targetInfo.meeting_date = null;
+          }
+        }
 
         // --- PAST MEETING LOOKUP ---
         if (targetInfo.target === 'past_meeting' && targetInfo.meeting_date) {
@@ -4474,53 +5784,58 @@ Output valid JSON only.`,
 
         // --- LAST MEETING LOOKUP (most recent from calendar) ---
         if (targetInfo.target === 'last_meeting' || (targetInfo.target === 'past_meeting' && !targetInfo.meeting_date)) {
-          console.log(`[TRANSCRIBE] Looking up most recent meeting from calendar`);
+          console.log(`[TRANSCRIBE] Looking up recent meetings from calendar`);
           const userId = activity.from.aadObjectId || activity.from.id;
           
-          // Find most recent Teams meeting (null date = search all recent)
-          const pastMeeting = await graphApiHelper.findPastMeeting(userId, undefined, targetInfo.meeting_subject || undefined);
+          const pastMeetings = await graphApiHelper.findPastMeetings(userId, undefined, targetInfo.meeting_subject || undefined, 5);
           
-          if (pastMeeting.success && pastMeeting.meeting) {
-            console.log(`[TRANSCRIBE] Found most recent meeting: "${pastMeeting.meeting.subject}"`);
+          if (pastMeetings.success && pastMeetings.meetings.length > 0) {
+            let foundTranscript = false;
             
-            await send(new MessageActivity(
-              `Found your most recent meeting: "**${pastMeeting.meeting.subject}**". Fetching transcript...`
-            ).addAiGenerated());
-            
-            // Poll for transcript
-            const pollResult = await pollForTranscriptReady(
-              pastMeeting.meeting.organizerId,
-              pastMeeting.meeting.joinWebUrl,
-              pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
-              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
-              6, 5000
-            );
-            
-            if (pollResult.success && pollResult.vttContent) {
-              const parsed = parseVttToEntries(pollResult.vttContent);
-              if (parsed.length > 0) {
-                console.log(`[TRANSCRIBE] Got ${parsed.length} transcript entries from last meeting`);
-                const displayEntries = parsed.length > 80 ? parsed.slice(-80) : parsed;
-                const transcript = await buildTranscriptHtml(
-                  displayEntries,
-                  pastMeeting.meeting.subject,
-                  [],
-                  parsed.length,
-                  parsed.length > 80,
-                  { userId: requesterId, displayName: actorName, meetingId }
-                );
-                await send(new MessageActivity(transcript).addAiGenerated().addFeedback());
-                storage.set(conversationKey, messages);
-                storage.set(sharedConversationKey, sharedMessages);
-                storage.set(llmConversationKey, llmMessages);
-                return;
+            for (const meeting of pastMeetings.meetings) {
+              console.log(`[TRANSCRIBE] Trying meeting: "${meeting.subject}"`);
+              
+              const pollResult = await pollForTranscriptReady(
+                meeting.organizerId,
+                meeting.joinWebUrl,
+                meeting.start ? new Date(meeting.start).getTime() : undefined,
+                meeting.end ? new Date(meeting.end).getTime() : undefined,
+                3, 3000
+              );
+              
+              if (pollResult.success && pollResult.vttContent) {
+                const parsed = parseVttToEntries(pollResult.vttContent);
+                if (parsed.length > 0) {
+                  console.log(`[TRANSCRIBE] Got ${parsed.length} transcript entries from "${meeting.subject}"`);
+                  
+                  await send(new MessageActivity(
+                    `Found transcript for "**${meeting.subject}**". Formatting...`
+                  ).addAiGenerated());
+                  
+                  const displayEntries = parsed.length > 80 ? parsed.slice(-80) : parsed;
+                  const transcript = await buildTranscriptHtml(
+                    displayEntries,
+                    meeting.subject,
+                    [],
+                    parsed.length,
+                    parsed.length > 80,
+                    { userId: requesterId, displayName: actorName, meetingId }
+                  );
+                  await send(new MessageActivity(transcript).addAiGenerated().addFeedback());
+                  foundTranscript = true;
+                  break;
+                }
               }
+              console.log(`[TRANSCRIBE] No transcript for "${meeting.subject}", trying next...`);
             }
             
-            await send(new MessageActivity(
-              `I found your recent meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
-              `${pollResult.error || 'Transcription may not have been enabled during the call.'}`
-            ).addAiGenerated().addFeedback());
+            if (!foundTranscript) {
+              console.log(`[TRANSCRIBE] No transcripts found in ${pastMeetings.meetings.length} recent meetings`);
+              await send(new MessageActivity(
+                `No transcripts are available for your recent meetings. Transcription needs to be enabled during the call.`
+              ).addAiGenerated().addFeedback());
+            }
+            
             storage.set(conversationKey, messages);
             storage.set(sharedConversationKey, sharedMessages);
             storage.set(llmConversationKey, llmMessages);
@@ -4528,7 +5843,7 @@ Output valid JSON only.`,
           } else {
             await send(new MessageActivity(
               `I couldn't find any recent Teams meetings in your calendar. ` +
-              `${pastMeeting.error || 'Try specifying a date like "transcribe yesterday\'s meeting".'}`
+              `${pastMeetings.error || 'Try specifying a date like "transcribe yesterday\'s meeting".'}`
             ).addAiGenerated().addFeedback());
             storage.set(conversationKey, messages);
             storage.set(sharedConversationKey, sharedMessages);
@@ -4555,33 +5870,50 @@ Output valid JSON only.`,
 
         if (!isInCall && chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
           console.log(`[TRANSCRIPT] Bot not in call - fetching from Graph API first`);
-          console.log(`[TRANSCRIBE_DEBUG] Step 6: Fetching transcript from Graph API`);
+          console.log(`[TRANSCRIBE_DEBUG] Step 6: Checking cache, then Graph API`);
 
           const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
           console.log(`[TRANSCRIBE_DEBUG] Step 7: Transcript window min=${transcriptWindow.min}, max=${transcriptWindow.max}`);
           
-          // Use fetchMeetingTranscriptText which handles ALL strategies internally:
-          // Strategy 0: RSC /chats/{chatId}/transcripts
-          // Strategy 1: /users/{organizerId}/onlineMeetings filter by joinWebUrl  
-          // Strategy 2: getAllTranscripts scan with thread matching
-          const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+          const transcribeFetchResult = await fetchTranscriptCacheFirst(
             chatInfo.organizer.id,
             chatInfo.joinWebUrl,
             transcriptWindow.min,
-            transcriptWindow.max,
-            activity.conversation.id, // Match by conversation thread
-            undefined,                // knownMeetingId
-            undefined,                // targetCallId
-            true                      // force=true to bypass cooldown
+            transcriptWindow.max
           );
-          console.log(`[TRANSCRIBE_DEBUG] Step 8: fetchMeetingTranscriptText returned ${vttContent ? vttContent.length + ' chars' : 'null'}`);
+          console.log(`[TRANSCRIBE_DEBUG] Step 8: fetchTranscriptCacheFirst returned ${transcribeFetchResult.entries.length} entries (fromCache=${transcribeFetchResult.fromCache})`);
           
-          if (vttContent) {
-            graphTranscriptParsed = parseVttToEntries(vttContent);
-            if (graphTranscriptParsed.length > 0) {
-              console.log(`[TRANSCRIPT] Graph API returned ${graphTranscriptParsed.length} entries`);
+          if (transcribeFetchResult.entries.length > 0) {
+            graphTranscriptParsed = transcribeFetchResult.entries;
+              console.log(`[TRANSCRIPT] Got ${graphTranscriptParsed.length} entries (fromCache=${transcribeFetchResult.fromCache})`);
               liveTranscriptMap.set(activity.conversation.id, graphTranscriptParsed);
               saveTranscriptToFile(activity.conversation.id);
+          }
+        } else if (isInCall) {
+          // Bot IS in the call - force-fetch transcript from onlineMeetings API.
+          const activeCall = Array.from(activeCallMap.entries()).find(
+            ([_, call]) => call.conversationId === activity.conversation.id && !call.terminatedAt
+          );
+          if (activeCall) {
+            const [activeCallId] = activeCall;
+            console.log(`[TRANSCRIBE] Bot in active call ${activeCallId}. Checking cache, then Graph...`);
+            if (chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
+              const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
+              const activeCallFetch = await fetchTranscriptCacheFirst(
+                chatInfo.organizer.id,
+                chatInfo.joinWebUrl,
+                transcriptWindow.min,
+                transcriptWindow.max
+              );
+              if (activeCallFetch.entries.length > 0) {
+                graphTranscriptParsed = activeCallFetch.entries;
+                  console.log(`[TRANSCRIBE] Got ${graphTranscriptParsed.length} entries from active call (fromCache=${activeCallFetch.fromCache})`);
+                  liveTranscriptMap.set(activity.conversation.id, graphTranscriptParsed);
+                  saveTranscriptToFile(activity.conversation.id);
+              }
+            }
+            if (!graphTranscriptParsed || graphTranscriptParsed.length === 0) {
+              console.log(`[TRANSCRIBE] Force-fetch returned no transcript data for active call ${activeCallId}`);
             }
           }
         }
@@ -4592,7 +5924,7 @@ Output valid JSON only.`,
 
         if (graphTranscriptParsed && graphTranscriptParsed.length > 0) {
           finalEntries = graphTranscriptParsed.filter(e => e.isFinal);
-          dataSource = 'Graph API (post-meeting)';
+          dataSource = isInCall ? 'Graph API (live call force-fetch)' : 'Graph API (post-meeting)';
         } else {
           // Fallback to in-memory live transcript
           const liveEntries = liveTranscriptMap.get(activity.conversation.id);
@@ -4622,16 +5954,14 @@ Output valid JSON only.`,
             const meetingOnlineInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
             if (meetingOnlineInfo?.organizer?.id && meetingOnlineInfo?.joinWebUrl) {
               const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
-              const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+              const fallbackFetch = await fetchTranscriptCacheFirst(
                 meetingOnlineInfo.organizer.id,
                 meetingOnlineInfo.joinWebUrl,
                 transcriptWindow.min,
-                transcriptWindow.max,
-                activity.conversation.id // Match by conversation thread
+                transcriptWindow.max
               );
-              if (vttContent) {
-                const parsed = parseVttToEntries(vttContent);
-                if (parsed.length > 0) {
+              if (fallbackFetch.entries.length > 0) {
+                const parsed = fallbackFetch.entries;
                   liveTranscriptMap.set(activity.conversation.id, parsed);
                   saveTranscriptToFile(activity.conversation.id);
 
@@ -4646,12 +5976,6 @@ Output valid JSON only.`,
                   const responseActivity = new MessageActivity(transcript).addAiGenerated().addFeedback();
                   await send(responseActivity);
                   console.log(`[SUCCESS] Graph transcript fetched and sent (${parsed.length} entries)`);
-                } else {
-                  const responseActivity = new MessageActivity(
-                    `I found transcript data but couldn't parse it yet. Teams might still be processing it — try again in a minute.`
-                  ).addAiGenerated();
-                  await send(responseActivity);
-                }
               } else {
                 // Check if the bot ever joined this meeting's call
                 const cachedCtx = getCachedMeetingContext(activity.conversation.id);
@@ -4727,12 +6051,7 @@ Output valid JSON only.`,
     }
 
     // Handle key meeting insights (cache-first transcript retrieval)
-    if (
-      detectedIntent === 'insights' ||
-      userMessage.includes('key meeting insight') ||
-      userMessage.includes('key meeting insights') ||
-      userMessage.includes('meeting insight')
-    ) {
+    if (detectedIntent === 'insights') {
       console.log(`[ACTION] Processing key meeting insights request`);
       await sendTypingIndicator(send);
       try {
@@ -4794,8 +6113,62 @@ Output valid JSON only.`,
       console.log(`[ACTION] Processing meeting minutes request`);
       await sendTypingIndicator(send);
       
+      // ── Reformat/Follow-up path: use cached content instead of re-fetching ────
+      const _lastMinutesResp = lastBotResponseMap.get(activity.conversation.id);
+      const isMinutesFollowUp = agentDecision.parameters?.isReformatRequest &&
+        _lastMinutesResp &&
+        ['minutes', 'summary', 'transcript', 'insights', 'meeting_overview'].includes(_lastMinutesResp.contentType) &&
+        (Date.now() - _lastMinutesResp.timestamp) < 15 * 60 * 1000;
+      
+      if (isMinutesFollowUp && _lastMinutesResp?.content) {
+        console.log(`[MINUTES] Follow-up on cached ${_lastMinutesResp.contentType}, using cached content`);
+        const formatStyle = agentDecision.parameters?.formatStyle || 'shorter';
+        const isQuestion = /\b(what did|who said|tell me|what about|more about|explain|focus|mentioned|action items?|decisions?)\b/i.test(effectiveQuery || activity.text || '');
+        
+        const followUpPrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content: isQuestion 
+                ? `Based on this meeting content, answer the user's question.\n\nContent:\n${_lastMinutesResp.content}\n\nUser question: "${effectiveQuery || activity.text}"`
+                : `${formatStyle === 'shorter' ? 'Make this MUCH shorter - key points only' : formatStyle === 'longer' ? 'Expand with more details' : formatStyle === 'bullets' ? 'Format as bullet points' : 'Reformat as requested'}:\n\n${_lastMinutesResp.content}\n\nUser request: "${effectiveQuery || activity.text}"`
+            }
+          ],
+          instructions: isQuestion 
+            ? 'Answer based ONLY on the provided content. Do not make up information.'
+            : 'Reformat the content precisely as instructed. Do not add information not present.',
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21'
+          })
+        });
+        
+        const followUpResult = await sendPromptWithTracking(followUpPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: _lastMinutesResp.content,
+        });
+        
+        await send(new MessageActivity(followUpResult.content || _lastMinutesResp.content).addAiGenerated().addFeedback());
+        if (!isQuestion) {
+          recordBotResponse(activity.conversation.id, {
+            content: followUpResult.content || _lastMinutesResp.content,
+            contentType: _lastMinutesResp.contentType,
+            subject: _lastMinutesResp.subject,
+            timestamp: Date.now(),
+          });
+        }
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      }
+      
       // Check if user also wants to email the result
-      const emailRequest = detectEmailRequest(cleanText || activity.text || '');
+      const emailRequest = detectEmailRequest(effectiveQuery || activity.text || '');
       let generatedMinutes = '';
       
       try {
@@ -4811,21 +6184,22 @@ Output valid JSON only.`,
 Yesterday: ${yesterday.toISOString().split('T')[0]} (${yesterday.toLocaleDateString('en-US', { weekday: 'long' })})
 Last week: ${lastWeekStart.toISOString().split('T')[0]} to ${today.toISOString().split('T')[0]}`;
 
+        // effectiveQuery already contains follow-up context if applicable
         const targetExtractPrompt = new ChatPrompt({
           messages: [
             {
               role: 'user',
               content: `Determine what meeting the user wants minutes for.
 
-User request: "${cleanText || activity.text}"
+User request: "${effectiveQuery || activity.text}"
 User is currently in a meeting chat: ${isMeetingConversation ? 'YES' : 'NO'}
 
 ${dateContext}
 
 RESPOND WITH JSON:
 {
-  "target": "current" | "past_meeting",
-  "meeting_date": "ISO date if explicit date mentioned, else null",
+  "target": "current" | "past_meeting" | "last_meeting",
+  "meeting_date": "YYYY-MM-DD if explicit date mentioned, else null",
   "meeting_subject": "title if mentioned, else null"
 }`
             }
@@ -4836,11 +6210,13 @@ RESPOND WITH JSON:
    - Default to target="current" unless they explicitly name a different date
    - Generic phrases all mean the current session
    
-2. Only set target="past_meeting" when BOTH conditions are met:
-   - User explicitly mentions a calendar date ("yesterday", "March 10", "last Tuesday")
-   - The date is clearly in the past, not referring to today's session
+2. If user is NOT in a meeting chat:
+   - "minutes", "last meeting minutes", "meeting notes" → target="last_meeting" with meeting_date=null
+   - Only set target="past_meeting" when user gives an EXPLICIT PAST date ("yesterday", "March 10", "last Tuesday")
 
-3. When in doubt: target="current"
+3. CRITICAL: "last meeting" / "most recent meeting" = target="last_meeting" with meeting_date=null. Do NOT set meeting_date to today or a timestamp.
+
+4. meeting_date must be DATE ONLY like "2026-03-14" — never include time components.
 
 Output valid JSON only.`,
           model: new OpenAIChatModel({
@@ -4868,6 +6244,17 @@ Output valid JSON only.`,
         }
 
         console.log(`[MINUTES] Target analysis: ${JSON.stringify(targetInfo)}`);
+
+        // Code-level defense: past_meeting with today's date → last_meeting
+        if (targetInfo.target === 'past_meeting') {
+          const today = new Date().toISOString().split('T')[0];
+          const dateOnly = targetInfo.meeting_date?.split('T')[0];
+          if (!dateOnly || dateOnly === today) {
+            console.log(`[MINUTES] Correcting past_meeting (date=${targetInfo.meeting_date}) → last_meeting`);
+            targetInfo.target = 'last_meeting';
+            targetInfo.meeting_date = null;
+          }
+        }
 
         // Handle past meeting request by date
         if (targetInfo.target === 'past_meeting' && targetInfo.meeting_date) {
@@ -4968,6 +6355,106 @@ Output valid JSON only.`,
           return;
         }
 
+        // --- LAST MEETING LOOKUP (most recent from calendar) ---
+        if (targetInfo.target === 'last_meeting' || (!isMeetingConversation && targetInfo.target === 'current')) {
+          console.log(`[MINUTES] Looking up recent meetings from calendar`);
+          const userId = activity.from.aadObjectId || activity.from.id;
+          const pastMeetings = await graphApiHelper.findPastMeetings(userId, undefined, targetInfo.meeting_subject || undefined, 5);
+          
+          if (pastMeetings.success && pastMeetings.meetings.length > 0) {
+            let foundTranscript = false;
+            
+            for (const meeting of pastMeetings.meetings) {
+              console.log(`[MINUTES] Trying meeting: "${meeting.subject}"`);
+              
+              const pollResult = await pollForTranscriptReady(
+                meeting.organizerId,
+                meeting.joinWebUrl,
+                meeting.start ? new Date(meeting.start).getTime() : undefined,
+                meeting.end ? new Date(meeting.end).getTime() : undefined,
+                3, 3000
+              );
+              
+              if (pollResult.success && pollResult.vttContent) {
+                const parsed = parseVttToEntries(pollResult.vttContent);
+                if (parsed.length > 0) {
+                  console.log(`[MINUTES] Got ${parsed.length} transcript entries from "${meeting.subject}"`);
+                  
+                  await send(new MessageActivity(
+                    `Found transcript for "**${meeting.subject}**". Generating minutes...`
+                  ).addAiGenerated());
+                  
+                  generatedMinutes = await generateMinutesHtml(
+                    parsed,
+                    meeting.subject,
+                    [],
+                    meeting.start,
+                    { userId: requesterId, displayName: actorName, meetingId }
+                  );
+                  
+                  await send(new MessageActivity(generatedMinutes).addAiGenerated().addFeedback());
+                  
+                  recordBotResponse(activity.conversation.id, {
+                    content: generatedMinutes,
+                    contentType: 'minutes',
+                    subject: `Meeting Minutes: ${meeting.subject} — ${config.botDisplayName}`,
+                    timestamp: Date.now()
+                  });
+                  
+                  if (emailRequest.wantsEmail) {
+                    if (emailRequest.sendToAllAttendees) {
+                      const emailResult = await autoEmailSummaryToParticipants(
+                        activity.conversation.id,
+                        activity.from.aadObjectId || activity.from.id,
+                        `Meeting Minutes: ${meeting.subject} — ${config.botDisplayName}`,
+                        generatedMinutes
+                      );
+                      if (emailResult.sentCount > 0) {
+                        await send(new MessageActivity(`Done! I've emailed these minutes to **${emailResult.sentCount} attendee(s)**.`).addAiGenerated());
+                      }
+                    } else if (emailRequest.emailAddress) {
+                      const sendResult = await graphApiHelper.sendEmail(
+                        activity.from.aadObjectId || activity.from.id,
+                        emailRequest.emailAddress,
+                        `Meeting Minutes: ${meeting.subject} — ${config.botDisplayName}`,
+                        generatedMinutes
+                      );
+                      if (sendResult.success) {
+                        await send(new MessageActivity(`Done! I've emailed these minutes to **${emailRequest.emailAddress}**.`).addAiGenerated());
+                      }
+                    }
+                  }
+                  
+                  foundTranscript = true;
+                  break;
+                }
+              }
+              console.log(`[MINUTES] No transcript for "${meeting.subject}", trying next...`);
+            }
+            
+            if (!foundTranscript) {
+              console.log(`[MINUTES] No transcripts found in ${pastMeetings.meetings.length} recent meetings`);
+              await send(new MessageActivity(
+                `No transcripts are available for your recent meetings. Transcription needs to be enabled during the call for me to generate minutes.`
+              ).addAiGenerated().addFeedback());
+            }
+            
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          } else if (!isMeetingConversation) {
+            await send(new MessageActivity(
+              `I couldn't find any recent Teams meetings in your calendar. ` +
+              `${pastMeetings.error || 'Try specifying a date like "minutes from yesterday\'s meeting".'}`
+            ).addAiGenerated().addFeedback());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          }
+        }
+
         // First, try to get meeting transcript for minutes
         const liveEntries = liveTranscriptMap.get(activity.conversation.id);
         const transcriptEntries = liveEntries?.filter(e => e.isFinal) || [];
@@ -4993,23 +6480,21 @@ Output valid JSON only.`,
           console.log(`[SUCCESS] Transcript-based minutes sent to user`);
         } else {
           // No local transcript - try to fetch from Graph API
-          console.log(`[MINUTES] No local transcript, trying Graph API...`);
+          console.log(`[MINUTES] No local transcript, checking cache then Graph API...`);
           const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
           
           if (chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
             const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
-            const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
+            const minutesFetch = await fetchTranscriptCacheFirst(
               chatInfo.organizer.id,
               chatInfo.joinWebUrl,
               transcriptWindow.min,
-              transcriptWindow.max,
-              activity.conversation.id // Match by conversation thread
+              transcriptWindow.max
             );
             
-            if (vttContent) {
-              const parsed = parseVttToEntries(vttContent);
-              if (parsed.length > 0) {
-                console.log(`[MINUTES] Got ${parsed.length} entries from Graph transcript`);
+            if (minutesFetch.entries.length > 0) {
+              const parsed = minutesFetch.entries;
+                console.log(`[MINUTES] Got ${parsed.length} entries (fromCache=${minutesFetch.fromCache})`);
                 liveTranscriptMap.set(activity.conversation.id, parsed);
                 saveTranscriptToFile(activity.conversation.id);
                 
@@ -5077,7 +6562,6 @@ Output valid JSON only.`,
                 return;
               }
             }
-          }
           
           // No transcript found - generate natural response
           const noTranscriptMsg = isMeetingConversation
@@ -5151,30 +6635,192 @@ Output valid JSON only.`,
       return;
     }
 
-    if (detectedIntent === 'meeting_question' && isMeetingConversation) {
-      console.log(`[ACTION] Processing meeting question with merged context`);
+    if (detectedIntent === 'meeting_question') {
+      console.log(`[ACTION] Processing meeting question`);
       await sendTypingIndicator(send);
+      
+      // First check if we have cached meeting content to answer from (avoids Graph calls)
+      const _cachedMeetingContent = lastBotResponseMap.get(activity.conversation.id);
+      const hasCachedMeetingContent = _cachedMeetingContent &&
+        ['summary', 'minutes', 'transcript', 'insights', 'meeting_overview'].includes(_cachedMeetingContent.contentType) &&
+        (Date.now() - _cachedMeetingContent.timestamp) < 30 * 60 * 1000 && // Within 30 minutes
+        _cachedMeetingContent.content;
+      
+      if (hasCachedMeetingContent) {
+        // Answer from cached content - no Graph API call needed
+        console.log(`[MEETING_QA] Answering from cached ${_cachedMeetingContent.contentType} content`);
+        const answerPrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content: `Based on this meeting content, answer the user's question.
+
+Meeting content (${_cachedMeetingContent.contentType}):
+${_cachedMeetingContent.content}
+
+User question: "${effectiveQuery || activity.text}"`
+            }
+          ],
+          instructions: `Answer based ONLY on the provided meeting content. If the information is not present, say so clearly. Be concise and direct.`,
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21'
+          })
+        });
+        
+        const answer = await sendPromptWithTracking(answerPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: _cachedMeetingContent.content,
+        });
+        
+        await send(new MessageActivity(answer.content || "I couldn't find that information in the meeting content.").addAiGenerated().addFeedback());
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      }
+      
+      // If in a meeting conversation, use the existing meeting context
+      if (isMeetingConversation) {
       try {
         const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
         const meetingTitle = chatInfo?.subject || 'Meeting';
 
-        const shared = storage.get(sharedConversationKey) || [];
-        const conversationContext = buildConversationContext(shared, 120);
-        const transcriptContext = await getTranscriptTextForConversation(activity.conversation.id);
+        const transcriptResult = await getTranscriptWithContext(activity.conversation.id);
+        const transcriptContext = transcriptResult.text;
+        const hasTranscript = transcriptContext && transcriptContext.trim().length > 50;
 
-        const answer = await answerMeetingQuestionWithContext(
-          cleanText || activity.text || '',
-          meetingTitle,
-          conversationContext,
-          transcriptContext,
-          { userId: requesterId, displayName: actorName, meetingId }
-        );
+        // If the bot is in an active call but has no transcript captured yet,
+        // don't mislead the user by answering from chat messages. Be clear.
+        const isInActiveCall = hasActiveLiveTranscript(activity.conversation.id) ||
+          Array.from(activeCallMap.values()).some(c => c.conversationId === activity.conversation.id);
 
-        await send(new MessageActivity(answer).addAiGenerated().addFeedback());
-        console.log(`[SUCCESS] Meeting question answered with conversation + transcript context`);
+        if (!hasTranscript && isInActiveCall) {
+          console.log(`[MEETING_QA] Active call but no transcript data captured yet`);
+          const answer =
+            `I'm in the meeting but don't have any spoken-word transcript data yet.\n\n` +
+            `**Why?** The Microsoft Graph API only makes transcript content available after transcription is stopped or the meeting ends. ` +
+            `During an active call, I can detect that transcription is on, but I can't access the live transcript text in real time.\n\n` +
+            `**What you can do:**\n` +
+            `- **Stop transcription** briefly (click ••• → Record & Transcribe → Stop transcription), then **restart** it. ` +
+            `The stopped segment's transcript will become available and I can pull it.\n` +
+            `- **After the meeting ends**, ask me to **transcribe** or **summarize** — the full transcript will be available then.\n` +
+            `- You can also ask me to **read chats** to see what was typed in the meeting chat.`;
+          await send(new MessageActivity(answer).addAiGenerated().addFeedback());
+          console.log(`[SUCCESS] Informed user about live transcript limitation`);
+        } else {
+          const shared = storage.get(sharedConversationKey) || [];
+          const conversationContext = buildConversationContext(shared, 120);
+
+          // effectiveQuery already contains follow-up context if applicable
+          const answer = await answerMeetingQuestionWithContext(
+            effectiveQuery || activity.text || '',
+            meetingTitle,
+            conversationContext,
+            transcriptContext,
+            { userId: requesterId, displayName: actorName, meetingId }
+          );
+
+          await send(new MessageActivity(answer).addAiGenerated().addFeedback());
+          console.log(`[SUCCESS] Meeting question answered with conversation + transcript context`);
+        }
       } catch (error) {
         console.error(`[ERROR_MEETING_QA]`, error);
         await send(new MessageActivity('I encountered an error while answering based on meeting context. Please try again.').addAiGenerated());
+      }
+      } else {
+        // 1:1 chat - try to fetch user's most recent meeting transcript
+        console.log(`[MEETING_QA] 1:1 chat - looking up user's most recent meeting`);
+        const userId = activity.from.aadObjectId || activity.from.id;
+        
+        const pastMeetings = await graphApiHelper.findPastMeetings(userId, undefined, undefined, 3);
+        
+        if (pastMeetings.success && pastMeetings.meetings.length > 0) {
+          let foundTranscript = false;
+          
+          for (const meeting of pastMeetings.meetings) {
+            const pollResult = await pollForTranscriptReady(
+              meeting.organizerId,
+              meeting.joinWebUrl,
+              meeting.start ? new Date(meeting.start).getTime() : undefined,
+              meeting.end ? new Date(meeting.end).getTime() : undefined,
+              2, // quick check
+              2000
+            );
+            
+            if (pollResult.success && pollResult.vttContent) {
+              const parsed = parseVttToEntries(pollResult.vttContent);
+              if (parsed.length > 0) {
+                console.log(`[MEETING_QA] Found transcript for "${meeting.subject}", answering question`);
+                const transcriptText = parsed.map(e => `${e.speaker}: ${e.text}`).join('\n');
+                
+                const answerPrompt = new ChatPrompt({
+                  messages: [
+                    {
+                      role: 'user',
+                      content: `Based on this meeting transcript from "${meeting.subject}", answer the user's question.
+
+Transcript:
+${transcriptText.slice(0, 15000)}
+
+User question: "${effectiveQuery || activity.text}"
+
+Instructions:
+- Synthesize and paraphrase — do NOT copy-paste raw transcript lines or dump verbatim quotes with timestamps
+- Tell the story naturally, as a knowledgeable colleague would explain it
+- Only reference timestamps if the user specifically asks about timing
+- Weave in short key phrases or quotes only when they add flavor, not entire paragraphs
+- Keep it focused and readable — a few well-written paragraphs, not a wall of bullet points
+- If unsure the transcript fully answers the question, mention that briefly at the end`
+                    }
+                  ],
+                  instructions: `You are a friendly meeting assistant. Answer based ONLY on the provided transcript. Be smart about what matters — read the raw transcript, understand it, and give a clear, natural answer. Do NOT dump raw lines with timestamps. Paraphrase and synthesize. Mention the meeting title naturally.`,
+                  model: new OpenAIChatModel({
+                    model: config.azureOpenAIDeploymentName,
+                    apiKey: config.azureOpenAIKey,
+                    endpoint: config.azureOpenAIEndpoint,
+                    apiVersion: '2024-10-21'
+                  })
+                });
+                
+                const answer = await sendPromptWithTracking(answerPrompt, '', {
+                  userId: requesterId,
+                  displayName: actorName,
+                  meetingId,
+                  estimatedInputText: transcriptText.slice(0, 15000),
+                });
+                
+                await send(new MessageActivity(answer.content || "I couldn't find that information in the meeting transcript.").addAiGenerated().addFeedback());
+                
+                // Cache for follow-up questions
+                recordBotResponse(activity.conversation.id, {
+                  content: transcriptText.slice(0, 20000),
+                  contentType: 'transcript',
+                  subject: meeting.subject,
+                  timestamp: Date.now(),
+                });
+                
+                foundTranscript = true;
+                break;
+              }
+            }
+          }
+          
+          if (!foundTranscript) {
+            await send(new MessageActivity(
+              `I couldn't find any transcripts for your recent meetings. To answer questions about a meeting, I need the transcript to be available.\n\n` +
+              `**Tip:** Ask me to **summarize** your last meeting first, then follow up with questions.`
+            ).addAiGenerated().addFeedback());
+          }
+        } else {
+          await send(new MessageActivity(
+            `I couldn't find any recent meetings on your calendar. Ask me about a specific meeting or try summarizing your last meeting first.`
+          ).addAiGenerated().addFeedback());
+        }
       }
 
       storage.set(conversationKey, messages);
@@ -5184,51 +6830,42 @@ Output valid JSON only.`,
     }
 
     if (detectedIntent === 'check_inbox' || detectedIntent === 'reply_email') {
+      // ── Guard: if bot just showed a reply draft and user is confirming send,
+      // redirect to send_email logic which handles in-thread replies properly.
+      const _lastResp = lastBotResponseMap.get(activity.conversation.id);
+      const isDraftConfirmation =
+        _lastResp &&
+        (Date.now() - _lastResp.timestamp) < 10 * 60 * 1000 &&
+        (_lastResp.subject || '').toLowerCase().startsWith('email reply draft') &&
+        /^(yes|yeah|yep|sure|ok|okay|go ahead|send|send it|send that|yes send|do it)[\s!.,]*$/i.test((cleanText || '').trim());
+      if (isDraftConfirmation) {
+        console.log(`[INBOX→SEND] User confirming draft send, redirecting to send_email handler`);
+        // Fall through to send_email handler below by NOT entering this block
+      } else {
       console.log(`[ACTION] Processing inbox capability request`);
       await sendTypingIndicator(send);
 
       try {
-        const inboxRequest = parseInboxRequest(cleanText || activity.text || '');
+        const inboxRequest = parseInboxRequest(effectiveQuery || activity.text || '');
+        console.log(`[INBOX] Request: reply=${inboxRequest.wantsReplyDraft}, max=${inboxRequest.maxResults}`);
+        
         const mailboxUserId = activity.from.aadObjectId || activity.from.id;
         const cachedInboxCtx = inboxContextMap.get(activity.conversation.id);
 
         // ── Fast path: reply_email with a cached matched message ─────────────────
-        // When the user says "respond to him" / "reply to her" without a new sender
-        // query, skip re-fetching the inbox and reply against the exact message we
-        // already showed them.  This prevents a rescored inbox fetch from picking a
-        // different message (e.g. a calendar cancellation) instead of the intended one.
         if (
           detectedIntent === 'reply_email' &&
-          !inboxRequest.senderQuery &&
           cachedInboxCtx?.lastMessages?.length
         ) {
-          // Try to extract a sender reference from the user's message against cached contacts
-          let targetMsg: MailMessageSummary | undefined;
-          const userLower = (cleanText || '').toLowerCase();
-          for (const contact of cachedInboxCtx.contacts || []) {
-            const firstName = contact.displayName.split(' ')[0].toLowerCase();
-            const fullName = contact.displayName.toLowerCase();
-            if (userLower.includes(firstName) || userLower.includes(fullName)) {
-              targetMsg = cachedInboxCtx.lastMessages.find(
-                (m) => (m.fromName || '').toLowerCase().includes(firstName)
-              );
-              if (targetMsg) {
-                console.log(`[INBOX] Fast-path: resolved sender '${contact.displayName}' from user message`);
-                break;
-              }
-            }
-          }
-          // Fall back to the stored lastMatchedMessageId
-          if (!targetMsg && cachedInboxCtx.lastMatchedMessageId) {
-            targetMsg = cachedInboxCtx.lastMessages.find((m) => m.id === cachedInboxCtx.lastMatchedMessageId)
-              || cachedInboxCtx.lastMessages[0];
-            console.log(`[INBOX] Fast-path: using cached matched message ${cachedInboxCtx.lastMatchedMessageId} from ${cachedInboxCtx.lastMatchedSenderName}`);
-          }
-          // Last resort: most recent cached message
-          if (!targetMsg) {
-            targetMsg = cachedInboxCtx.lastMessages[0];
-          }
-
+          // Use LLM to find the right message from cache
+          const searchResult = await llmSearchInbox(
+            effectiveQuery || activity.text || '',
+            cachedInboxCtx.lastMessages,
+            sendPromptWithTracking,
+            { userId: requesterId, displayName: actorName, meetingId, estimatedInputText: effectiveQuery || '' }
+          );
+          
+          const targetMsg = searchResult.matchingMessages[0] || cachedInboxCtx.lastMessages[0];
           if (targetMsg && cachedInboxCtx.mailboxUserId) {
             rememberMatchedInboxThread(activity.conversation.id, mailboxUserId, targetMsg);
             const threadMessages = targetMsg.conversationId
@@ -5259,48 +6896,132 @@ Output valid JSON only.`,
             return;
           }
         }
-        // ── Normal path: fetch inbox ──────────────────────────────────────────────
-        const effectiveSenderQuery = inboxRequest.senderQuery ||
-          (detectedIntent === 'reply_email' && cachedInboxCtx?.lastMatchedSenderName
-            ? cachedInboxCtx.lastMatchedSenderName
-            : undefined);
-        const inboxMessages = await graphApiHelper.getInboxMessages(mailboxUserId, {
-          senderQuery: effectiveSenderQuery,
-          top: Math.max(inboxRequest.maxResults * 2, 8),
-          unreadOnly: inboxRequest.wantsUnreadOnly,
-        });
 
-        const scoreInboxPriority = (message: { importance: string; isRead: boolean; flagged?: boolean; receivedDateTime: string }) => {
-          const recencyBonus = message.receivedDateTime
-            ? Math.max(0, 2 - Math.floor((Date.now() - new Date(message.receivedDateTime).getTime()) / (1000 * 60 * 60 * 12)))
-            : 0;
-          return (message.importance === 'high' ? 3 : 0) + (message.flagged ? 2 : 0) + (!message.isRead ? 1 : 0) + recencyBonus;
-        };
-
-        const prioritizedMessages = [...inboxMessages].sort((left, right) => {
-          const diff = scoreInboxPriority(right) - scoreInboxPriority(left);
-          if (diff !== 0) return diff;
-          // Tiebreak: more recent wins
-          return new Date(right.receivedDateTime).getTime() - new Date(left.receivedDateTime).getTime();
-        });
-        const relevantMessages = inboxRequest.wantsUrgentOnly
-          ? prioritizedMessages.filter((message) => scoreInboxPriority(message) >= 3).slice(0, inboxRequest.maxResults)
-          : prioritizedMessages.slice(0, inboxRequest.maxResults);
-
-        // Cache all fetched messages and the best match for future follow-ups
-        cacheInboxContext(activity.conversation.id, relevantMessages.length ? relevantMessages : prioritizedMessages.slice(0, inboxRequest.maxResults));
-        if (relevantMessages.length > 0) {
-          rememberMatchedInboxThread(activity.conversation.id, mailboxUserId, relevantMessages[0]);
+        // ── Reformat path: user wants to reformat last inbox content ────────────
+        if (agentDecision.parameters?.isReformatRequest && cachedInboxCtx?.lastMessages?.length) {
+          console.log(`[INBOX] Reformat request with formatStyle=${agentDecision.parameters.formatStyle}`);
+          const formatInstruction = agentDecision.parameters.formatStyle === 'shorter' 
+            ? 'Make this MUCH shorter - 2 paragraphs maximum'
+            : agentDecision.parameters.formatStyle === 'longer'
+            ? 'Provide more details and expand on key points'
+            : agentDecision.parameters.formatStyle === 'bullets'
+            ? 'Format as clear bullet points'
+            : 'Reformat this content';
+          
+          const reformatQuery = `${formatInstruction}. Original request: ${effectiveQuery}`;
+          const reformattedSummary = await summarizeInboxMessages(
+            reformatQuery,
+            cachedInboxCtx.lastMessages,
+            sendPromptWithTracking,
+            {
+              userId: requesterId,
+              displayName: actorName,
+              meetingId,
+              estimatedInputText: `${reformatQuery}\n${JSON.stringify(cachedInboxCtx.lastMessages)}`,
+            }
+          );
+          await send(new MessageActivity(reformattedSummary).addAiGenerated().addFeedback());
+          recordBotResponse(activity.conversation.id, {
+            content: reformattedSummary,
+            contentType: 'inbox_email',
+            subject: `Inbox Summary from ${config.botDisplayName}`,
+            timestamp: Date.now(),
+          });
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
         }
 
-        if (!relevantMessages.length) {
-          const senderFilterNote = effectiveSenderQuery ? ` from **${effectiveSenderQuery}**` : '';
-          const guidance = inboxMessages.length > 0
-            ? `I can read your inbox, but I didn't find matching messages${senderFilterNote} in the messages I checked. Try a broader query like "show emails from Leonard".`
-            : `I couldn't find matching inbox messages${senderFilterNote}. If you expected results, make sure the app has Microsoft Graph mail read permissions such as **Mail.Read** and admin consent for the mailbox.`;
-          await send(new MessageActivity(
-            guidance
-          ).addAiGenerated().addFeedback());
+        // ── Follow-up question path: answer questions about cached email content ────
+        const isFollowUpQuestion = cachedInboxCtx?.lastMessages?.length &&
+          cachedInboxCtx.updatedAt > Date.now() - 10 * 60 * 1000 &&
+          /\b(what did|who said|tell me|what about|more about|explain|details|focus|priority|mentioned)\b/i.test(effectiveQuery || '');
+        
+        if (isFollowUpQuestion) {
+          console.log(`[INBOX] Follow-up question about cached email content`);
+          const emailContext = cachedInboxCtx.lastMessages.map(m => ({
+            from: m.fromName || m.fromAddress,
+            subject: m.subject,
+            date: m.receivedDateTime,
+            body: m.bodyContent || m.bodyPreview || '',
+          }));
+
+          const answerPrompt = new ChatPrompt({
+            messages: [
+              {
+                role: 'user',
+                content:
+                  `User question: "${effectiveQuery}"\n\n` +
+                  `Email content shown earlier:\n${JSON.stringify(emailContext, null, 2)}\n\n` +
+                  `Instructions:\n` +
+                  `- Answer the user's question ONLY using information from the email content above\n` +
+                  `- If the information is not in the email, say "I don't see that information in the email that was shown"\n` +
+                  `- Be concise and direct\n` +
+                  `- Use markdown formatting\n` +
+                  `- NEVER make up or hallucinate information not present in the emails`,
+              },
+            ],
+            instructions: 'Answer strictly from the provided email content. Never hallucinate.',
+            model: new OpenAIChatModel({
+              model: config.azureOpenAIDeploymentName,
+              apiKey: config.azureOpenAIKey,
+              endpoint: config.azureOpenAIEndpoint,
+              apiVersion: '2024-10-21',
+            }),
+          });
+
+          const answerResponse = await sendPromptWithTracking(answerPrompt, '', {
+            userId: requesterId,
+            displayName: actorName,
+            meetingId,
+            estimatedInputText: `${effectiveQuery}\n${JSON.stringify(emailContext)}`,
+          });
+
+          await send(new MessageActivity(answerResponse.content || 'I couldn\'t find that information in the email shown.').addAiGenerated().addFeedback());
+          recordBotResponse(activity.conversation.id, {
+            content: answerResponse.content || '',
+            contentType: 'inbox_email',
+            subject: `Follow-up Answer from ${config.botDisplayName}`,
+            timestamp: Date.now(),
+          });
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+
+        // ── Normal path: fetch ALL inbox messages, let LLM find relevant ones ────
+        const allInboxMessages = await graphApiHelper.getInboxMessages(mailboxUserId, {
+          top: 20, // Fetch more messages for LLM to search through
+        });
+        console.log(`[INBOX] Fetched ${allInboxMessages.length} total messages`);
+
+        if (!allInboxMessages.length) {
+          await send(new MessageActivity('Your inbox appears to be empty.').addAiGenerated().addFeedback());
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+
+        // Use LLM to find messages matching the user's query
+        const searchResult = await llmSearchInbox(
+          effectiveQuery || activity.text || '',
+          allInboxMessages,
+          sendPromptWithTracking,
+          { userId: requesterId, displayName: actorName, meetingId, estimatedInputText: effectiveQuery || '' }
+        );
+        console.log(`[INBOX] LLM search found ${searchResult.matchingMessages.length} matches: ${searchResult.searchReasoning}`);
+
+        // Cache results for follow-ups
+        cacheInboxContext(activity.conversation.id, searchResult.matchingMessages.length ? searchResult.matchingMessages : allInboxMessages.slice(0, 5));
+        if (searchResult.matchingMessages.length > 0) {
+          rememberMatchedInboxThread(activity.conversation.id, mailboxUserId, searchResult.matchingMessages[0]);
+        }
+
+        if (!searchResult.matchingMessages.length) {
+          await send(new MessageActivity(searchResult.noMatchReason || 'No matching emails found.').addAiGenerated().addFeedback());
           storage.set(conversationKey, messages);
           storage.set(sharedConversationKey, sharedMessages);
           storage.set(llmConversationKey, llmMessages);
@@ -5308,7 +7029,7 @@ Output valid JSON only.`,
         }
 
         if (detectedIntent === 'reply_email' || inboxRequest.wantsReplyDraft) {
-          const primaryMessage = relevantMessages[0];
+          const primaryMessage = searchResult.matchingMessages[0];
           rememberMatchedInboxThread(activity.conversation.id, mailboxUserId, primaryMessage);
           const threadMessages = primaryMessage.conversationId
             ? await graphApiHelper.getMailConversationMessages(mailboxUserId, primaryMessage.conversationId, 8)
@@ -5334,20 +7055,20 @@ Output valid JSON only.`,
           });
         } else {
           const inboxSummary = await summarizeInboxMessages(
-            cleanText || activity.text || '',
-            relevantMessages,
+            effectiveQuery || activity.text || '',
+            searchResult.matchingMessages,
             sendPromptWithTracking,
             {
               userId: requesterId,
               displayName: actorName,
               meetingId,
-              estimatedInputText: `${cleanText || activity.text || ''}\n${JSON.stringify(relevantMessages)}`,
+              estimatedInputText: `${effectiveQuery || activity.text || ''}\n${JSON.stringify(searchResult.matchingMessages)}`,
             }
           );
           await send(new MessageActivity(inboxSummary).addAiGenerated().addFeedback());
           recordBotResponse(activity.conversation.id, {
             content: inboxSummary,
-            contentType: 'general',
+            contentType: 'inbox_email',
             subject: `Inbox Summary from ${config.botDisplayName}`,
             timestamp: Date.now(),
           });
@@ -5355,7 +7076,7 @@ Output valid JSON only.`,
       } catch (error) {
         console.error(`[ERROR_INBOX]`, error);
         await send(new MessageActivity(
-          `I couldn't review the inbox right now. This capability needs working Microsoft Graph mail permissions and mailbox access. Please verify the app can read messages, then try again.`
+          `I couldn't review the inbox right now. Please verify mail permissions and try again.`
         ).addAiGenerated().addFeedback());
       }
 
@@ -5363,14 +7084,10 @@ Output valid JSON only.`,
       storage.set(sharedConversationKey, sharedMessages);
       storage.set(llmConversationKey, llmMessages);
       return;
+    } // end isDraftConfirmation else
     }
 
-    const isJoinCallIntent =
-      detectedIntent === 'join_meeting' ||
-      (userMessage.includes('join') && userMessage.includes('call')) ||
-      (userMessage.includes('join') && userMessage.includes('meeting'));
-
-    if (isJoinCallIntent) {
+    if (detectedIntent === 'join_meeting') {
       console.log(`[ACTION] Processing join-call flow`);
 
       const monthlyJoinCheck = canUserJoinMeetingThisMonth(requesterId);
@@ -5430,8 +7147,8 @@ Output valid JSON only.`,
             activeCallMap.set(callResult.id, {
               conversationId: activity.conversation.id,
               serviceUrl: activity.serviceUrl || '',
-              organizerId: meetingOnlineInfo.organizer?.id,
-              joinWebUrl: meetingOnlineInfo.joinWebUrl,
+              organizerId: meetingOnlineInfo.organizer?.id || getCachedMeetingContext(activity.conversation.id)?.organizerId,
+              joinWebUrl: meetingOnlineInfo.joinWebUrl || getCachedMeetingContext(activity.conversation.id)?.joinWebUrl,
               onlineMeetingId: (meetingOnlineInfo as any)?.onlineMeetingId,
             });
             // Register pending join info so auto-retry works if the call terminates with 2203
@@ -5470,7 +7187,7 @@ Output valid JSON only.`,
       return;
     }
 
-    if (userMessage.includes('read all chats') || userMessage.includes('read all chat') || userMessage.includes('all chats')) {
+    if (detectedIntent === 'read_chats') {
       console.log(`[ACTION] Processing read-all-chats flow`);
       let chatMessages = await graphApiHelper.getChatMessages(activity.conversation.id, 50);
 
@@ -5497,7 +7214,7 @@ Output valid JSON only.`,
         const formatted = chatMessages
           .reverse()
           .slice(-30)
-          .map((m) => `� ${(m.from.user?.displayName || 'Unknown')}: ${m.body.content}`)
+          .map((m) => `� ${(m.from?.user?.displayName || (m.from as any)?.application?.displayName || 'Unknown')}: ${m.body?.content || ''}`)
           .join('\n');
         await send(new MessageActivity(`**Recent Meeting Chats (${Math.min(chatMessages.length, 30)} shown):**\n\n${formatted}`).addAiGenerated().addFeedback());
       }
@@ -5513,7 +7230,8 @@ Output valid JSON only.`,
       console.log(`[ACTION] Processing send_email request`);
       await sendTypingIndicator(send);
       try {
-        const userText = cleanText || activity.text || '';
+        // effectiveQuery already contains follow-up context if applicable
+        const userText = effectiveQuery || activity.text || '';
         const lastResponse = lastBotResponseMap.get(activity.conversation.id);
         const hasRecentContext = lastResponse && (Date.now() - lastResponse.timestamp) < 10 * 60 * 1000; // within 10 minutes
         
@@ -5535,9 +7253,31 @@ Output valid JSON only.`,
         // Determine recipient emails - support multiple recipients
         let recipientEmails: string[] = [...emailAnalysis.recipientEmails];
         let recipientNames: string[] = [...emailAnalysis.recipientNames];
+        let effectiveRecipientType = emailAnalysis.recipientType;
+        
+        // HARDCODED OVERRIDE: If user says "all attendees"/"all participants", ALWAYS set all_participants
+        const allAttendeesRequested = /\b(all|every)\s*(meeting\s*)?(attendees?|participants?|members?|invitees?)\b/i.test(userText);
+        if (allAttendeesRequested && effectiveRecipientType !== 'all_participants') {
+          console.log(`[EMAIL] Forcing all_participants based on "all attendees" phrase in request`);
+          effectiveRecipientType = 'all_participants';
+        }
+
+        if (
+          emailAnalysis.isContextualReference &&
+          hasRecentContext &&
+          lastResponse?.recipientType === 'all_participants' &&
+          recipientEmails.length === 0 &&
+          recipientNames.length === 0 &&
+          (emailAnalysis.recipientType === null || emailAnalysis.recipientType === 'self')
+        ) {
+          effectiveRecipientType = 'all_participants';
+          recipientEmails = [...(lastResponse.recipientEmails || [])];
+          recipientNames = [...(lastResponse.recipientNames || [])];
+          console.log(`[EMAIL] Reusing recipient target from previous draft: all_participants (${recipientEmails.length} cached)`);
+        }
         
         // If LLM found recipient names but no emails, try to resolve them from chat members
-        if (recipientEmails.length === 0 && emailAnalysis.recipientNames.length > 0 && (emailAnalysis.recipientType === 'other' || emailAnalysis.recipientType === 'multiple')) {
+        if (recipientEmails.length === 0 && emailAnalysis.recipientNames.length > 0 && (effectiveRecipientType === 'other' || effectiveRecipientType === 'multiple')) {
           console.log(`[EMAIL] Trying to resolve emails for: ${emailAnalysis.recipientNames.join(', ')}`);
           for (const name of emailAnalysis.recipientNames) {
             const memberMatch = await graphApiHelper.findMemberEmailByName(activity.conversation.id, name);
@@ -5560,22 +7300,44 @@ Output valid JSON only.`,
           }
         }
         
-        // Handle "all_participants" - get all chat members' emails
-        if (emailAnalysis.recipientType === 'all_participants' && recipientEmails.length === 0) {
-          console.log(`[EMAIL] Resolving all participant emails for conversation`);
-          const chatMembers = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
-          const selfAadId = activity.from.aadObjectId || activity.from.id;
-          for (const member of chatMembers) {
-            if (member.email && member.userId !== selfAadId) {
-              recipientEmails.push(member.email);
-              recipientNames.push(member.displayName);
+        // Handle "all_participants" - resolve from calendar first, then current chat members only.
+        if (effectiveRecipientType === 'all_participants' && recipientEmails.length === 0) {
+          console.log(`[EMAIL] Resolving all participant emails from calendar first`);
+          
+          // Get meeting joinWebUrl for accurate calendar matching (includes external attendees)
+          let meetingJoinUrl: string | undefined;
+          try {
+            const meetingInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
+            meetingJoinUrl = meetingInfo?.joinWebUrl || getCachedMeetingContext(activity.conversation.id)?.joinWebUrl;
+            if (meetingJoinUrl) {
+              console.log(`[EMAIL] Have meeting joinWebUrl for calendar lookup`);
             }
+          } catch (err) {
+            console.warn(`[EMAIL] Could not get meeting info:`, err);
           }
-          // Also include self unless excluded
-          const selfMember = chatMembers.find((m) => m.userId === selfAadId);
-          if (selfMember?.email) {
-            recipientEmails.push(selfMember.email);
-            recipientNames.push(userName);
+          
+          const calendarRecipients = await resolveCalendarAttendeesForRequest(
+            activity.from.aadObjectId || activity.from.id,
+            lastResponse?.sourceRequest || userText,
+            activity.conversation.id,
+            meetingJoinUrl // Pass joinWebUrl for exact matching
+          );
+          recipientEmails = [...calendarRecipients.emails];
+          recipientNames = [...calendarRecipients.names];
+
+          if (recipientEmails.length === 0) {
+            console.log(`[EMAIL] Calendar attendee lookup returned no recipients, falling back to current chat members only`);
+            const chatMembers = await graphApiHelper.getChatMembersDetailed(activity.conversation.id);
+            const uniqueRecipients = new Map<string, string>();
+            for (const member of chatMembers) {
+              const email = (member.email || '').trim().toLowerCase();
+              if (!email || !email.includes('@')) continue;
+              if (!uniqueRecipients.has(email)) {
+                uniqueRecipients.set(email, member.displayName || email);
+              }
+            }
+            recipientEmails = Array.from(uniqueRecipients.keys());
+            recipientNames = Array.from(uniqueRecipients.values());
           }
           console.log(`[EMAIL] Resolved ${recipientEmails.length} participant emails`);
         }
@@ -5614,11 +7376,45 @@ Output valid JSON only.`,
           }
         }
         
-        if (recipientEmails.length === 0) {
+        if (recipientEmails.length === 0 && effectiveRecipientType === 'all_participants') {
+          await send(new MessageActivity(`I couldn't get attendee email addresses from calendar or current chat participants. I won't use tenant-wide user lookup for "all attendees". Please check the meeting attendees in Outlook/Teams, or tell me exactly who to email.`).addAiGenerated().addFeedback());
+        } else if (recipientEmails.length === 0) {
           await send(new MessageActivity(`I couldn't determine the recipient email address. Please specify who to send the email to (e.g., "send the summary to John" or provide an email address like john@example.com).`).addAiGenerated().addFeedback());
         } else if (emailAnalysis.isContextualReference && hasRecentContext && lastResponse) {
           // User is referring to something we just showed them - use conversation context!
-          console.log(`[EMAIL] Using contextual reference - sending last ${lastResponse.contentType} response to ${recipientEmails.length} recipient(s)`);;
+          console.log(`[EMAIL] Using contextual reference - sending last ${lastResponse.contentType} response to ${recipientEmails.length} recipient(s)`);
+
+          // Check if user also wants modifications before sending (e.g. "make it shorter and resend")
+          const wantsModification = /\b(short|shorter|brief|concise|longer|expand|bullet|detail|reformat|rework|rewrite|condense|simplify)\b/i.test(userText);
+          let contentToSend = lastResponse.content;
+
+          if (wantsModification) {
+            console.log(`[EMAIL] User wants modification before sending — reformatting cached content`);
+            const modPrompt = new ChatPrompt({
+              messages: [
+                {
+                  role: 'user',
+                  content: `${userText}\n\nOriginal content:\n${lastResponse.content}`
+                }
+              ],
+              instructions: `Rewrite the content as the user requested. Keep the same facts — do not add or invent information. Use a natural, conversational tone. Output clean Markdown only.`,
+              model: new OpenAIChatModel({
+                model: config.azureOpenAIDeploymentName,
+                apiKey: config.azureOpenAIKey,
+                endpoint: config.azureOpenAIEndpoint,
+                apiVersion: '2024-10-21',
+              }),
+            });
+            const modResult = await sendPromptWithTracking(modPrompt, '', {
+              userId: requesterId,
+              displayName: actorName,
+              meetingId,
+              estimatedInputText: lastResponse.content,
+            });
+            contentToSend = modResult.content || lastResponse.content;
+            // Show the modified version in chat too
+            await send(new MessageActivity(contentToSend).addAiGenerated().addFeedback());
+          }
 
           const inboxContext = inboxContextMap.get(activity.conversation.id);
           const hasThreadReplyContext =
@@ -5678,76 +7474,217 @@ Output valid JSON only.`,
           const wantsMinutes = emailAnalysis.contentType === 'minutes';
           const wantsTranscript = emailAnalysis.contentType === 'transcript';
           console.log(`[EMAIL] Generating content to send: summary=${wantsSummary}, minutes=${wantsMinutes}, transcript=${wantsTranscript}`);
-          
-          const liveEntries = liveTranscriptMap.get(activity.conversation.id);
-          const transcriptEntries = liveEntries?.filter(e => e.isFinal) || [];
+          let transcriptEntries: TranscriptEntry[] = [];
+          let resolvedMeetingTitle: string | undefined;
+          let resolvedMeetingStart: string | undefined;
+          let resolvedMemberList: string[] = [];
+          let missingContentHint = '';
+          let transcriptResult: Awaited<ReturnType<typeof getTranscriptWithContext>> = {
+            text: '',
+            source: 'none' as TranscriptSource,
+            isLive: false,
+            entryCount: 0,
+            meetingSubject: undefined,
+            callId: undefined,
+          };
+
+          const targetExtractPrompt = new ChatPrompt({
+            messages: [
+              {
+                role: 'user',
+                content: `Determine which meeting the user wants when asking to email generated meeting content.
+
+User request: "${userText}"
+User is currently in a meeting chat: ${isMeetingConversation ? 'YES' : 'NO'}
+
+Rules:
+- "last meeting", "latest meeting", "previous meeting", "most recent meeting" => target="last_meeting"
+ - Explicit past dates like "yesterday", "last Tuesday", "March 10" => target="past_meeting"
+ - In a meeting chat, generic requests like "send the transcript" => target="current"
+ - In a meeting chat, requests like "last meeting" usually refer to this meeting thread unless user gave an explicit past date/title.
+ - Outside a meeting chat, generic requests without a date usually mean the most recent meeting => target="last_meeting"
+
+Respond with JSON only:
+{"target":"current"|"past_meeting"|"last_meeting","meeting_date":"YYYY-MM-DD or null","meeting_subject":"meeting title or null"}`
+              }
+            ],
+            instructions: 'Resolve whether the user wants the current meeting, a dated past meeting, or the most recent meeting. Output valid JSON only.',
+            model: new OpenAIChatModel({
+              model: config.azureOpenAIDeploymentName,
+              apiKey: config.azureOpenAIKey,
+              endpoint: config.azureOpenAIEndpoint,
+              apiVersion: '2024-10-21',
+            })
+          });
+
+          let targetInfo: { target: 'current' | 'past_meeting' | 'last_meeting'; meeting_date: string | null; meeting_subject: string | null } = {
+            target: isMeetingConversation ? 'current' : 'last_meeting',
+            meeting_date: null,
+            meeting_subject: null,
+          };
+
+          try {
+            const targetResponse = await sendPromptWithTracking(targetExtractPrompt, '', {
+              userId: requesterId,
+              displayName: actorName,
+              meetingId,
+              estimatedInputText: userText,
+            });
+            const targetJson = (targetResponse.content || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+            targetInfo = JSON.parse(targetJson);
+          } catch (error) {
+            console.warn(`[EMAIL] Could not parse meeting target, defaulting to ${targetInfo.target}`);
+          }
+
+          // In a meeting thread, treat ambiguous "last meeting" requests as current meeting context.
+          if (
+            isMeetingConversation &&
+            targetInfo.target === 'last_meeting' &&
+            !targetInfo.meeting_date &&
+            !targetInfo.meeting_subject
+          ) {
+            targetInfo.target = 'current';
+          }
+
+          console.log(`[EMAIL] Meeting target analysis: ${JSON.stringify(targetInfo)}`);
+
+          const wantsPastMeeting = targetInfo.target === 'past_meeting' && !!targetInfo.meeting_date;
+          const wantsLastMeeting = targetInfo.target === 'last_meeting' || (!isMeetingConversation && targetInfo.target === 'current');
+
+          if (wantsPastMeeting || wantsLastMeeting) {
+            const meetingLookup = await graphApiHelper.findPastMeeting(
+              activity.from.aadObjectId || activity.from.id,
+              wantsPastMeeting ? targetInfo.meeting_date || undefined : undefined,
+              targetInfo.meeting_subject || undefined
+            );
+
+            if (meetingLookup.success && meetingLookup.meeting) {
+              resolvedMeetingTitle = meetingLookup.meeting.subject;
+              resolvedMeetingStart = meetingLookup.meeting.start;
+              resolvedMemberList = (meetingLookup.meeting.attendees || []).map((attendee) => attendee.name || attendee.email).filter(Boolean);
+
+              if (effectiveRecipientType === 'all_participants' && recipientEmails.length === 0) {
+                const meetingRecipients = (meetingLookup.meeting.attendees || []).filter((attendee) => attendee.email);
+                recipientEmails = meetingRecipients.map((attendee) => attendee.email);
+                recipientNames = meetingRecipients.map((attendee) => attendee.name || attendee.email);
+                console.log(`[EMAIL] Using ${recipientEmails.length} attendee(s) from the resolved meeting for all_participants delivery`);
+              }
+
+              const emailFetch = await fetchTranscriptCacheFirst(
+                meetingLookup.meeting.organizerId,
+                meetingLookup.meeting.joinWebUrl,
+                meetingLookup.meeting.start ? new Date(meetingLookup.meeting.start).getTime() : undefined,
+                meetingLookup.meeting.end ? new Date(meetingLookup.meeting.end).getTime() : undefined
+              );
+
+              let transcriptParsed = emailFetch.entries;
+              if (transcriptParsed.length === 0) {
+                console.log(`[EMAIL] Initial transcript lookup missed for resolved meeting; polling briefly...`);
+                const pollResult = await pollForTranscriptReady(
+                  meetingLookup.meeting.organizerId,
+                  meetingLookup.meeting.joinWebUrl,
+                  meetingLookup.meeting.start ? new Date(meetingLookup.meeting.start).getTime() : undefined,
+                  meetingLookup.meeting.end ? new Date(meetingLookup.meeting.end).getTime() : undefined,
+                  3,
+                  3000
+                );
+                if (pollResult.vttContent) {
+                  transcriptParsed = parseVttToEntries(pollResult.vttContent);
+                }
+              }
+
+              if (transcriptParsed.length > 0) {
+                transcriptEntries = transcriptParsed;
+                console.log(`[EMAIL] Loaded ${transcriptEntries.length} transcript entries for resolved meeting`);
+              } else {
+                missingContentHint = wantsLastMeeting
+                  ? `I found your most recent meeting, but its transcript is not available yet.`
+                  : `I found that meeting, but its transcript is not available yet.`;
+              }
+            } else {
+              missingContentHint = wantsLastMeeting
+                ? `I couldn't find a recent Teams meeting with transcript data yet.`
+                : `I couldn't find the past meeting you asked for.`;
+            }
+          }
+
+          if (transcriptEntries.length === 0 && !wantsPastMeeting && !wantsLastMeeting) {
+            // Use the comprehensive transcript retrieval that checks all sources:
+            // 1. Live session, 2. Memory cache, 3. File cache, 4. Background cache, 5. Graph API
+            // Only current-meeting requests should wait for Teams to prepare the transcript.
+            transcriptResult = await getTranscriptWithContext(activity.conversation.id);
+
+            const MAX_RETRIES = 3;
+            const RETRY_DELAY_MS = 5000;
+
+            for (let attempt = 0; attempt < MAX_RETRIES && (!transcriptResult.text || transcriptResult.source === 'none'); attempt++) {
+              if (attempt === 0) {
+                await send(new MessageActivity(`Waiting for Teams to prepare the transcript... This may take a moment.`).addAiGenerated());
+              }
+              console.log(`[EMAIL] No current-meeting transcript found, waiting for Teams (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+              await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+              transcriptResult = await getTranscriptWithContext(activity.conversation.id);
+            }
+
+            if (transcriptResult.text && transcriptResult.source !== 'none') {
+              console.log(`[EMAIL] Found transcript from source: ${transcriptResult.source} (${transcriptResult.entryCount} entries)`);
+              const memoryEntries = liveTranscriptMap.get(activity.conversation.id);
+              transcriptEntries = memoryEntries?.filter(e => e.isFinal) || [];
+
+              if (transcriptEntries.length === 0 && transcriptResult.text) {
+                transcriptEntries = parseTranscriptTextToEntries(transcriptResult.text);
+                console.log(`[EMAIL] Parsed ${transcriptEntries.length} entries from cached text`);
+              }
+            }
+          }
+
           let contentToSend = '';
           let emailSubject = `Meeting Content from ${config.botDisplayName}`;
           
           if (transcriptEntries.length > 0) {
-            const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
-            const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
-            const meetingTitle = chatInfo?.subject || 'Meeting';
-            const memberList = chatMembers.length > 0 ? chatMembers : [userName];
+            const chatInfo = resolvedMeetingTitle || resolvedMemberList.length > 0 || resolvedMeetingStart
+              ? null
+              : await resolveMeetingInfoForConversation(activity.conversation.id);
+            const chatMembers = resolvedMemberList.length > 0
+              ? []
+              : await graphApiHelper.getChatMembers(activity.conversation.id);
+            const meetingTitle = resolvedMeetingTitle || chatInfo?.subject || transcriptResult.meetingSubject || 'Meeting';
+            const meetingStartTime = resolvedMeetingStart || chatInfo?.startDateTime;
+            const memberList = resolvedMemberList.length > 0
+              ? resolvedMemberList
+              : chatMembers.length > 0
+                ? chatMembers
+                : [userName];
             
             if (wantsSummary) {
-              contentToSend = await generateFormattedSummaryHtml(transcriptEntries, meetingTitle, userName, memberList, chatInfo?.startDateTime, {
+              contentToSend = await generateFormattedSummaryHtml(transcriptEntries, meetingTitle, userName, memberList, meetingStartTime, {
                 userId: requesterId,
                 displayName: actorName,
                 meetingId,
               });
                 emailSubject = `Meeting Summary: ${meetingTitle} — ${config.botDisplayName}`;
             } else if (wantsMinutes) {
-              contentToSend = await generateMinutesHtml(transcriptEntries, meetingTitle, memberList, chatInfo?.startDateTime, {
+              contentToSend = await generateMinutesHtml(transcriptEntries, meetingTitle, memberList, meetingStartTime, {
                 userId: requesterId,
                 displayName: actorName,
                 meetingId,
               });
                 emailSubject = `Meeting Minutes: ${meetingTitle} — ${config.botDisplayName}`;
             } else if (wantsTranscript) {
-              contentToSend = transcriptEntries.map(e => `[${e.speaker}]: ${e.text}`).join('\n');
-                emailSubject = `Meeting Transcript: ${meetingTitle} — ${config.botDisplayName}`;
-            }
-          } else {
-            // Try to fetch transcript from Graph API
-            const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
-            if (chatInfo?.organizer?.id && chatInfo?.joinWebUrl) {
-              const transcriptWindow = getTranscriptWindowForConversation(activity.conversation.id);
-              const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
-                chatInfo.organizer.id,
-                chatInfo.joinWebUrl,
-                transcriptWindow.min,
-                transcriptWindow.max,
-                activity.conversation.id // Match by conversation thread
-              );
-              
-              if (vttContent) {
-                const parsed = parseVttToEntries(vttContent);
-                if (parsed.length > 0) {
-                  liveTranscriptMap.set(activity.conversation.id, parsed);
-                  const meetingTitle = chatInfo.subject || 'Meeting';
-                  const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
-                  
-                  if (wantsSummary) {
-                    contentToSend = await generateFormattedSummaryHtml(parsed, meetingTitle, userName, chatMembers, chatInfo.startDateTime, {
-                      userId: requesterId,
-                      displayName: actorName,
-                      meetingId,
-                    });
-                      emailSubject = `Meeting Summary: ${meetingTitle} — ${config.botDisplayName}`;
-                  } else if (wantsMinutes) {
-                    contentToSend = await generateMinutesHtml(parsed, meetingTitle, chatMembers, chatInfo.startDateTime, {
-                      userId: requesterId,
-                      displayName: actorName,
-                      meetingId,
-                    });
-                      emailSubject = `Meeting Minutes: ${meetingTitle} — ${config.botDisplayName}`;
-                  } else if (wantsTranscript) {
-                    contentToSend = parsed.map(e => `[${e.speaker}]: ${e.text}`).join('\n');
-                      emailSubject = `Meeting Transcript: ${meetingTitle} — ${config.botDisplayName}`;
-                  }
+              // Always format transcript nicely as HTML - never send raw text
+              contentToSend = await buildTranscriptHtml(
+                transcriptEntries,
+                meetingTitle,
+                memberList,
+                transcriptEntries.length,
+                false, // not partial
+                {
+                  userId: requesterId,
+                  displayName: actorName,
+                  meetingId,
                 }
-              }
+              );
+              emailSubject = `Meeting Transcript: ${meetingTitle} — ${config.botDisplayName}`;
             }
           }
           
@@ -5770,13 +7707,21 @@ Output valid JSON only.`,
             await send(new MessageActivity(resultMessage).addAiGenerated().addFeedback());
           } else {
             const contentTypeName = wantsSummary ? 'summary' : wantsMinutes ? 'minutes' : 'transcript';
+            const requestedContentLabel = wantsSummary
+              ? 'a meeting summary'
+              : wantsMinutes
+                ? 'meeting minutes'
+                : 'a meeting transcript';
+            const recipientDisplay = effectiveRecipientType === 'all_participants' && recipientEmails.length === 0
+              ? 'the calendar attendees for that meeting'
+              : formatRecipientDisplay(recipientEmails, recipientNames);
             await send(new MessageActivity(
-              `I need meeting content to send ${wantsSummary ? 'a summary' : wantsMinutes ? 'minutes' : 'a transcript'}.\n\n` +
-              `**How to get ${contentTypeName}:**\n` +
-              `• **During a live meeting:** Say "join the call" to capture live transcript\n` +
-              `• **After a recorded meeting:** Say "transcribe" to fetch from Teams\n` +
-              `• **For a past meeting:** Say "transcribe yesterday's standup" or similar\n\n` +
-              `Once I have the transcript, I can create and email the ${contentTypeName} to ${formatRecipientDisplay(recipientEmails, recipientNames)}.`
+              `${missingContentHint ? `${missingContentHint}\n\n` : ''}` +
+              `I can send ${requestedContentLabel} as soon as I have transcript content.\n\n` +
+              `If this is the same meeting chat, say "transcribe this meeting".\n` +
+              `For a past meeting, say something like "transcribe yesterday's standup".\n` +
+              `If the meeting is live right now, say "join the call" and I'll capture it in real time.\n\n` +
+              `Then I'll prepare the ${contentTypeName} and email it to ${recipientDisplay}.`
             ).addAiGenerated().addFeedback());
           }
         } else {
@@ -5804,12 +7749,19 @@ ${hasRecentContext && lastResponse ? `Last bot response type: ${lastResponse.con
 Based on the conversation, determine what the user wants to email:
 1. If they're referring to something discussed (like "send that", "email this info"), use the relevant content from the conversation
 2. If they want to compose a new email, extract the subject and body from their request
-3. If unclear, ask for clarification in the body
+3. For "test" or "sample" emails, generate a simple professional test message
+4. If unclear, ask for clarification
 
-Respond with JSON: {"subject": "clear email subject", "body": "complete email body content", "is_contextual": true/false, "needs_clarification": true/false}`
+CRITICAL RULES:
+- NEVER use placeholders like [Your Name], [Recipient Name], [Date], etc.
+- Use "${userName}" as the sender's actual name
+- Generate complete, ready-to-send content with no blanks
+- Sign emails with the sender's actual name: "${userName}"
+
+Respond with JSON: {"subject": "clear email subject", "body": "complete email body content with NO placeholders", "is_contextual": true/false, "needs_clarification": true/false}`
               }
             ],
-            instructions: 'You are a smart email assistant. Understand context! If the user refers to previous content ("it", "that", "this", "the schedule", "the info"), include that content in the email body. Generate complete, ready-to-send email content. Output valid JSON only.',
+            instructions: `You are a smart email assistant. Generate complete, ready-to-send email content. NEVER use placeholder text like [Your Name]. Use "${userName}" as the sender name. Output valid JSON only.`,
             model: new OpenAIChatModel({
               model: config.azureOpenAIDeploymentName,
               apiKey: config.azureOpenAIKey,
@@ -5845,31 +7797,17 @@ Respond with JSON: {"subject": "clear email subject", "body": "complete email bo
               const resultMessage = formatEmailResult(sendResult, recipientNames, 'email');
               await send(new MessageActivity(resultMessage).addAiGenerated().addFeedback());
             } else {
-              // Full success - let LLM generate a friendly response
+              // Full success - show explicit confirmation with details
               const recipientListDisplay = formatRecipientDisplay(sendResult.sentTo || recipientEmails, recipientNames);
-              const responsePrompt = new ChatPrompt({
-                messages: [
-                  {
-                    role: 'user',
-                    content: `Generate a brief, friendly response about sending an email.\n\nResult: SUCCESS\nRecipients: ${recipientListDisplay}\nSubject: ${extracted.subject || `Message from ${config.botDisplayName}`}\n\nRespond naturally as if you just completed this action.`
-                  }
-                ],
-                instructions: 'You are a helpful assistant. Generate a natural, brief response about the email send result. Be friendly but concise.',
-                model: new OpenAIChatModel({
-                  model: config.azureOpenAIDeploymentName,
-                  apiKey: config.azureOpenAIKey,
-                  endpoint: config.azureOpenAIEndpoint,
-                  apiVersion: '2024-10-21'
-                })
-              });
-
-              const responseResult = await sendPromptWithTracking(responsePrompt, '', {
-                userId: requesterId,
-                displayName: actorName,
-                meetingId,
-                estimatedInputText: `email send result for ${recipientEmails.join(', ')}`,
-              });
-              await send(new MessageActivity(responseResult.content || 'Email action completed.').addAiGenerated().addFeedback());
+              const emailSubject = extracted.subject || `Message from ${config.botDisplayName}`;
+              const senderInfo = config.emailSenderUserId ? ` (sent from ${config.emailSenderUserId})` : '';
+              console.log(`[EMAIL] Successfully sent email. Subject: "${emailSubject}", To: ${recipientListDisplay}${senderInfo}`);
+              await send(new MessageActivity(
+                `✅ **Email Sent Successfully**\n\n` +
+                `**To:** ${recipientListDisplay}\n` +
+                `**Subject:** ${emailSubject}\n` +
+                `**From:** ${config.emailSenderUserId || 'Your account'}${senderInfo ? '' : ''}`
+              ).addAiGenerated().addFeedback());
             }
           }
         }
@@ -5906,13 +7844,14 @@ This week ends: ${thisWeekEnd.toISOString().split('T')[0]}
 Next week starts: ${nextWeekStart.toISOString().split('T')[0]}`;
 
         // Use LLM to understand what calendar info the user wants
+        // effectiveQuery already contains follow-up context if applicable
         const extractPrompt = new ChatPrompt({
           messages: [
             {
               role: 'user',
               content: `Analyze this calendar request and extract date/time parameters.
 
-User request: "${cleanText || activity.text}"
+User request: "${effectiveQuery || activity.text}"
 
 ${dateContext}
 
@@ -5929,7 +7868,7 @@ Interpret relative dates correctly:
 - "this week" = ${today.toISOString().split('T')[0]} to ${thisWeekEnd.toISOString().split('T')[0]}
 - "next week" = ${nextWeekStart.toISOString().split('T')[0]} to 7 days later
 
-Respond with JSON only: {"query_type": "view_events|check_availability|find_free_time|past_events", "start_date": "ISO date string", "end_date": "ISO date string", "description": "brief description of what user wants", "is_past": true|false, "other_person_requested": true|false, "other_person_name": "name if mentioned"}`
+Respond with JSON only: {"query_type": "view_events|check_availability|find_free_time|past_events|schedule_meeting", "start_date": "ISO date string", "end_date": "ISO date string", "description": "brief description of what user wants", "is_past": true|false, "other_person_requested": true|false, "other_person_name": "name if mentioned"}`
             }
           ],
           instructions: 'You are a JSON extraction assistant. Determine what calendar info the user needs. Convert relative dates to actual ISO date strings. IMPORTANT: If the user asks about ANYONE ELSE\'s calendar, set other_person_requested=true. Output valid JSON only.',
@@ -5945,13 +7884,24 @@ Respond with JSON only: {"query_type": "view_events|check_availability|find_free
           userId: requesterId,
           displayName: actorName,
           meetingId,
-          estimatedInputText: cleanText || activity.text || '',
+          estimatedInputText: effectiveQuery || activity.text || '',
         });
         const rawExtract = (extractResponse.content || '').trim();
         // Strip markdown code blocks if present (LLM sometimes wraps JSON in ```json...```)
         const extractJson = rawExtract.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         const extracted = JSON.parse(extractJson);
         console.log(`[CALENDAR] Extracted: ${JSON.stringify(extracted)}`);
+
+        if (extracted.query_type === 'schedule_meeting') {
+          await send(new MessageActivity(
+            `I can check your calendar right now, but I can't create/schedule a new meeting yet. ` +
+            `If you want, I can help by checking your free slots first.`
+          ).addAiGenerated().addFeedback());
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
         
         // Check if user asked about another person's calendar
         const otherPersonRequested = extracted.other_person_requested === true;
@@ -5964,9 +7914,58 @@ Respond with JSON only: {"query_type": "view_events|check_availability|find_free
           extracted.end_date || undefined
         );
 
-        // Let LLM generate a natural response based on calendar data
-        const eventsJson = calendarResult.success ? JSON.stringify(calendarResult.events?.slice(0, 15) || [], null, 2) : 'No events retrieved';
+        // Pre-format event times in code so the LLM never does date/timezone math
         const userTimezone = calendarResult.timezone || 'UTC';
+        const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+        const formatTimeFromDatetime = (dtStr?: string): string => {
+          if (!dtStr) return '';
+          // dtStr is e.g. "2026-03-16T09:00:00.0000000" — already in user's timezone from Prefer header
+          const timePart = dtStr.match(/T(\d{2}):(\d{2})/);
+          if (!timePart) return '';
+          let h = parseInt(timePart[1], 10);
+          const m = timePart[2];
+          const ampm = h >= 12 ? 'PM' : 'AM';
+          if (h === 0) h = 12;
+          else if (h > 12) h -= 12;
+          return m === '00' ? `${h} ${ampm}` : `${h}:${m} ${ampm}`;
+        };
+
+        const formatDateFromDatetime = (dtStr?: string): string => {
+          if (!dtStr) return '';
+          const datePart = dtStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+          if (!datePart) return '';
+          const y = parseInt(datePart[1], 10);
+          const mo = parseInt(datePart[2], 10) - 1;
+          const d = parseInt(datePart[3], 10);
+          // Use Date constructor with explicit components to get day-of-week (no timezone shift since we only need the weekday)
+          const dt = new Date(y, mo, d);
+          return `${weekdays[dt.getDay()]}, ${monthNames[mo]} ${d}`;
+        };
+
+        const formattedEvents = (calendarResult.events || []).slice(0, 15).map((evt: any) => {
+          const startDt = evt.start?.dateTime || '';
+          const endDt = evt.end?.dateTime || '';
+          return {
+            subject: evt.subject || 'Untitled',
+            date: formatDateFromDatetime(startDt),
+            startTime: formatTimeFromDatetime(startDt),
+            endTime: formatTimeFromDatetime(endDt),
+            isAllDay: evt.isAllDay || false,
+            isCancelled: evt.isCancelled || false,
+            location: evt.location?.displayName || '',
+            organizer: evt.organizer?.emailAddress?.name || '',
+          };
+        });
+
+        const eventsText = calendarResult.success
+          ? formattedEvents.map((e) =>
+              e.isAllDay
+                ? `• ${e.date}: "${e.subject}" (all day)${e.isCancelled ? ' [CANCELLED]' : ''}`
+                : `• ${e.date}: "${e.subject}" ${e.startTime}–${e.endTime}${e.isCancelled ? ' [CANCELLED]' : ''}${e.location ? ` | ${e.location}` : ''}`
+            ).join('\n')
+          : 'No events retrieved';
         
         const responsePrompt = new ChatPrompt({
           messages: [
@@ -5974,47 +7973,36 @@ Respond with JSON only: {"query_type": "view_events|check_availability|find_free
               role: 'user',
               content: `Help ${userName || 'the user'} understand their calendar.
 
-Their question: "${cleanText || activity.text}"
+Their question: "${effectiveQuery || activity.text}"
 Query date range: ${extracted.start_date || 'today'} to ${extracted.end_date || 'today'}
-Current date/time: ${new Date().toISOString()}
-User's timezone: ${userTimezone}
 API result: ${calendarResult.success ? 'SUCCESS' : 'FAILED'}
 ${calendarResult.error ? `Error: ${calendarResult.error}` : ''}
 ${otherPersonRequested ? `NOTE: User also asked about ${otherPersonName || 'another person'}'s calendar, but I can only access YOUR calendar.` : ''}
 
-Calendar events (${userName}'s calendar ONLY):
-${eventsJson}
+Calendar events (${userName}'s calendar, times in ${userTimezone}):
+${eventsText}
 
-CRITICAL: The times in start.dateTime and end.dateTime are already in the user's LOCAL timezone (${userTimezone}). Display them directly - do NOT convert or add timezone offsets.
+Use the times EXACTLY as shown above — they are already formatted in the user's local timezone. Do NOT modify, convert, or recalculate any times.
 
 Respond naturally to their question about their schedule.${otherPersonRequested ? ` Politely mention that you can only check their own calendar, not ${otherPersonName || 'other people'}'s.` : ''}`
             }
           ],
           instructions: `You are a friendly, conversational calendar assistant. Respond naturally like a helpful colleague would.
 
-CRITICAL TIMEZONE RULE: All times in the calendar data are already in the user's LOCAL timezone (${userTimezone}). Display times exactly as shown - do NOT convert or add UTC offsets. For example, if start.dateTime shows "2026-03-09T09:00:00.0000000", display it as "9am" (not "1pm" or any other conversion).
-
-CRITICAL DATE RULE: Each calendar event has "start.dateTime" and "end.dateTime" fields containing the ACTUAL meeting time in local time. You MUST use these exact dates/times when describing meetings.
+CRITICAL: The times shown in the event list are ALREADY in the user's local timezone and pre-formatted. Use them EXACTLY as given. Do NOT recalculate, convert, or adjust any times. Just relay them.
 
 RESPONSE STYLE:
 - Be conversational and warm, not robotic or templated
 - Vary your language - don't use the same format every time
-- When mentioning meetings, use the times EXACTLY as shown in the data
 - Use **bold** for meeting titles to help them stand out
 - Keep it brief and easy to scan
 - Sound like a helpful human, not a form or report
-
-TIME FORMAT: Use simple formats like "9am", "2:30pm", "noon" - read directly from start.dateTime without any conversion.
-
-NEVER use rigid templates like "Active Meetings:" or "Canceled Meetings:" sections.
-NEVER use checkbox emojis or bullet point headers.
-NEVER convert times - use them as-is from the data.
-Just describe their schedule naturally in flowing prose or simple list format.
+- Mention cancelled events briefly so the user knows they're cleared
 
 Examples of good responses:
-- "You've got a busy afternoon! **Project Sync** at 2pm, then **1:1 with Sarah** at 3:30pm."
+- "You've got a busy afternoon! **Project Sync** at 2 PM, then **1:1 with Sarah** at 3:30 PM."
 - "Looks like your Monday is clear - no meetings scheduled."
-- "On March 5th you had three meetings: **Standup** (9am), **Design Review** (11am), and **Team Lunch** (12:30pm)."`,
+- "On March 5th you had three meetings: **Standup** (9 AM), **Design Review** (11 AM), and **Team Lunch** (12:30 PM)."`,
           model: new OpenAIChatModel({
             model: config.azureOpenAIDeploymentName,
             apiKey: config.azureOpenAIKey,
@@ -6027,7 +8015,7 @@ Examples of good responses:
           userId: requesterId,
           displayName: actorName,
           meetingId,
-          estimatedInputText: `${cleanText || activity.text || ''}\ncalendar events`,
+          estimatedInputText: `${effectiveQuery || activity.text || ''}\ncalendar events`,
         });
         const calendarResponseContent = responseResult.content || 'Calendar check completed.';
         await send(new MessageActivity(calendarResponseContent).addAiGenerated().addFeedback());
@@ -6049,7 +8037,7 @@ Examples of good responses:
             messages: [
               {
                 role: 'user',
-                content: `The user asked: "${cleanText || activity.text}"
+                content: `The user asked: "${effectiveQuery || activity.text}"
 I tried to check their calendar but got an error: ${error?.message || 'Unknown error'}
 
 Generate a brief, friendly apology and suggest they try again. Be conversational, not robotic.`
@@ -6067,7 +8055,7 @@ Generate a brief, friendly apology and suggest they try again. Be conversational
             userId: requesterId,
             displayName: actorName,
             meetingId,
-            estimatedInputText: `${cleanText || activity.text || ''}\ncalendar error`,
+            estimatedInputText: `${effectiveQuery || activity.text || ''}\ncalendar error`,
           });
           await send(new MessageActivity(errorResponse.content || 'Sorry, I ran into an issue checking your calendar. Could you try again?').addAiGenerated().addFeedback());
         } catch {
@@ -6110,6 +8098,17 @@ Generate a brief, friendly apology and suggest they try again. Be conversational
         console.log(`[CHAT] Added ${recentEntries.length} transcript entries to context for Q&A`);
       }
     }
+
+    // Add inbox email context if recently shown - prevents hallucination on follow-up questions
+    const _inboxCtxForChat = inboxContextMap.get(activity.conversation.id);
+    if (_inboxCtxForChat?.lastMessages?.length && _inboxCtxForChat.updatedAt > Date.now() - 10 * 60 * 1000) {
+      const inboxEmailContext = _inboxCtxForChat.lastMessages.map(m => {
+        const body = m.bodyContent || m.bodyPreview || '';
+        return `**From:** ${m.fromName || m.fromAddress}\n**Subject:** ${m.subject}\n**Date:** ${m.receivedDateTime}\n**Content:** ${body.slice(0, 2000)}`;
+      }).join('\n\n---\n\n');
+      enhancedInstructions += `\n\n## Recently Shown Inbox Email(s)\nThe user recently asked about their inbox. Here is the email content that was shown - use this to answer follow-up questions:\n\n${inboxEmailContext}\n\n⚠️ IMPORTANT: If the user asks "what did [person] say" or any follow-up about email content, answer ONLY from this context. Do NOT make up information.`;
+      console.log(`[CHAT] Added ${_inboxCtxForChat.lastMessages.length} inbox email(s) to context for follow-up Q&A`);
+    }
     
     const prompt = new ChatPrompt({
       messages: llmMessages,
@@ -6130,6 +8129,29 @@ Generate a brief, friendly apology and suggest they try again. Be conversational
       console.log(`[CHAT] Group chat mode - awaiting full response`);
       const response = await prompt.send(cleanText || activity.text || '');
       const responseText = extractModelResponseText(response);
+      const draftEmailRequest = detectEmailRequest(effectiveQuery || activity.text || '');
+      let draftRecipientEmails: string[] = [];
+      let draftRecipientNames: string[] = [];
+      let draftRecipientType: LastBotResponse['recipientType'] = null;
+      if (draftEmailRequest.sendToAllAttendees) {
+        // Get meeting joinWebUrl for accurate calendar matching (includes external attendees)
+        let meetingJoinUrl: string | undefined;
+        try {
+          const meetingInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
+          meetingJoinUrl = meetingInfo?.joinWebUrl || getCachedMeetingContext(activity.conversation.id)?.joinWebUrl;
+        } catch (err) {
+          console.log(`[DRAFT_EMAIL] Could not get meeting joinWebUrl: ${err instanceof Error ? err.message : err}`);
+        }
+        const calendarRecipients = await resolveCalendarAttendeesForRequest(
+          activity.from.aadObjectId || activity.from.id,
+          effectiveQuery || activity.text || '',
+          activity.conversation.id,
+          meetingJoinUrl
+        );
+        draftRecipientEmails = calendarRecipients.emails;
+        draftRecipientNames = calendarRecipients.names;
+        draftRecipientType = 'all_participants';
+      }
       recordEstimatedModelUsage({
         userId: requesterId,
         displayName: actorName,
@@ -6143,21 +8165,49 @@ Generate a brief, friendly apology and suggest they try again. Be conversational
       if (llmMessages.length > 30) {
         llmMessages = llmMessages.slice(-30);
       }
+      recordBotResponse(activity.conversation.id, {
+        content: responseText,
+        contentType: 'general',
+        subject: `Response from ${config.botDisplayName}`,
+        timestamp: Date.now(),
+        recipientType: draftRecipientType,
+        recipientEmails: draftRecipientEmails,
+        recipientNames: draftRecipientNames,
+        sourceRequest: effectiveQuery || activity.text || '',
+      });
       const responseActivity = new MessageActivity(responseText).addAiGenerated().addFeedback();
       await send(responseActivity);
       console.log(`[SUCCESS] Chat response sent to group`);
     } else {
         console.log(`[CHAT] Personal/direct mode - streaming response`);
         let streamedResponse = '';
+        let streamFailed = false;
         const streamedResult = await prompt.send(cleanText || activity.text || '', {
           onChunk: (chunk) => {
+            if (streamFailed) return; // stop streaming if a previous chunk failed
             console.log(`[STREAM] Chunk received`);
             streamedResponse += chunk || '';
-            stream.emit(chunk);
+            try {
+              stream.emit(chunk);
+            } catch (streamErr: any) {
+              // 403 or other connector errors — collect remaining text but stop streaming
+              console.warn(`[STREAM] Streaming failed (${streamErr?.response?.status || streamErr?.code || 'unknown'}), will send final response as a single message`);
+              streamFailed = true;
+            }
           },
         });
       if (!streamedResponse.trim()) {
         streamedResponse = extractModelResponseText(streamedResult);
+      }
+
+      // If streaming failed mid-way, send the full response as a normal message
+      if (streamFailed && streamedResponse.trim()) {
+        console.log(`[STREAM] Sending full response as fallback after stream failure`);
+        try {
+          await send(new MessageActivity(streamedResponse).addAiGenerated().addFeedback());
+        } catch (fallbackErr) {
+          console.error(`[STREAM] Fallback send also failed — conversation may be stale`, fallbackErr);
+        }
       }
       recordEstimatedModelUsage({
         userId: requesterId,
@@ -6166,9 +8216,48 @@ Generate a brief, friendly apology and suggest they try again. Be conversational
         inputText: cleanText || activity.text || '',
         outputText: streamedResponse,
       });
+      const draftEmailRequest = detectEmailRequest(effectiveQuery || activity.text || '');
+      let draftRecipientEmails: string[] = [];
+      let draftRecipientNames: string[] = [];
+      let draftRecipientType: LastBotResponse['recipientType'] = null;
+      if (draftEmailRequest.sendToAllAttendees) {
+        // Get meeting joinWebUrl for accurate calendar matching (includes external attendees)
+        let meetingJoinUrl: string | undefined;
+        try {
+          const meetingInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
+          meetingJoinUrl = meetingInfo?.joinWebUrl || getCachedMeetingContext(activity.conversation.id)?.joinWebUrl;
+        } catch (err) {
+          console.log(`[DRAFT_EMAIL] Could not get meeting joinWebUrl: ${err instanceof Error ? err.message : err}`);
+        }
+        const calendarRecipients = await resolveCalendarAttendeesForRequest(
+          activity.from.aadObjectId || activity.from.id,
+          effectiveQuery || activity.text || '',
+          activity.conversation.id,
+          meetingJoinUrl
+        );
+        draftRecipientEmails = calendarRecipients.emails;
+        draftRecipientNames = calendarRecipients.names;
+        draftRecipientType = 'all_participants';
+      }
+      recordBotResponse(activity.conversation.id, {
+        content: streamedResponse,
+        contentType: 'general',
+        subject: `Response from ${config.botDisplayName}`,
+        timestamp: Date.now(),
+        recipientType: draftRecipientType,
+        recipientEmails: draftRecipientEmails,
+        recipientNames: draftRecipientNames,
+        sourceRequest: effectiveQuery || activity.text || '',
+      });
       console.log(`[MODEL_RESPONSE] ${getTruncatedLogPreview(streamedResponse)}`);
       // We wrap the final response with an AI Generated indicator
-      stream.emit(new MessageActivity().addAiGenerated().addFeedback());
+      if (!streamFailed) {
+        try {
+          stream.emit(new MessageActivity().addAiGenerated().addFeedback());
+        } catch (finalStreamErr) {
+          console.warn(`[STREAM] Final stream emit failed, response was already delivered`);
+        }
+      }
     }
     storage.set(conversationKey, messages);
     storage.set(sharedConversationKey, sharedMessages);
@@ -6189,8 +8278,13 @@ app.on('conversationUpdate', async ({ send: sendActivity, activity }) => {
         ? outgoing
         : (outgoing?.text || outgoing?.summary || '[non-text activity]');
       console.log(`[TEAMS_SEND_OK] conversation=${activity?.conversation?.id || 'unknown'} preview="${getTruncatedLogPreview(String(text || ''))}"`);
-    } catch (error) {
-      console.error(`[TEAMS_SEND_FAIL] conversation=${activity?.conversation?.id || 'unknown'}`, error);
+    } catch (error: any) {
+      const status = error?.response?.status || error?.response?.statusCode;
+      console.error(`[TEAMS_SEND_FAIL] conversation=${activity?.conversation?.id || 'unknown'} status=${status || 'unknown'}`);
+      if (status === 403 || status === 429) {
+        console.warn(`[TEAMS_SEND_FAIL] Non-fatal ${status} — conversation may be stale or throttled`);
+        return;
+      }
       throw error;
     }
   };
@@ -8395,26 +10489,6 @@ app.http.post('/api/calls', async (req: any, res: any) => {
           });
           console.log(`[PARTICIPANTS] Total: ${participants.length}, Humans: ${humanParticipants.length}, CallId: ${callId}`);
 
-          // Fallback trigger: if humans are in the call and transcription didn't start yet,
-          // try auto-start again (first established attempt can be too early).
-          if (humanParticipants.length > 0) {
-            const callEntry = activeCallMap.get(callId);
-            if (callEntry?.establishedAt) {
-              if (USE_NEW_AUTO_TRANSCRIPTION) {
-                // New module handles its own retry logic, just trigger if not already active
-                if (!autoTranscription.isTranscriptionActive(callId)) {
-                  void autoTranscription.autoStartTranscription(
-                    callId,
-                    callEntry.conversationId,
-                    callEntry.serviceUrl
-                  );
-                }
-              } else {
-                void attemptAutoStartTranscription(callId, 'participants', callEntry);
-              }
-            }
-          }
-
           if (participants.length > 0 && humanParticipants.length === 0) {
             // Grace period: don't auto-leave within first 30s (participants may still be joining)
             const callEntry = activeCallMap.get(callId);
@@ -8450,45 +10524,26 @@ app.http.post('/api/calls', async (req: any, res: any) => {
           console.log(`[CALLS_WEBHOOK] Duplicate established event for callId=${callId} — ignoring`);
         } else if (callEntry) {
           console.log(`[CALLS_WEBHOOK] Call ESTABLISHED - bot is live in meeting. conversationId=${callEntry.conversationId}`);
-          recordMeetingEstablished(
-            callEntry.conversationId,
-            getCachedMeetingContext(callEntry.conversationId)?.subject || 'Meeting'
-          );
           // Record establishment time and cancel any pending retries
           callEntry.establishedAt = Date.now();
-          
-          // Register this as a live transcript session
-          const meetingSubject = getCachedMeetingContext(callEntry.conversationId)?.subject;
-          registerLiveTranscriptSession(callEntry.conversationId, callId, meetingSubject);
-          
           if (callEntry.organizerId && callEntry.joinWebUrl) {
             cacheMeetingContext(
               callEntry.conversationId,
               callEntry.organizerId,
               callEntry.joinWebUrl,
               undefined,
-              { startedAt: callEntry.establishedAt },
-              callId,  // persist callId so post-meeting transcribe can use /communications/calls API
-              callEntry.onlineMeetingId
+              { startedAt: callEntry.establishedAt }
             );
           }
           cancelPendingJoin(callEntry.conversationId);
           // Track callId -> conversationId for transcript routing
           callToConversationMap.set(callId, callEntry.conversationId);
-          // Initialize transcript storage for this conversation
-          if (!liveTranscriptMap.has(callEntry.conversationId)) {
-            liveTranscriptMap.set(callEntry.conversationId, []);
-          }
+          // Clear stale data from previous calls on this conversation
+          // (recurring meetings reuse the same conversationId across sessions)
+          liveTranscriptMap.set(callEntry.conversationId, []);
+          lastBotResponseMap.delete(callEntry.conversationId);
           // Auto-start transcription with retries (Teams can reject very early requests)
-          if (USE_NEW_AUTO_TRANSCRIPTION) {
-            void autoTranscription.autoStartTranscription(
-              callId,
-              callEntry.conversationId,
-              callEntry.serviceUrl
-            );
-          } else {
-            void attemptAutoStartTranscription(callId, 'established', callEntry);
-          }
+          void attemptBotStartTranscription(callId, callEntry.conversationId, callEntry.serviceUrl);
           
           // Start live polling for transcript updates (every 10 seconds while call is active)
           if (callEntry.organizerId && callEntry.joinWebUrl) {
@@ -8496,35 +10551,22 @@ app.http.post('/api/calls', async (req: any, res: any) => {
               callId,
               callEntry.organizerId,
               callEntry.joinWebUrl,
-              callEntry.onlineMeetingId,
               callEntry.conversationId,
               callEntry.serviceUrl,
               callEntry.establishedAt || Date.now()
             );
           }
           
-          await sendMeetingStatusNoticeOnce(
+          await graphApiHelper.sendProactiveMessage(
             callEntry.serviceUrl,
             callEntry.conversationId,
-            'live_setup',
             `I'm now live in the meeting and setting up transcription. Just ask me to **summarize**, **transcribe**, or generate **minutes** whenever you're ready!`
           );
         }
       } else if (callState === 'terminated') {
         const callEntry = activeCallMap.get(callId);
         const conversationId = callToConversationMap.get(callId);
-        clearPendingTranscriptionStart(callId);
         stopLiveTranscriptPolling(callId);
-        
-        // Cleanup new auto-transcription module state
-        if (USE_NEW_AUTO_TRANSCRIPTION) {
-          autoTranscription.cleanupCall(callId);
-        }
-        
-        // End the live transcript session for this conversation
-        if (conversationId) {
-          endLiveTranscriptSession(conversationId, callId);
-        }
         
         // Capture call timing before we delete the entry
         const callStartedAt = callEntry?.establishedAt || Date.now();
@@ -8532,14 +10574,22 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         
         activeCallMap.delete(callId);
         callToConversationMap.delete(callId);
-        if (conversationId) {
-          clearMeetingStatusNotices(conversationId);
-          recordMeetingTerminated(conversationId);
-        }
         console.log(`[CALLS_WEBHOOK] Call TERMINATED - bot left the meeting (duration: ${(callEndedAt - callStartedAt) / 1000}s)`);
 
-        // Fetch the meeting transcript from Graph (Teams stores it server-side)
-        // Use retry logic � Teams may need time to finalize transcripts
+        // Save any live transcript data captured during the call BEFORE cleaning up sessions
+        if (conversationId) {
+          const liveEntries = liveTranscriptMap.get(conversationId)?.filter(e => e.isFinal) || [];
+          if (liveEntries.length > 0) {
+            console.log(`[CALLS_WEBHOOK] Saving ${liveEntries.length} live transcript entries before cleanup`);
+            saveTranscriptToFile(conversationId);
+          }
+        }
+
+        // End the live session (clears pinnedTranscriptPaths so next call gets a fresh file)
+        if (conversationId) {
+          endLiveTranscriptSession(conversationId, callId);
+        }
+
         if (callEntry?.organizerId && callEntry?.joinWebUrl && conversationId) {
           cacheMeetingContext(
             conversationId,
@@ -8547,54 +10597,67 @@ app.http.post('/api/calls', async (req: any, res: any) => {
             callEntry.joinWebUrl,
             undefined,
             { startedAt: callStartedAt, endedAt: callEndedAt }
-            ,
-            undefined,
-            callEntry.onlineMeetingId
           );
           const orgId = callEntry.organizerId!;
           const webUrl = callEntry.joinWebUrl!;
           const svcUrl = callEntry.serviceUrl;
           const convId = conversationId;
-          console.log(`[POST_MEETING_TRANSCRIPT] Will fetch transcript from Graph for organizer=${orgId}, callWindow: ${new Date(callStartedAt).toISOString()} to ${new Date(callEndedAt).toISOString()}`);
 
-          const attemptFetch = async (attempt: number, maxAttempts: number) => {
+          // --- IMMEDIATE: Use live transcript data if available ---
+          const liveData = liveTranscriptMap.get(convId)?.filter(e => e.isFinal) || [];
+          if (liveData.length > 0) {
+            console.log(`[POST_MEETING] Using ${liveData.length} live transcript entries for immediate summary`);
             try {
-              console.log(`[POST_MEETING_TRANSCRIPT] Attempt ${attempt}/${maxAttempts}...`);
-              const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
-                orgId,
-                webUrl,
-                callStartedAt,
-                callEndedAt,
-                convId
+              // Always generate a FRESH summary from the current call's transcript
+              // (never reuse a cached summary — it may be from a previous call session)
+              const summary = await generateFormattedSummaryHtml(liveData, 'Meeting', 'Participant', [], new Date(callStartedAt));
+
+              await graphApiHelper.sendProactiveMessage(
+                svcUrl, convId,
+                `**Meeting ended!** Here's your AI-generated summary:\n\n${summary}`
               );
-              if (vttContent) {
-                console.log(`[POST_MEETING_TRANSCRIPT] Got ${vttContent.length} chars of VTT content`);
-                const parsed = parseVttToEntries(vttContent);
-                if (parsed.length > 0) {
+
+              const emailResult = await autoEmailSummaryToParticipants(
+                convId, orgId,
+                `Meeting Summary from ${config.botDisplayName}`,
+                summary
+              );
+              if (emailResult.sentCount > 0) {
+                console.log(`[POST_MEETING_EMAIL] Emailed summary to ${emailResult.sentCount} participant(s)`);
+                await graphApiHelper.sendProactiveMessage(
+                  svcUrl, convId,
+                  `I've also emailed this summary to ${emailResult.sentCount} participant(s)${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`
+                );
+              }
+            } catch (summaryErr) {
+              console.error(`[POST_MEETING_SUMMARY_ERROR] Failed to generate immediate summary:`, summaryErr);
+            }
+          } else {
+            // --- FALLBACK: No live data — retry via Graph API with delays ---
+            console.log(`[POST_MEETING_TRANSCRIPT] No live transcript data — will retry via Graph API for organizer=${orgId}`);
+
+            const attemptFetch = async (attempt: number, maxAttempts: number) => {
+              try {
+                console.log(`[POST_MEETING_TRANSCRIPT] Attempt ${attempt}/${maxAttempts}...`);
+                const postMeetingFetch = await fetchTranscriptCacheFirst(
+                  orgId, webUrl, callStartedAt, undefined
+                );
+                if (postMeetingFetch.entries.length > 0) {
+                  const parsed = postMeetingFetch.entries;
+                  console.log(`[POST_MEETING_TRANSCRIPT] Got ${parsed.length} entries (fromCache=${postMeetingFetch.fromCache})`);
                   liveTranscriptMap.set(convId, parsed);
                   saveTranscriptToFile(convId);
-                  console.log(`[POST_MEETING_TRANSCRIPT] Saved ${parsed.length} transcript entries`);
-                  // Auto-send AI summary — but only if one hasn't been posted in chat recently
-                  // (to avoid duplicating a summary the user explicitly requested during the meeting)
-                  const recentSummary = lastBotResponseMap.get(convId);
-                  const summaryAlreadyPosted =
-                    recentSummary?.contentType === 'summary' &&
-                    Date.now() - recentSummary.timestamp < 60 * 60 * 1000; // within last hour
 
-                  const summary = summaryAlreadyPosted
-                    ? (recentSummary!.content) // reuse the one already shown in chat
-                    : await generateFormattedSummaryHtml(parsed, 'Meeting', 'Participant', [], new Date(callStartedAt));
+                  // Always generate fresh summary from the current transcript
+                  const summary = await generateFormattedSummaryHtml(parsed, 'Meeting', 'Participant', [], new Date(callStartedAt));
 
-                  // ALWAYS show the summary in chat first (even if it was shown before, show it with "Meeting ended!")
                   await graphApiHelper.sendProactiveMessage(
                     svcUrl, convId,
                     `**Meeting ended!** Here's your AI-generated summary:\n\n${summary}`
                   );
-                  
-                  // Auto-email the final summary to all participants
+
                   const emailResult = await autoEmailSummaryToParticipants(
-                    convId,
-                    orgId,
+                    convId, orgId,
                     `Meeting Summary from ${config.botDisplayName}`,
                     summary
                   );
@@ -8607,41 +10670,29 @@ app.http.post('/api/calls', async (req: any, res: any) => {
                   }
                   return; // success
                 } else {
-                  console.log(`[POST_MEETING_TRANSCRIPT] VTT content downloaded but no entries parsed`);
+                  console.log(`[POST_MEETING_TRANSCRIPT] No transcript available yet`);
                 }
-              } else {
-                console.log(`[POST_MEETING_TRANSCRIPT] No transcript available from Graph yet`);
+                if (attempt < maxAttempts) {
+                  const delayMs = Math.min(attempt * 60_000, 180_000);
+                  console.log(`[POST_MEETING_TRANSCRIPT] Retrying in ${delayMs / 1000}s...`);
+                  setTimeout(() => attemptFetch(attempt + 1, maxAttempts), delayMs);
+                } else {
+                  console.log(`[POST_MEETING_TRANSCRIPT] All ${maxAttempts} attempts exhausted — transcript not available`);
+                  await graphApiHelper.sendProactiveMessage(
+                    svcUrl, convId,
+                    `I couldn't retrieve a meeting transcript. Teams may not have generated one — make sure transcription or recording was active during the meeting.`
+                  );
+                }
+              } catch (err) {
+                console.error(`[POST_MEETING_TRANSCRIPT_ERROR] Attempt ${attempt}:`, err);
+                if (attempt < maxAttempts) {
+                  setTimeout(() => attemptFetch(attempt + 1, maxAttempts), 60_000);
+                }
               }
-              // Retry if we haven't exhausted attempts
-              if (attempt < maxAttempts) {
-                const delayMs = attempt * 15_000; // progressive: 15s, 30s, 45s, 60s
-                console.log(`[POST_MEETING_TRANSCRIPT] Retrying in ${delayMs / 1000}s...`);
-                setTimeout(() => attemptFetch(attempt + 1, maxAttempts), delayMs);
-              } else {
-                console.log(`[POST_MEETING_TRANSCRIPT] All ${maxAttempts} attempts exhausted — transcript not available`);
-                await graphApiHelper.sendProactiveMessage(
-                  svcUrl, convId,
-                  `I couldn't retrieve a meeting transcript. Teams may not have generated one — make sure transcription or recording was active during the meeting.`
-                );
-              }
-            } catch (err) {
-              console.error(`[POST_MEETING_TRANSCRIPT_ERROR] Attempt ${attempt}:`, err);
-              if (attempt < maxAttempts) {
-                setTimeout(() => attemptFetch(attempt + 1, maxAttempts), 15_000);
-              }
-            }
-          };
+            };
 
-          // First attempt after 30s, then progressive retries up to 4 attempts
-          setTimeout(() => attemptFetch(1, 4), 30_000);
-        }
-
-        // Keep any existing transcript data around
-        if (conversationId) {
-          const transcriptCount = liveTranscriptMap.get(conversationId)?.filter(e => e.isFinal).length || 0;
-          if (transcriptCount > 0) {
-            console.log(`[CALLS_WEBHOOK] Transcript preserved: ${transcriptCount} entries for ${conversationId}`);
-            saveTranscriptToFile(conversationId);
+            // First attempt after 30s (Graph needs time to finalize), then up to 7 attempts
+            setTimeout(() => attemptFetch(1, 7), 30_000);
           }
         }
 
@@ -8671,24 +10722,6 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         console.log(`[TRANSCRIPTION_STATE] state=${tState}, callId=${callId}, lastModified=${transcription.lastModifiedDateTime || 'N/A'}`);
         // Dump the full transcription object to discover any extra fields (e.g. content)
         console.log(`[TRANSCRIPTION_STATE_FULL]`, JSON.stringify(transcription));
-
-        // Webhook usually gives transcription state changes, not transcript lines.
-        // When state turns active, kick polling immediately to reduce delay in capturing entries.
-        if (tState === 'active') {
-          const polling = liveTranscriptPollingMap.get(callId);
-          if (polling) {
-            polling.transcriptionActive = true;
-          }
-          if (polling && Date.now() - polling.lastPollAt > 1500) {
-            console.log(`[LIVE_TRANSCRIPT_POLL] Webhook-triggered immediate poll for callId=${callId}`);
-            void pollLiveTranscript(polling);
-          }
-        } else if (tState === 'inactive' || tState === 'notStarted') {
-          const polling = liveTranscriptPollingMap.get(callId);
-          if (polling) {
-            polling.transcriptionActive = false;
-          }
-        }
       }
 
       // Also check the legacy/alternate field names just in case
@@ -8749,6 +10782,50 @@ app.http.post('/api/calls', async (req: any, res: any) => {
     }
   } catch (error) {
     console.error(`[CALLS_WEBHOOK_ERROR] Failed to process call event:`, error);
+  }
+});
+
+// Handle Graph subscription notifications for transcript changes
+app.http.post('/api/transcriptNotifications', async (req: any, res: any) => {
+  try {
+    const body = req.body;
+    
+    // Handle subscription validation request from Graph
+    const validationToken = (req.query?.validationToken || req.url?.match(/[?&]validationToken=([^&]+)/)?.[1]);
+    if (validationToken) {
+      console.log(`[TRANSCRIPT_SUB] Subscription validation received`);
+      res.status(200).send(decodeURIComponent(validationToken));
+      return;
+    }
+
+    // Acknowledge immediately
+    res.status(200).json({});
+
+    const notifications = body?.value || [];
+    for (const notification of notifications) {
+      const resource = notification.resource || '';
+      const callId = notification.clientState || '';
+      console.log(`[TRANSCRIPT_SUB] Notification received: resource=${resource}, changeType=${notification.changeType}, callId=${callId}`);
+      
+      // Extract chatId from resource path: /chats/{chatId}/transcripts/{transcriptId}
+      const chatMatch = resource.match(/chats\/([^/]+)\/transcripts/);
+      const chatId = chatMatch ? decodeURIComponent(chatMatch[1]) : null;
+      
+      if (chatId) {
+        console.log(`[TRANSCRIPT_SUB] Transcript created in chat ${chatId} — triggering immediate poll`);
+        
+        // Find the polling state for this call and trigger an immediate poll
+        if (callId) {
+          const polling = liveTranscriptPollingMap.get(callId);
+          if (polling) {
+            polling.consecutiveEmptyPolls = 0;
+            void pollLiveTranscript(polling);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[TRANSCRIPT_SUB_ERROR] Failed to process notification:`, error);
   }
 });
 

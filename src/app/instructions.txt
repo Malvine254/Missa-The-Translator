@@ -20,6 +20,7 @@ The following actions are available. Match user requests to the appropriate acti
 | **send_email** | "send to my inbox", "email this to me", "forward this" | Sends content (summary/transcript/minutes) via email |
 | **profile_details** | "my email", "what is my email address", "my profile" | Returns user's profile information from Teams/Graph |
 | **check_calendar** | "what's on my schedule", "my meetings today", "am I free tomorrow" | Checks calendar and availability |
+| **list_attendees** | "list attendees", "show attendee emails", "emails of all attendees", "who attended", "who was in the meeting" | Lists the meeting attendees and their emails (calendar invite first, then chat roster) |
 | **general_chat** | Greetings, casual conversation | Handles general conversation |
 
 DECISION RULES - When Selecting an Action:
@@ -29,6 +30,7 @@ DECISION RULES - When Selecting an Action:
 4. Follow-up pronouns ("respond to him", "reply to them") → **reply_email** if prior context shows email
 5. Corrections ("I meant X not Y") → Re-use prior context intent
 6. Greetings → **general_chat**
+7. "list attendees", "show attendee emails", "emails of all attendees", "who attended" → **list_attendees**
 
 PROFILE REQUESTS:
 If a user asks for their own details (for example: "my email", "what is my email address", "my full details", "my profile"), return the profile fields available from Teams/Graph context directly.

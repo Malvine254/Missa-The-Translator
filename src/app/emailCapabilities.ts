@@ -36,11 +36,14 @@ export interface EmailSendResult {
 }
 
 export interface InboxRequestAnalysis {
-  senderQuery?: string;
-  wantsUrgentOnly: boolean;
-  wantsUnreadOnly: boolean;
   wantsReplyDraft: boolean;
   maxResults: number;
+}
+
+export interface InboxSearchResult {
+  matchingMessages: MailMessageSummary[];
+  searchReasoning: string;
+  noMatchReason?: string;
 }
 
 function createModel() {
@@ -57,62 +60,99 @@ function parseJsonResponse(raw: string): any {
   return JSON.parse(jsonStr);
 }
 
-function cleanSenderQuery(value?: string | null): string | undefined {
-  if (!value) return undefined;
-  const cleaned = value
-    .replace(/^(what\s+did|show\s+me|check|find|did|can\s+you|you|respond\s+to|reply\s+to)\s+/i, '')
-    .replace(/^(the|a|an|email|emails|message|messages|recent|last|latest)\s+/i, '')
-    .replace(/\b(send|sent|sends)\s+me\b.*$/i, '')
-    .replace(/\b(today|yesterday|this\s+week|last\s+week|recently|latest)\b.*$/i, '')
-    .replace(/\s+(email|emails|message|messages|sent me|in my inbox).*$/i, '')
-    .replace(/'s?$/i, '')       // apostrophe possessive: martin's → martin
-    .replace(/s$/i, '')         // bare possessive: martins → martin
-    .replace(/[?.!,]+$/g, '')
-    .trim();
-  return cleaned || undefined;
-}
-
+/**
+ * Simple inbox request parsing - just detect reply intent and result count.
+ * The actual message matching is done by LLM in llmSearchInbox.
+ */
 export function parseInboxRequest(message: string): InboxRequestAnalysis {
   const text = (message || '').trim();
-  // Only treat as urgent-only when the user explicitly asks for urgent/critical emails.
-  // Avoid matching on words like "priority" or "important" that can appear in email subjects
-  // or casual phrasing ("what important emails do I have" should NOT hard-filter to urgent).
-  const wantsUrgentOnly = /\b(urgent\s+(?:email|mail|message|inbox)|show\s+(?:me\s+)?(?:only\s+)?urgent|critical\s+(?:email|mail)|asap\s+(?:email|mail)|high[\s-]priority\s+email)\b/i.test(text);
-  const wantsUnreadOnly = /(unread|new email|new emails|latest email|latest emails)/i.test(text);
   const wantsReplyDraft = /(draft\s+(?:a\s+)?reply|write\s+(?:a\s+)?reply|respond\s+to|reply\s+to)/i.test(text);
-
   const explicitCount = text.match(/\b(?:top|last|latest)\s+(\d{1,2})\b/i);
-  const maxResults = Math.min(Math.max(Number(explicitCount?.[1] || 5), 1), 10);
+  const maxResults = Math.min(Math.max(Number(explicitCount?.[1] || 10), 1), 20);
 
-  const patterns = [
-    /\bfrom\s+([^?.!,]+)/i,
-    /\bmessage\s+([^?.!,]+?)\s+(?:sent|send|sends)\s+me\b/i,
-    /\bwhat\s+did\s+([^?.!,]+?)\s+(?:sent|send|sends)\s+me\b/i,
-    /\b([^?.!,]+?)\s+(?:sent|send|sends)\s+me\b/i,
-    // Possessive: "martin's email", "martin's last email", "martin's recent message"
-    /\b([a-z]+(?:\s+[a-z]+)*)(?:'s?)\s+(?:recent\s+|last\s+|latest\s+)?(?:email|mail|message)s?\b/i,
-    // "respond to martin", "reply to martin's email", "respond to martin's recent email"
-    /\b(?:respond|reply)\s+to\s+(?:recent\s+)?([a-z]+(?:\s+[a-z]+)*)(?:'s?)?(?:\s+(?:recent\s+|last\s+|latest\s+)?(?:email|mail|message)s?)?\b/i,
-    // "email martin sent", "email by martin"
-    /\b(?:email|message|mail)\s+(?:by|that)\s+([^?.!,]+?)\s+(?:sent|wrote)\b/i,
-  ];
+  return { wantsReplyDraft, maxResults };
+}
 
-  let senderQuery: string | undefined;
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    senderQuery = cleanSenderQuery(match?.[1]);
-    if (senderQuery) {
-      break;
-    }
+/**
+ * LLM-based inbox search - finds messages matching the user's natural language query.
+ * No hardcoded filtering - the LLM decides which messages are relevant.
+ */
+export async function llmSearchInbox(
+  userQuery: string,
+  messages: MailMessageSummary[],
+  runPrompt: PromptRunner,
+  tracking?: PromptTrackingContext
+): Promise<InboxSearchResult> {
+  if (!messages.length) {
+    return { matchingMessages: [], searchReasoning: 'No messages in inbox', noMatchReason: 'Your inbox is empty.' };
   }
 
-  return {
-    senderQuery,
-    wantsUrgentOnly,
-    wantsUnreadOnly,
-    wantsReplyDraft,
-    maxResults,
-  };
+  // Build a compact representation of messages for the LLM
+  const messageList = messages.map((m, idx) => ({
+    idx,
+    from: m.fromName || m.fromAddress,
+    subject: m.subject,
+    preview: (m.bodyPreview || '').slice(0, 150),
+    date: m.receivedDateTime,
+  }));
+
+  try {
+    const prompt = new ChatPrompt({
+      model: createModel(),
+      messages: [
+        {
+          role: 'user',
+          content:
+            `Find emails matching this request: "${userQuery}"\n\n` +
+            `Available emails:\n${JSON.stringify(messageList, null, 1)}\n\n` +
+            `Return JSON with:\n` +
+            `- "matchingIndices": array of idx numbers for matching emails (empty if none match)\n` +
+            `- "reasoning": brief explanation of your selection\n` +
+            `- "noMatchReason": if no matches, explain why (e.g., "No emails from Leonard found")\n\n` +
+            `Match criteria:\n` +
+            `- Sender name mentioned? Match on "from" field (partial match OK: "leonard" matches "Leonard Mwangi")\n` +
+            `- Topic/content mentioned? Match on subject or preview\n` +
+            `- Date mentioned? Check the date field\n` +
+            `- If query is general (e.g., "check inbox"), return recent important emails\n\n` +
+            `Respond ONLY with JSON: {"matchingIndices": [...], "reasoning": "...", "noMatchReason": "..." or null}`,
+        },
+      ],
+    });
+
+    const result = await runPrompt(prompt, userQuery, tracking);
+    const parsed = parseJsonResponse(result.content || '{}');
+    
+    console.log(`[INBOX_LLM_SEARCH] Found ${parsed.matchingIndices?.length || 0} matches: ${parsed.reasoning}`);
+
+    const indices: number[] = Array.isArray(parsed.matchingIndices) ? parsed.matchingIndices : [];
+    const matchingMessages = indices
+      .filter((i: number) => i >= 0 && i < messages.length)
+      .map((i: number) => messages[i]);
+
+    return {
+      matchingMessages,
+      searchReasoning: parsed.reasoning || '',
+      noMatchReason: matchingMessages.length === 0 ? (parsed.noMatchReason || 'No matching emails found.') : undefined,
+    };
+  } catch (error) {
+    console.error('[INBOX_LLM_SEARCH] Search failed:', error);
+    // Fallback: return most recent messages
+    return {
+      matchingMessages: messages.slice(0, 5),
+      searchReasoning: 'LLM search failed, showing recent emails',
+    };
+  }
+}
+
+/**
+ * Simplified alias for backward compatibility.
+ */
+export async function smartParseInboxRequest(
+  message: string,
+  _runPrompt: PromptRunner,
+  _tracking?: PromptTrackingContext
+): Promise<InboxRequestAnalysis> {
+  return parseInboxRequest(message);
 }
 
 export function formatRecipientDisplay(emails: string[], names: string[]): string {
@@ -284,34 +324,51 @@ export async function summarizeInboxMessages(
   tracking?: PromptTrackingContext
 ): Promise<string> {
   if (!messages.length) {
-    return 'I could not find any matching inbox messages.';
+    return 'No matching emails found.';
   }
+
+  // Build message data with full body content
+  const messageData = messages.map(m => ({
+    from: m.fromName || m.fromAddress,
+    subject: m.subject,
+    date: m.receivedDateTime,
+    body: m.bodyContent || m.bodyPreview || '',
+    importance: m.importance,
+    isRead: m.isRead,
+  }));
 
   const prompt = new ChatPrompt({
     messages: [
       {
         role: 'user',
         content:
-          `Review these inbox messages for the request: "${request}"\n\n` +
-          `Messages:\n${JSON.stringify(messages, null, 2)}\n\n` +
-          `Return a concise markdown summary with:\n` +
-          `1. A one-line overview\n` +
-          `2. Up to 5 bullet points for the most urgent or relevant emails\n` +
-          `3. For each item include sender, subject, why it matters, and received time\n` +
-          `4. If the request asks for urgent emails, prioritize importance=high, unread, flagged, or time-sensitive content\n` +
-          `5. If nothing looks urgent, say that clearly`,
+          `User request: "${request}"\n\n` +
+          `Emails:\n${JSON.stringify(messageData, null, 1)}\n\n` +
+          `FORMAT REQUIREMENTS (STRICT):\n` +
+          `1. Start with: **From:** [Sender] | **Date:** [Date]\n` +
+          `2. Next line: **Subject:** [Subject]\n` +
+          `3. Then a blank line, followed by the email content\n` +
+          `4. Use proper markdown:\n` +
+          `   - ## for main section headers (with blank line before/after)\n` +
+          `   - **Bold** for emphasis\n` +
+          `   - Bullet points with proper spacing\n` +
+          `   - Numbered lists where appropriate\n` +
+          `5. If email has structured content (meeting notes, action items), preserve that structure cleanly\n` +
+          `6. Keep concise - summarize long emails to key points\n` +
+          `7. NO run-on headers (each header on its own line)\n` +
+          `8. NO walls of text - use paragraphs and spacing`,
       },
     ],
-    instructions: 'You triage inbox email. Be concise, practical, and do not invent details not present in the message list.',
+    instructions: 'Output clean, professional markdown. Headers on separate lines. Proper spacing between sections.',
     model: createModel(),
   });
 
   const response = await runPrompt(prompt, '', tracking ? {
     ...tracking,
-    estimatedInputText: `${request}\n${JSON.stringify(messages)}`,
+    estimatedInputText: `${request}\n${JSON.stringify(messageData)}`,
   } : undefined);
 
-  return response.content || 'I could not summarize the inbox messages.';
+  return response.content || 'Could not process inbox messages.';
 }
 
 export async function draftReplyFromInboxThread(
