@@ -8,7 +8,7 @@ This system goes beyond traditional meeting tools by coordinating multiple AI ag
 
 ## 🎥 Demo Video
 
-[![Watch the demo](https://img.youtube.com/vi/YOUR_VIDEO_ID/0.jpg)](https://www.youtube.com/watch?v=YOUR_VIDEO_ID)
+[![Watch the demo](https://img.youtube.com/vi/yo6T_LnPowg/0.jpg)](https://www.youtube.com/watch?vyo6T_LnPowg)
 
 ---
 
