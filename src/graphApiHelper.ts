@@ -1380,21 +1380,29 @@ class GraphApiHelper {
       // Time-window filtering:
       // ALWAYS filter by minCreatedTimestamp when provided — this is CRITICAL for recurring
       // meetings where multiple call sessions share the same meetingId but have different
-      // transcripts. Without this filter, we'd pick up transcripts from old sessions.
+      // transcripts. Without this filter, we’d pick up transcripts from old sessions.
+      // Apply maxCreatedTimestamp upper bound to prevent cross-meeting transcript contamination
+      // when getAllTranscripts fallback picks transcripts from newer, unrelated meetings.
       let filteredTranscripts = transcripts;
-      if (minCreatedTimestamp) {
-        // Filter by lower bound (allow 1-hour grace before call start for early transcripts)
-        const lowerBound = minCreatedTimestamp - (60 * 60 * 1000);
+      if (minCreatedTimestamp || maxCreatedTimestamp) {
+        // Lower bound: 1-hour grace before call start for early transcripts
+        const lowerBound = minCreatedTimestamp ? minCreatedTimestamp - (60 * 60 * 1000) : 0;
+        // Upper bound: 2-hour grace after call end for Teams processing delay
+        const upperBound = maxCreatedTimestamp ? maxCreatedTimestamp + (2 * 60 * 60 * 1000) : Infinity;
+
         filteredTranscripts = transcripts.filter((t: any) => {
           const created = new Date(t.createdDateTime || 0).getTime();
-          return created >= lowerBound;
+          if (minCreatedTimestamp && created < lowerBound) return false;
+          if (maxCreatedTimestamp && created > upperBound) return false;
+          return true;
         });
 
-        const minDate = new Date(lowerBound).toISOString();
-        console.log(`[GRAPH_API] Time-window filter: ${transcripts.length} transcripts -> ${filteredTranscripts.length} created after ${minDate}`);
+        const minDate = minCreatedTimestamp ? new Date(lowerBound).toISOString() : 'N/A';
+        const maxDate = maxCreatedTimestamp ? new Date(upperBound).toISOString() : 'N/A';
+        console.log(`[GRAPH_API] Time-window filter: ${transcripts.length} transcripts -> ${filteredTranscripts.length} in window [${minDate}, ${maxDate}]`);
 
         if (filteredTranscripts.length === 0) {
-          console.log(`[GRAPH_API] No transcripts found after call start time - meeting transcript may not exist yet`);
+          console.log(`[GRAPH_API] No transcripts found in the specified time window - meeting transcript may not exist yet`);
           return null;
         }
       }

@@ -1,36 +1,36 @@
 {
   "startedAt": 1773336372603,
-  "lastUpdatedAt": 1773685480351,
-  "totalMessages": 411,
+  "lastUpdatedAt": 1773751176144,
+  "totalMessages": 422,
   "totalMeetingsJoined": 7,
   "maxUsers": 200,
   "freeTierMonthlyMeetingLimit": 5,
   "enforceGlobalLimits": false,
   "modelInputCostPer1kUsd": 0.00015,
   "modelOutputCostPer1kUsd": 0.0006,
-  "totalEstimatedInputTokens": 105992,
-  "totalEstimatedOutputTokens": 108471,
-  "totalEstimatedTokens": 214463,
-  "totalEstimatedCostUsd": 0.08098139999999995,
+  "totalEstimatedInputTokens": 108179,
+  "totalEstimatedOutputTokens": 109097,
+  "totalEstimatedTokens": 217276,
+  "totalEstimatedCostUsd": 0.08168504999999994,
   "users": {
     "ceb9c46a-a785-4538-9abe-e8580dd4a58b": {
       "userId": "ceb9c46a-a785-4538-9abe-e8580dd4a58b",
       "displayName": "Malvine Owuor",
       "tenantId": "588cadf4-9902-4465-86c0-8bcf04f4f102",
-      "totalMessages": 411,
-      "meetingJoinRequests": 89,
+      "totalMessages": 422,
+      "meetingJoinRequests": 92,
       "monthlyMeetingsJoined": {
-        "2026-03": 87
+        "2026-03": 90
       },
       "monthlyMeetingLimitOverride": null,
       "tokenPolicy": "unlimited",
       "tokenLimit": null,
-      "estimatedInputTokens": 105992,
-      "estimatedOutputTokens": 108471,
-      "estimatedTotalTokens": 214463,
-      "estimatedCostUsd": 0.08098139999999995,
+      "estimatedInputTokens": 108179,
+      "estimatedOutputTokens": 109097,
+      "estimatedTotalTokens": 217276,
+      "estimatedCostUsd": 0.08168504999999994,
       "firstSeenAt": 1773336372606,
-      "lastSeenAt": 1773685480351,
+      "lastSeenAt": 1773751176144,
       "blocked": false,
       "blockReason": ""
     }
@@ -96,12 +96,12 @@
       "meetingId": "19:meeting_ODQ0M2YwYmYtOTQ4YS00MWNlLWI4ZDQtYjgwNzQ1ZjlmOWQz@thread.v2",
       "meetingName": "Test Agent New",
       "firstSeenAt": 1773387414632,
-      "lastSeenAt": 1773682514752,
-      "joinRequests": 25,
-      "estimatedInputTokens": 18736,
-      "estimatedOutputTokens": 21366,
-      "estimatedTotalTokens": 40102,
-      "estimatedCostUsd": 0.015630000000000005,
+      "lastSeenAt": 1773689125538,
+      "joinRequests": 28,
+      "estimatedInputTokens": 20921,
+      "estimatedOutputTokens": 21915,
+      "estimatedTotalTokens": 42836,
+      "estimatedCostUsd": 0.016287150000000004,
       "users": [
         "ceb9c46a-a785-4538-9abe-e8580dd4a58b"
       ]
@@ -202,12 +202,21 @@
     },
     "2026-03-16": {
       "day": "2026-03-16",
-      "messages": 97,
-      "meetingsJoined": 18,
-      "inputTokens": 36986,
-      "outputTokens": 37502,
-      "totalTokens": 74488,
-      "costUsd": 0.028049099999999997
+      "messages": 105,
+      "meetingsJoined": 21,
+      "inputTokens": 39173,
+      "outputTokens": 38128,
+      "totalTokens": 77301,
+      "costUsd": 0.028752749999999997
+    },
+    "2026-03-17": {
+      "day": "2026-03-17",
+      "messages": 3,
+      "meetingsJoined": 0,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "totalTokens": 0,
+      "costUsd": 0
     }
   },
   "perUserDailyUsage": {
@@ -250,19 +259,27 @@
       },
       "2026-03-16": {
         "day": "2026-03-16",
-        "messages": 97,
-        "meetingsJoined": 18,
-        "inputTokens": 36986,
-        "outputTokens": 37502,
-        "totalTokens": 74488,
-        "costUsd": 0.028049099999999997
+        "messages": 105,
+        "meetingsJoined": 21,
+        "inputTokens": 39173,
+        "outputTokens": 38128,
+        "totalTokens": 77301,
+        "costUsd": 0.028752749999999997
+      },
+      "2026-03-17": {
+        "day": "2026-03-17",
+        "messages": 3,
+        "meetingsJoined": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "costUsd": 0
       }
     }
   },
   "activeMeetingConversationIds": [
     "19:meeting_ZTdmYjVkOTAtNWE0MS00YjAyLWFmM2EtOGVjNGJkYWU2ZDUx@thread.v2",
     "19:meeting_MDAyMmY1OTAtOTdlYi00ZGNkLWE1NWUtMjk3MjFkNjZlMGYy@thread.v2",
-    "19:meeting_ODQ0M2YwYmYtOTQ4YS00MWNlLWI4ZDQtYjgwNzQ1ZjlmOWQz@thread.v2",
     "19:meeting_MTI5ZmUxY2ItNTJlMy00NjQ2LTk4ZTctY2RiZmVhMjhmNzg2@thread.v2",
     "19:meeting_NGJiM2U5NjMtYWQ2Mi00MjEzLWE5YjYtODQ1MzU1OGI4NmNk@thread.v2"
   ],

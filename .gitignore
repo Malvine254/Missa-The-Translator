@@ -1,4 +1,5 @@
 # TeamsFx files
+env/.env.*
 env/.env.*.user
 env/.env.local
 env/.env.sandbox
