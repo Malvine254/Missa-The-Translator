@@ -128,21 +128,9 @@ Instead of a single assistant, multiple agents work together to:
 
 ---
 
-## 🔮 Future Improvements
-
-- Voice interaction support  
-- Deeper integrations (Slack, Teams, CRM)  
-- Action item tracking dashboard  
-- Multi-language support  
-- Enhanced memory across meetings  
-
----
-
 ## 🧪 Getting Started
 
 ```bash
-# Clone the repo
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
 
 # Install dependencies
 npm install
