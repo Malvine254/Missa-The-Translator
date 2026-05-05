@@ -2382,67 +2382,87 @@ function transcriptEntriesToPlainText(entries: TranscriptEntry[]): string {
  */
 function parseTranscriptTextToEntries(text: string): TranscriptEntry[] {
   if (!text || text.trim() === '') return [];
-  
+
   const entries: TranscriptEntry[] = [];
   const lines = text.split('\n');
-  // VTT timestamp placeholder for entries without timing
   const defaultTimestamp = '00:00:00.000';
-  
-  for (const line of lines) {
+
+  // Header keyword prefixes written by saveTranscriptToFileAsync — skip these lines
+  const headerPrefixes = [
+    'MEETING TRANSCRIPT', '==================', 'TRANSCRIPT', '----------',
+    'Title:', 'Date:', 'Time:', 'Duration:', 'Entries:', 'Status:',
+    'Call ID:', 'Meeting ID:', 'Conversation:',
+  ];
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
     const trimmed = line.trim();
-    if (!trimmed) continue;
-    
-    // Try: "Speaker (00:00:00.000): text"
+
+    if (!trimmed || headerPrefixes.some(p => trimmed.startsWith(p))) {
+      i++;
+      continue;
+    }
+
+    // Pattern 1: "Speaker (00:00:00.000): text" — transcriptEntriesToPlainText format
     let match = trimmed.match(/^(.+?)\s*\((\d{2}:\d{2}:\d{2}\.\d{3})\):\s*(.+)$/);
     if (match) {
-      entries.push({
-        speaker: match[1].trim(),
-        text: match[3].trim(),
-        timestamp: match[2], // Keep original timestamp
-        isFinal: true,
-      });
+      entries.push({ speaker: match[1].trim(), text: match[3].trim(), timestamp: match[2], isFinal: true });
+      i++;
       continue;
     }
-    
-    // Try: "Speaker (H:MM:SS): text" (compact format without ms)
+
+    // Pattern 2: "Speaker (H:MM:SS): text" — compact with colon after closing paren
     match = trimmed.match(/^(.+?)\s*\((\d{1,2}:\d{2}:\d{2})\):\s*(.+)$/);
     if (match) {
-      // Pad the compact timestamp to VTT format
       const parts = match[2].split(':');
       const paddedTs = `${parts[0].padStart(2, '0')}:${parts[1]}:${parts[2]}.000`;
-      entries.push({
-        speaker: match[1].trim(),
-        text: match[3].trim(),
-        timestamp: paddedTs,
-        isFinal: true,
-      });
+      entries.push({ speaker: match[1].trim(), text: match[3].trim(), timestamp: paddedTs, isFinal: true });
+      i++;
       continue;
     }
-    
-    // Try: "[Speaker]: text"
+
+    // Pattern 3 (multi-line): "Speaker (H:MM:SS)" alone on a line, followed by "  - text" bullet lines
+    // This is the format written by saveTranscriptToFileAsync
+    match = trimmed.match(/^(.+?)\s*\((\d{1,2}:\d{2}:\d{2})\)$/);
+    if (match) {
+      const speaker = match[1].trim();
+      const parts = match[2].split(':');
+      const paddedTs = `${parts[0].padStart(2, '0')}:${parts[1]}:${parts[2]}.000`;
+      const textParts: string[] = [];
+      i++;
+      while (i < lines.length) {
+        const bulletMatch = lines[i].match(/^[ \t]*-[ \t]+(.+)$/);
+        if (bulletMatch) {
+          textParts.push(bulletMatch[1].trim());
+          i++;
+        } else {
+          break;
+        }
+      }
+      if (textParts.length > 0) {
+        entries.push({ speaker, text: textParts.join(' '), timestamp: paddedTs, isFinal: true });
+      }
+      continue;
+    }
+
+    // Pattern 4: "[Speaker]: text"
     match = trimmed.match(/^\[(.+?)\]:\s*(.+)$/);
     if (match) {
-      entries.push({
-        speaker: match[1].trim(),
-        text: match[2].trim(),
-        timestamp: defaultTimestamp,
-        isFinal: true,
-      });
+      entries.push({ speaker: match[1].trim(), text: match[2].trim(), timestamp: defaultTimestamp, isFinal: true });
+      i++;
       continue;
     }
-    
-    // Try: "Speaker: text"
+
+    // Pattern 5: "Speaker: text" (generic fallback — limit speaker name to avoid false positives)
     match = trimmed.match(/^(.+?):\s*(.+)$/);
-    if (match && match[1].length < 50) { // Limit speaker name length to avoid false positives
-      entries.push({
-        speaker: match[1].trim(),
-        text: match[2].trim(),
-        timestamp: defaultTimestamp,
-        isFinal: true,
-      });
+    if (match && match[1].length < 50) {
+      entries.push({ speaker: match[1].trim(), text: match[2].trim(), timestamp: defaultTimestamp, isFinal: true });
     }
+
+    i++;
   }
-  
+
   return entries;
 }
 
@@ -4180,6 +4200,42 @@ function areJoinUrlsEquivalent(left?: string, right?: string): boolean {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+function isGenericMeetingTitle(title?: string): boolean {
+  if (!title) return true;
+  const normalized = title.trim().toLowerCase();
+  return ['meeting', 'untitled meeting', 'microsoft teams meeting', 'teams meeting', 'meet now'].includes(normalized);
+}
+
+async function resolveDisplayMeetingTitle(
+  conversationId: string,
+  userId: string,
+  preferredTitle?: string,
+  transcriptTitle?: string
+): Promise<string> {
+  // Try each candidate in priority order
+  const candidates = [
+    preferredTitle,
+    getCachedMeetingContext(conversationId)?.subject,
+    transcriptTitle,
+  ];
+
+  const bestCandidate = candidates.find(c => c && !isGenericMeetingTitle(c));
+  if (bestCandidate) return bestCandidate;
+
+  // All candidates are generic — try calendar lookup
+  try {
+    const calendarResult = await resolveCalendarAttendeesForConversationOnly(userId, conversationId);
+    if (calendarResult.meetingSubject && !isGenericMeetingTitle(calendarResult.meetingSubject)) {
+      return calendarResult.meetingSubject;
+    }
+  } catch {
+    // Ignore calendar lookup failures
+  }
+
+  // Fall back to first non-empty candidate or generic default
+  return candidates.find(c => !!c) || 'Meeting';
+}
+
 async function resolveCalendarAttendeesForConversationOnly(
   userId: string,
   conversationId: string
@@ -4396,8 +4452,14 @@ const createTokenFactory = () => {
 // Configure authentication
 const credentialOptions: Record<string, any> = {
   clientId: process.env.CLIENT_ID || '',
-  tenantId: process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID,
 };
+
+// Only pass tenantId for SingleTenant bots — MultiTenant bots must omit it
+// so the Bot Framework connector accepts tokens from any tenant
+const isMultiTenant = (process.env.BOT_TYPE || '').toLowerCase() === 'multitenant';
+if (!isMultiTenant) {
+  credentialOptions.tenantId = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID;
+}
 
 if (config.MicrosoftAppType === "UserAssignedMsi") {
   credentialOptions.token = createTokenFactory();
@@ -5276,7 +5338,11 @@ Output valid JSON only.`,
           console.log(`[SUMMARIZE] Found ${transcriptEntries.length} transcript entries, generating AI summary...`);
           const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
           const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
-          const meetingTitle = chatInfo?.subject || 'Meeting';
+          const meetingTitle = await resolveDisplayMeetingTitle(
+            activity.conversation.id,
+            requesterId,
+            chatInfo?.subject
+          );
           const memberList = chatMembers.length > 0 ? chatMembers : [];
 
           generatedSummary = await generateFormattedSummaryHtml(
@@ -5388,7 +5454,11 @@ Output valid JSON only.`,
               liveTranscriptMap.set(activity.conversation.id, parsed);
               saveTranscriptToFile(activity.conversation.id);
               
-              const meetingTitle = chatInfo.subject || 'Meeting';
+              const meetingTitle = await resolveDisplayMeetingTitle(
+                activity.conversation.id,
+                requesterId,
+                chatInfo.subject
+              );
               const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
               
               generatedSummary = await generateFormattedSummaryHtml(
@@ -5527,7 +5597,11 @@ Output valid JSON only.`,
         console.log(`[MEETING_OVERVIEW] Generating overview from ${transcriptEntries.length} entries...`);
         const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
         const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
-        const meetingTitle = chatInfo?.subject || 'Meeting';
+        const meetingTitle = await resolveDisplayMeetingTitle(
+          activity.conversation.id,
+          requesterId,
+          chatInfo?.subject
+        );
         const memberList = chatMembers.length > 0 ? chatMembers : [];
 
         const overviewHtml = await generateFormattedSummaryHtml(
@@ -5860,7 +5934,11 @@ Output valid JSON only.`,
         const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
         console.log(`[TRANSCRIBE_DEBUG] Step 4: Got ${chatMembers.length} chat members`);
         
-        const meetingTitle = chatInfo?.subject || 'Meeting';
+        const meetingTitle = await resolveDisplayMeetingTitle(
+          activity.conversation.id,
+          requesterId,
+          chatInfo?.subject
+        );
         const speakerList = chatMembers.length > 0 ? chatMembers : [];
 
         // ALWAYS try Graph API first for the most up-to-date post-meeting transcript
@@ -5966,7 +6044,12 @@ Output valid JSON only.`,
                   saveTranscriptToFile(activity.conversation.id);
 
                   // Use meeting metadata
-                  const graphTitle = meetingOnlineInfo.subject || meetingTitle;
+                  const graphTitle = await resolveDisplayMeetingTitle(
+                    activity.conversation.id,
+                    requesterId,
+                    meetingOnlineInfo.subject,
+                    meetingTitle
+                  );
                   const transcript = await buildTranscriptHtml(
                     parsed.length > 80 ? parsed.slice(-80) : parsed,
                     graphTitle, speakerList,
@@ -6056,7 +6139,11 @@ Output valid JSON only.`,
       await sendTypingIndicator(send);
       try {
         const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
-        const meetingTitle = chatInfo?.subject || 'Meeting';
+        const meetingTitle = await resolveDisplayMeetingTitle(
+          activity.conversation.id,
+          requesterId,
+          chatInfo?.subject
+        );
 
         const fetchingActivity = new MessageActivity(
           `? **Fetching transcript for this channel conversation...**`
@@ -6463,7 +6550,11 @@ Output valid JSON only.`,
           console.log(`[MINUTES] Found ${transcriptEntries.length} transcript entries, generating formal minutes...`);
           const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
           const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
-          const meetingTitle = chatInfo?.subject || 'Meeting';
+          const meetingTitle = await resolveDisplayMeetingTitle(
+            activity.conversation.id,
+            requesterId,
+            chatInfo?.subject
+          );
           const memberList = chatMembers.length > 0 ? chatMembers : [userName];
 
           generatedMinutes = await generateMinutesHtml(
@@ -6498,7 +6589,11 @@ Output valid JSON only.`,
                 liveTranscriptMap.set(activity.conversation.id, parsed);
                 saveTranscriptToFile(activity.conversation.id);
                 
-                const meetingTitle = chatInfo.subject || 'Meeting';
+                const meetingTitle = await resolveDisplayMeetingTitle(
+                  activity.conversation.id,
+                  requesterId,
+                  chatInfo.subject
+                );
                 const chatMembers = await graphApiHelper.getChatMembers(activity.conversation.id);
                 
                 generatedMinutes = await generateMinutesHtml(
@@ -6688,7 +6783,11 @@ User question: "${effectiveQuery || activity.text}"`
       if (isMeetingConversation) {
       try {
         const chatInfo = await resolveMeetingInfoForConversation(activity.conversation.id);
-        const meetingTitle = chatInfo?.subject || 'Meeting';
+        const meetingTitle = await resolveDisplayMeetingTitle(
+          activity.conversation.id,
+          requesterId,
+          chatInfo?.subject
+        );
 
         const transcriptResult = await getTranscriptWithContext(activity.conversation.id);
         const transcriptContext = transcriptResult.text;
@@ -7648,7 +7747,12 @@ Respond with JSON only:
             const chatMembers = resolvedMemberList.length > 0
               ? []
               : await graphApiHelper.getChatMembers(activity.conversation.id);
-            const meetingTitle = resolvedMeetingTitle || chatInfo?.subject || transcriptResult.meetingSubject || 'Meeting';
+            const meetingTitle = await resolveDisplayMeetingTitle(
+              activity.conversation.id,
+              requesterId,
+              resolvedMeetingTitle || chatInfo?.subject,
+              transcriptResult.meetingSubject
+            );
             const meetingStartTime = resolvedMeetingStart || chatInfo?.startDateTime;
             const memberList = resolvedMemberList.length > 0
               ? resolvedMemberList
@@ -10610,24 +10714,26 @@ app.http.post('/api/calls', async (req: any, res: any) => {
             try {
               // Always generate a FRESH summary from the current call's transcript
               // (never reuse a cached summary — it may be from a previous call session)
-              const summary = await generateFormattedSummaryHtml(liveData, 'Meeting', 'Participant', [], new Date(callStartedAt));
-
-              await graphApiHelper.sendProactiveMessage(
-                svcUrl, convId,
-                `**Meeting ended!** Here's your AI-generated summary:\n\n${summary}`
-              );
+              const autoMeetingTitle = await resolveDisplayMeetingTitle(convId, orgId, getCachedMeetingContext(convId)?.subject);
+              const summary = await generateFormattedSummaryHtml(liveData, autoMeetingTitle, 'Participant', [], new Date(callStartedAt));
 
               const emailResult = await autoEmailSummaryToParticipants(
                 convId, orgId,
                 `Meeting Summary from ${config.botDisplayName}`,
                 summary
               );
+
+              const emailNote = emailResult.sentCount > 0
+                ? `\n\n---\n*I've also emailed this summary to **${emailResult.sentCount} participant(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.*`
+                : '';
+
+              await graphApiHelper.sendProactiveMessage(
+                svcUrl, convId,
+                `**Meeting ended!** Here's your AI-generated summary:\n\n${summary}${emailNote}`
+              );
+
               if (emailResult.sentCount > 0) {
                 console.log(`[POST_MEETING_EMAIL] Emailed summary to ${emailResult.sentCount} participant(s)`);
-                await graphApiHelper.sendProactiveMessage(
-                  svcUrl, convId,
-                  `I've also emailed this summary to ${emailResult.sentCount} participant(s)${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`
-                );
               }
             } catch (summaryErr) {
               console.error(`[POST_MEETING_SUMMARY_ERROR] Failed to generate immediate summary:`, summaryErr);
@@ -10649,24 +10755,26 @@ app.http.post('/api/calls', async (req: any, res: any) => {
                   saveTranscriptToFile(convId);
 
                   // Always generate fresh summary from the current transcript
-                  const summary = await generateFormattedSummaryHtml(parsed, 'Meeting', 'Participant', [], new Date(callStartedAt));
-
-                  await graphApiHelper.sendProactiveMessage(
-                    svcUrl, convId,
-                    `**Meeting ended!** Here's your AI-generated summary:\n\n${summary}`
-                  );
+                  const autoMeetingTitle = await resolveDisplayMeetingTitle(convId, orgId, getCachedMeetingContext(convId)?.subject);
+                  const summary = await generateFormattedSummaryHtml(parsed, autoMeetingTitle, 'Participant', [], new Date(callStartedAt));
 
                   const emailResult = await autoEmailSummaryToParticipants(
                     convId, orgId,
                     `Meeting Summary from ${config.botDisplayName}`,
                     summary
                   );
+
+                  const emailNote = emailResult.sentCount > 0
+                    ? `\n\n---\n*I've also emailed this summary to **${emailResult.sentCount} participant(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.*`
+                    : '';
+
+                  await graphApiHelper.sendProactiveMessage(
+                    svcUrl, convId,
+                    `**Meeting ended!** Here's your AI-generated summary:\n\n${summary}${emailNote}`
+                  );
+
                   if (emailResult.sentCount > 0) {
                     console.log(`[POST_MEETING_EMAIL] Emailed summary to ${emailResult.sentCount} participant(s)`);
-                    await graphApiHelper.sendProactiveMessage(
-                      svcUrl, convId,
-                      `I've also emailed this summary to ${emailResult.sentCount} participant(s)${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`
-                    );
                   }
                   return; // success
                 } else {

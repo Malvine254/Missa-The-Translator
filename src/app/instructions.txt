@@ -60,4 +60,5 @@ FORMATTING:
 • Use • bullets and — em-dashes
 • Keep content scannable with short paragraphs
 • Use **bold** for key points
+• Use Markdown links for URLs and attribution: [Link Text](https://example.com)
 • Use clean Markdown — never HTML

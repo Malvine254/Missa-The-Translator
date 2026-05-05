@@ -8,17 +8,25 @@ import config from './config';
  */
 function markdownToHtml(markdown: string): string {
   if (!markdown) return '';
+
+  const anchorStyle = 'color:#2563eb;text-decoration:none;font-weight:600;border-bottom:1px solid #bfdbfe;';
   
   let html = markdown
     // Escape HTML entities first
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+
+    // Allow explicit HTML anchor tags in source text by converting escaped tags back to clickable links
+    .replace(/&lt;a\s+href=["'](https?:\/\/[^"']+)["'][^&]*&gt;([\s\S]*?)&lt;\/a&gt;/gi, `<a href="$1" target="_blank" rel="noopener noreferrer" style="${anchorStyle}">$2</a>`)
     
     // Headers (## Header → <h2>)
     .replace(/^### (.+)$/gm, '<h3 style="color:#333;margin:16px 0 8px 0;">$1</h3>')
     .replace(/^## (.+)$/gm, '<h2 style="color:#333;margin:20px 0 10px 0;">$1</h2>')
     .replace(/^# (.+)$/gm, '<h1 style="color:#333;margin:24px 0 12px 0;">$1</h1>')
+
+    // Markdown links [text](url)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, `<a href="$2" target="_blank" rel="noopener noreferrer" style="${anchorStyle}">$1</a>`)
     
     // Bold and italic
     .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
@@ -55,6 +63,13 @@ function markdownToHtml(markdown: string): string {
   }
   
   return `<div style="font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#333;">${html}</div>`;
+}
+
+function summarizeError(error: any): string {
+  const status = error?.response?.status;
+  const code = error?.response?.data?.error?.code || error?.response?.data?.error;
+  const message = error?.response?.data?.error?.message || error?.response?.data?.error_description || error?.message || 'Unknown error';
+  return `status=${status || 'n/a'}${code ? ` code=${code}` : ''} message=${message}`;
 }
 
 interface UserInfo {
@@ -178,6 +193,28 @@ class GraphApiHelper {
     return null;
   }
 
+  /**
+   * Extract the organizer's tenant ID from the joinWebUrl context parameter.
+   * URL context format: {"Tid":"<tenant-guid>","Oid":"<organizer-guid>"}
+   */
+  private extractTenantIdFromJoinWebUrl(joinWebUrl: string): string | null {
+    if (!joinWebUrl) return null;
+    try {
+      const url = new URL(joinWebUrl);
+      const context = url.searchParams.get('context');
+      if (context) {
+        const decoded = decodeURIComponent(context);
+        const parsed = JSON.parse(decoded);
+        if (parsed?.Tid && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.Tid)) {
+          return parsed.Tid;
+        }
+      }
+    } catch (e) {
+      console.warn(`[GRAPH_API] Failed to parse tenant from joinWebUrl: ${e}`);
+    }
+    return null;
+  }
+
   private async buildMeetingInfoFromRecentMessages(chatId: string, subject?: string): Promise<OnlineMeetingInfo | null> {
     try {
       const messages = await this.getChatMessages(chatId, 30);
@@ -201,8 +238,10 @@ class GraphApiHelper {
           continue;
         }
 
-        const tenantId = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID;
-        console.log(`[GRAPH_API] Fallback meeting info from chat messages. organizer=${organizerId} (from ${urlOrganizerId ? 'URL' : 'msg sender'}), joinWebUrl=present`);
+        // Extract tenant from the URL; only fall back to bot's home tenant as last resort
+        const urlTenantId = this.extractTenantIdFromJoinWebUrl(joinWebUrl);
+        const tenantId = urlTenantId || process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID;
+        console.log(`[GRAPH_API] Fallback meeting info from chat messages. organizer=${organizerId} (from ${urlOrganizerId ? 'URL' : 'msg sender'}), tenant=${tenantId} (from ${urlTenantId ? 'URL' : 'env'}), joinWebUrl=present`);
 
         return {
           joinWebUrl,
@@ -237,15 +276,13 @@ class GraphApiHelper {
       }
       return tokenResponse.token;
     } catch (error) {
-      console.error(`[MSI_AUTH_ERROR] Failed to obtain managed identity token:`, error);
+      console.error(`[MSI_AUTH_ERROR] Failed to obtain managed identity token: ${summarizeError(error)}`);
       return '';
     }
   }
 
   private logGraphError(context: string, error: any) {
-    const status = error?.response?.status;
-    const message = error?.response?.data?.error?.message || error?.message || 'Unknown error';
-    console.error(`[GRAPH_API_ERROR] ${context}. status=${status || 'n/a'} message=${message}`);
+    console.error(`[GRAPH_API_ERROR] ${context}. ${summarizeError(error)}`);
   }
 
   constructor(tokenFactory?: () => Promise<string>) {
@@ -263,7 +300,7 @@ class GraphApiHelper {
           const token = await this.tokenFactory();
           request.headers.Authorization = `Bearer ${token}`;
         } catch (error) {
-          console.warn('Token retrieval failed, proceeding without auth:', error);
+          console.warn(`[GRAPH_AUTH] Token retrieval failed, proceeding without auth: ${summarizeError(error)}`);
         }
       }
       return request;
@@ -782,7 +819,16 @@ class GraphApiHelper {
           console.log(`[GRAPH_API]   ✓ Organizer IDs match: ${organizerId}`);
         }
         
-        console.log(`[GRAPH_API]   → Final organizer ID: ${organizerId}`);
+        // Extract organizer's tenant ID from the join URL if not provided by the chat API
+        if (!tenantId && meetingInfo.joinWebUrl) {
+          const urlTenantId = this.extractTenantIdFromJoinWebUrl(meetingInfo.joinWebUrl);
+          if (urlTenantId) {
+            console.log(`[GRAPH_API]   - URL-extracted tenant: ${urlTenantId}`);
+            tenantId = urlTenantId;
+          }
+        }
+        
+        console.log(`[GRAPH_API]   → Final organizer ID: ${organizerId}, tenant: ${tenantId || 'unknown'}`);
         
         baseInfo = {
           joinWebUrl: meetingInfo.joinWebUrl,
@@ -857,11 +903,10 @@ class GraphApiHelper {
    * On Azure with UserAssignedMsi, uses managed identity (permissions must be granted via PowerShell).
    * Locally, uses CLIENT_ID/CLIENT_SECRET client credentials flow.
    */
-  private async getTokenUsingBotCredentials(): Promise<string> {
+  private async getTokenUsingBotCredentials(preferredTenantId?: string): Promise<string> {
     try {
       const clientId = process.env.CLIENT_ID;
       const clientSecret = process.env.CLIENT_SECRET;
-      const tenantId = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID;
 
       const isUserAssignedMsi = (process.env.BOT_TYPE || '').toLowerCase() === 'userassignedmsi';
       if (isUserAssignedMsi || !clientSecret) {
@@ -869,8 +914,8 @@ class GraphApiHelper {
         return await this.getManagedIdentityToken('https://graph.microsoft.com/.default');
       }
 
-      if (!clientId || !clientSecret || !tenantId) {
-        console.warn(`[CALLS_AUTH] Missing bot credentials: CLIENT_ID=${!!clientId}, CLIENT_SECRET=${!!clientSecret}, TENANT_ID=${!!tenantId}`);
+      if (!clientId || !clientSecret) {
+        console.warn(`[CALLS_AUTH] Missing bot credentials: CLIENT_ID=${!!clientId}, CLIENT_SECRET=${!!clientSecret}`);
         return '';
       }
 
@@ -880,16 +925,37 @@ class GraphApiHelper {
       form.append('client_secret', clientSecret);
       form.append('scope', 'https://graph.microsoft.com/.default');
       form.append('grant_type', 'client_credentials');
+      const homeTenantId = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID || '';
+      const tenantCandidates = [preferredTenantId, homeTenantId].filter((value, index, list): value is string => !!value && list.indexOf(value) === index);
 
-      const response = await axios.post(
-        `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-        form.toString(),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-      );
-      console.log(`[CALLS_AUTH] Bot app token obtained (expires in ${response.data.expires_in}s)`);
-      return response.data.access_token;
+      if (tenantCandidates.length === 0) {
+        console.warn('[CALLS_AUTH] No tenant ID available for bot credential token acquisition');
+        return '';
+      }
+
+      let lastError: unknown;
+      for (const tenantId of tenantCandidates) {
+        try {
+          console.log(`[CALLS_AUTH] Requesting bot app token from tenant ${tenantId}`);
+          const response = await axios.post(
+            `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+            form.toString(),
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+          );
+          console.log(`[CALLS_AUTH] Bot app token obtained from tenant ${tenantId} (expires in ${response.data.expires_in}s)`);
+          return response.data.access_token;
+        } catch (error: any) {
+          lastError = error;
+          const errorCode = error?.response?.data?.error;
+          const errorDescription = error?.response?.data?.error_description || error?.message;
+          console.warn(`[CALLS_AUTH] Token request failed for tenant ${tenantId}: ${errorCode || 'unknown_error'} ${errorDescription || ''}`.trim());
+        }
+      }
+
+      console.error(`[CALLS_AUTH_ERROR] Failed to obtain bot app token from all tenant candidates: ${summarizeError(lastError)}`);
+      return '';
     } catch (error) {
-      console.error(`[CALLS_AUTH_ERROR] Failed to obtain bot app token:`, error);
+      console.error(`[CALLS_AUTH_ERROR] Failed to obtain bot app token: ${summarizeError(error)}`);
       return '';
     }
   }
@@ -916,13 +982,21 @@ class GraphApiHelper {
       console.log(`[CALLS_API] Callback URI: ${callbackUri}`);
 
       // Use bot app token (not Graph app token) - the Calls API requires the registered bot identity
-      const botToken = await this.getTokenUsingBotCredentials();
+      const botToken = await this.getTokenUsingBotCredentials(meetingInfo.organizer?.tenantId || tenantId);
       if (!botToken) {
         console.warn(`[CALLS_API] Could not obtain bot credentials token`);
         return null;
       }
 
-      // Prefer joinMeetingIdMeetingInfo (more reliable) over organizerMeetingInfo
+      // Determine if this is a cross-tenant meeting
+      const botHomeTenant = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID || '';
+      const organizerTenant = meetingInfo.organizer?.tenantId || '';
+      const isCrossTenant = organizerTenant && organizerTenant !== botHomeTenant;
+
+      // Strategy priority:
+      // 1. joinMeetingIdMeetingInfo — most reliable when Graph enrichment succeeds
+      // 2. organizerMeetingInfo — documented scheduled-meeting join payload using organizer + tenant
+      // tokenMeetingInfo is reserved for join tokens returned by call notifications, not raw Teams join URLs.
       let meetingInfoPayload: object;
       if (meetingInfo.joinMeetingId) {
         console.log(`[CALLS_API] Using joinMeetingIdMeetingInfo, joinMeetingId: ${meetingInfo.joinMeetingId}`);
@@ -932,7 +1006,7 @@ class GraphApiHelper {
           ...(meetingInfo.passcode ? { passcode: meetingInfo.passcode } : {}),
         };
       } else {
-        console.log(`[CALLS_API] Using organizerMeetingInfo (no joinMeetingId available), organizer: ${meetingInfo.organizer!.id}, tenant: ${meetingInfo.organizer!.tenantId || tenantId}`);
+        console.log(`[CALLS_API] Using organizerMeetingInfo, organizer: ${meetingInfo.organizer!.id}, tenant: ${meetingInfo.organizer!.tenantId || tenantId}`);
         meetingInfoPayload = {
           '@odata.type': '#microsoft.graph.organizerMeetingInfo',
           organizer: {
@@ -945,7 +1019,20 @@ class GraphApiHelper {
           },
           allowConversationWithoutHost: true,
         };
+        if (isCrossTenant) {
+          console.log(`[CALLS_API] organizerMeetingInfo will target organizer tenant for cross-tenant scheduled meeting`);
+        }
       }
+
+      // Use the organizer's tenant for cross-tenant meeting joins, fall back to bot's home tenant
+      const effectiveTenantId = meetingInfo.organizer?.tenantId || tenantId;
+      if (effectiveTenantId !== tenantId) {
+        console.log(`[CALLS_API] Cross-tenant join: using organizer tenant ${effectiveTenantId} instead of bot home tenant ${tenantId}`);
+      }
+
+      // Bot identity for participant display name
+      const botId = process.env.CLIENT_ID || process.env.BOT_ID || '';
+      const botDisplayName = config.botDisplayName || 'Missa The Translator';
 
       const callPayload: Record<string, any> = {
         '@odata.type': '#microsoft.graph.call',
@@ -954,8 +1041,20 @@ class GraphApiHelper {
         mediaConfig: {
           '@odata.type': '#microsoft.graph.serviceHostedMediaConfig',
         },
+        // Source identifies the bot as a participant with a display name
+        source: {
+          '@odata.type': '#microsoft.graph.participantInfo',
+          identity: {
+            '@odata.type': '#microsoft.graph.identitySet',
+            application: {
+              '@odata.type': '#microsoft.graph.identity',
+              displayName: botDisplayName,
+              id: botId,
+            },
+          },
+        },
         meetingInfo: meetingInfoPayload,
-        tenantId,
+        tenantId: effectiveTenantId,
       };
 
       // Include chatInfo with the meeting thread ID - required for joining scheduled meetings
@@ -1083,10 +1182,6 @@ class GraphApiHelper {
       const status = error?.response?.status;
       const msg = error?.response?.data?.error?.message || error?.message;
       console.error(`[TRANSCRIPTION_ERROR] Failed to start transcription on call ${callId}: status=${status}, message=${msg}`);
-      // Log the full error body for debugging
-      if (error?.response?.data) {
-        console.error(`[TRANSCRIPTION_ERROR] Full response:`, JSON.stringify(error.response.data));
-      }
       return false;
     }
   }
@@ -1163,14 +1258,13 @@ class GraphApiHelper {
     try {
       const clientId = process.env.CLIENT_ID;
       const clientSecret = process.env.CLIENT_SECRET;
-      const tenantId = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID;
 
       const isUserAssignedMsi = (process.env.BOT_TYPE || '').toLowerCase() === 'userassignedmsi';
       if (isUserAssignedMsi || !clientSecret) {
         return await this.getManagedIdentityToken('https://api.botframework.com/.default');
       }
 
-      if (!clientId || !clientSecret || !tenantId) return '';
+      if (!clientId || !clientSecret) return '';
 
       const form = new URLSearchParams();
       form.append('client_id', clientId);
@@ -1178,8 +1272,9 @@ class GraphApiHelper {
       form.append('scope', 'https://api.botframework.com/.default');
       form.append('grant_type', 'client_credentials');
 
+      // Use botframework.com tenant for multi-tenant bot connector tokens
       const response = await axios.post(
-        `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+        `https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token`,
         form.toString(),
         { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
       );
@@ -1442,8 +1537,13 @@ class GraphApiHelper {
       const url = `${serviceUrl.replace(/\/$/, '')}/v3/conversations/${encodeURIComponent(conversationId)}/activities`;
       console.log(`[PROACTIVE] Sending message to conversation: ${conversationId}`);
 
+      const botId = process.env.BOT_ID || process.env.CLIENT_ID || '';
       await axios.post(url, {
         type: 'message',
+        from: {
+          id: botId,
+          name: config.botDisplayName,
+        },
         text
       }, {
         headers: {
@@ -2030,7 +2130,7 @@ class GraphApiHelper {
         }
       };
     } catch (error: any) {
-      console.error(`[CALENDAR_ERROR] findPastMeeting failed:`, error);
+      console.error(`[CALENDAR_ERROR] findPastMeeting failed: ${summarizeError(error)}`);
       return { success: false, error: error?.message || 'Failed to find meeting' };
     }
   }
@@ -2148,7 +2248,7 @@ class GraphApiHelper {
       console.log(`[CALENDAR] Found ${results.length} meetings: ${results.map(m => `"${m.subject}" (${m.start ? new Date(m.start).toLocaleDateString() : 'unknown date'})`).join(', ')}`);
       return { success: true, meetings: results };
     } catch (error: any) {
-      console.error(`[CALENDAR_ERROR] findPastMeetings failed:`, error);
+      console.error(`[CALENDAR_ERROR] findPastMeetings failed: ${summarizeError(error)}`);
       return { success: false, meetings: [], error: error?.message || 'Failed to find meetings' };
     }
   }

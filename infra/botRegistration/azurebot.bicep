@@ -10,7 +10,6 @@ param botServiceName string = resourceBaseName
 param botServiceSku string = 'F0'
 param botAppDomain string
 param botId string
-param botTenantId string
 // Register your web service as a bot with the Bot Framework
 resource botService 'Microsoft.BotService/botServices@2021-03-01' = {
   kind: 'azurebot'
@@ -20,8 +19,7 @@ resource botService 'Microsoft.BotService/botServices@2021-03-01' = {
     displayName: botDisplayName
     endpoint: 'https://${botAppDomain}/api/messages'
     msaAppId: botId
-    msaAppTenantId: botTenantId
-    msaAppType: 'SingleTenant'
+    msaAppType: 'MultiTenant'
   }
   sku: {
     name: botServiceSku

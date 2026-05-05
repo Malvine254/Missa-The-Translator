@@ -26,6 +26,9 @@ param cognitiveServicesEndpoint string = ''
 @secure()
 param cognitiveServicesKey string = ''
 
+@description('Mailbox user ID to send AI-generated emails from (optional). If empty, sender falls back to requesting user.')
+param emailSenderUserId string = ''
+
 param webAppSKU string
 
 @maxLength(42)
@@ -88,7 +91,7 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
         }
         { 
           name: 'BOT_TYPE' 
-          value: 'SingleTenant'
+          value: 'MultiTenant'
         }
         {
           name: 'GRAPH_CLIENT_ID'
@@ -122,6 +125,10 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
           name: 'COGNITIVE_SERVICES_KEY'
           value: cognitiveServicesKey
         }
+        {
+          name: 'EMAIL_SENDER_USER_ID'
+          value: emailSenderUserId
+        }
       ]
       ftpsState: 'FtpsOnly'
     }
@@ -142,7 +149,6 @@ module azureBotRegistration './botRegistration/azurebot.bicep' = {
     botAppDomain: webApp.properties.defaultHostName
     botDisplayName: botDisplayName
     botId: graphClientId
-    botTenantId: tenant().tenantId
   }
 }
 

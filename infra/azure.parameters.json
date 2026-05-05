@@ -26,6 +26,9 @@
     "cognitiveServicesKey": {
       "value": "${{SECRET_COGNITIVE_SERVICES_KEY}}"
     },
+    "emailSenderUserId": {
+      "value": "${{EMAIL_SENDER_USER_ID}}"
+    },
     "webAppSKU": {
       "value": "B1"
     },
