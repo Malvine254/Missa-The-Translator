@@ -1,37 +1,38 @@
 {
   "startedAt": 1773336372603,
-  "lastUpdatedAt": 1775501847131,
-  "totalMessages": 434,
+  "lastUpdatedAt": 1778859767311,
+  "totalMessages": 529,
   "totalMeetingsJoined": 7,
   "maxUsers": 200,
   "freeTierMonthlyMeetingLimit": 5,
   "enforceGlobalLimits": false,
   "modelInputCostPer1kUsd": 0.00015,
   "modelOutputCostPer1kUsd": 0.0006,
-  "totalEstimatedInputTokens": 109819,
-  "totalEstimatedOutputTokens": 115001,
-  "totalEstimatedTokens": 224820,
-  "totalEstimatedCostUsd": 0.08547344999999991,
+  "totalEstimatedInputTokens": 374975,
+  "totalEstimatedOutputTokens": 149768,
+  "totalEstimatedTokens": 524743,
+  "totalEstimatedCostUsd": 0.14610704999999993,
   "users": {
     "ceb9c46a-a785-4538-9abe-e8580dd4a58b": {
       "userId": "ceb9c46a-a785-4538-9abe-e8580dd4a58b",
       "displayName": "Malvine Owuor",
       "tenantId": "588cadf4-9902-4465-86c0-8bcf04f4f102",
-      "totalMessages": 434,
-      "meetingJoinRequests": 96,
+      "totalMessages": 529,
+      "meetingJoinRequests": 119,
       "monthlyMeetingsJoined": {
         "2026-03": 90,
-        "2026-04": 4
+        "2026-04": 4,
+        "2026-05": 23
       },
       "monthlyMeetingLimitOverride": null,
       "tokenPolicy": "unlimited",
       "tokenLimit": null,
-      "estimatedInputTokens": 109819,
-      "estimatedOutputTokens": 115001,
-      "estimatedTotalTokens": 224820,
-      "estimatedCostUsd": 0.08547344999999991,
+      "estimatedInputTokens": 374975,
+      "estimatedOutputTokens": 149768,
+      "estimatedTotalTokens": 524743,
+      "estimatedCostUsd": 0.14610704999999993,
       "firstSeenAt": 1773336372606,
-      "lastSeenAt": 1775501847130,
+      "lastSeenAt": 1778859767311,
       "blocked": false,
       "blockReason": ""
     }
@@ -97,12 +98,12 @@
       "meetingId": "19:meeting_ODQ0M2YwYmYtOTQ4YS00MWNlLWI4ZDQtYjgwNzQ1ZjlmOWQz@thread.v2",
       "meetingName": "Test Agent New",
       "firstSeenAt": 1773387414632,
-      "lastSeenAt": 1775500656169,
-      "joinRequests": 32,
-      "estimatedInputTokens": 22381,
-      "estimatedOutputTokens": 26103,
-      "estimatedTotalTokens": 48484,
-      "estimatedCostUsd": 0.019018950000000003,
+      "lastSeenAt": 1778859767311,
+      "joinRequests": 55,
+      "estimatedInputTokens": 29820,
+      "estimatedOutputTokens": 40848,
+      "estimatedTotalTokens": 70668,
+      "estimatedCostUsd": 0.028981800000000002,
       "users": [
         "ceb9c46a-a785-4538-9abe-e8580dd4a58b"
       ]
@@ -227,6 +228,42 @@
       "outputTokens": 5904,
       "totalTokens": 7544,
       "costUsd": 0.0037884
+    },
+    "2026-05-05": {
+      "day": "2026-05-05",
+      "messages": 5,
+      "meetingsJoined": 3,
+      "inputTokens": 481,
+      "outputTokens": 1603,
+      "totalTokens": 2084,
+      "costUsd": 0.00103395
+    },
+    "2026-05-13": {
+      "day": "2026-05-13",
+      "messages": 31,
+      "meetingsJoined": 3,
+      "inputTokens": 6026,
+      "outputTokens": 11840,
+      "totalTokens": 17866,
+      "costUsd": 0.0080079
+    },
+    "2026-05-14": {
+      "day": "2026-05-14",
+      "messages": 46,
+      "meetingsJoined": 16,
+      "inputTokens": 7567,
+      "outputTokens": 15407,
+      "totalTokens": 22974,
+      "costUsd": 0.01037925
+    },
+    "2026-05-15": {
+      "day": "2026-05-15",
+      "messages": 13,
+      "meetingsJoined": 1,
+      "inputTokens": 251082,
+      "outputTokens": 5917,
+      "totalTokens": 256999,
+      "costUsd": 0.04121249999999999
     }
   },
   "perUserDailyUsage": {
@@ -293,6 +330,42 @@
         "outputTokens": 5904,
         "totalTokens": 7544,
         "costUsd": 0.0037884
+      },
+      "2026-05-05": {
+        "day": "2026-05-05",
+        "messages": 5,
+        "meetingsJoined": 3,
+        "inputTokens": 481,
+        "outputTokens": 1603,
+        "totalTokens": 2084,
+        "costUsd": 0.00103395
+      },
+      "2026-05-13": {
+        "day": "2026-05-13",
+        "messages": 31,
+        "meetingsJoined": 3,
+        "inputTokens": 6026,
+        "outputTokens": 11840,
+        "totalTokens": 17866,
+        "costUsd": 0.0080079
+      },
+      "2026-05-14": {
+        "day": "2026-05-14",
+        "messages": 46,
+        "meetingsJoined": 16,
+        "inputTokens": 7567,
+        "outputTokens": 15407,
+        "totalTokens": 22974,
+        "costUsd": 0.01037925
+      },
+      "2026-05-15": {
+        "day": "2026-05-15",
+        "messages": 13,
+        "meetingsJoined": 1,
+        "inputTokens": 251082,
+        "outputTokens": 5917,
+        "totalTokens": 256999,
+        "costUsd": 0.04121249999999999
       }
     }
   },

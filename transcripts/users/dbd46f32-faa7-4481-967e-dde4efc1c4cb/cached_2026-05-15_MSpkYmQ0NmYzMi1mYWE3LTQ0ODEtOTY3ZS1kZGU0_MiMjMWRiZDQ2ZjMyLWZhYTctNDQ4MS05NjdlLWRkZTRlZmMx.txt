@@ -1,0 +1,512 @@
+CACHED MEETING TRANSCRIPT
+=========================
+
+Meeting ID: MSpkYmQ0NmYzMi1mYWE3LTQ0ODEtOTY3ZS1kZGU0ZWZjMWM0Y2IqMCoqMTk6bWVldGluZ19ZMk16T0RJNU5UY3RaV1ZqWVMwMFpURTNMV0U0TmpZdFptTm1NbVUyWTJZMVltUmtAdGhyZWFkLnYy
+Transcript ID: MiMjMWRiZDQ2ZjMyLWZhYTctNDQ4MS05NjdlLWRkZTRlZmMxYzRjYjU4OGNhZGY0LTk5MDItNDQ2NS04NmMwLThiY2YwNGY0ZjEwMjA0MDAwMDAwODIwMEUwMDA3NEM1QjcxMDFBODJFMDA4MDdlYTA1MGYyMDI0MjFkZDM1MjJkYzAxMDAwMDAwMDAwMDAwMDAwMDEwMDAwMDAwMWVkMTU2YTI3ZWM3Mjk0NTkyNTRkMjNkYjZlZTdlNjAjIzg4NmVkNTA2LWE4ZmEtNDBkZS05ZTM0LThjNTkxYjBhMTkyMA==
+Date: May 15, 2026
+Time: 8:59 AM
+Entries: 167
+
+TRANSCRIPT
+----------
+
+Rediet Damte (0:00:24)
+  - Good morning, Ouma.
+
+Leonard Mwangi (0:00:26)
+  - Good morning.
+
+Martin Muchuki (0:00:28)
+  - Good morning.
+
+Leonard Mwangi (0:00:30)
+  - How's everybody doing?
+
+George Oroni (0:00:32)
+  - Good morning.
+
+Leonard Mwangi (0:00:33)
+  - Hey, George, welcome back.
+
+George Oroni (0:00:35)
+  - Thank you, thank you.
+
+Leonard Mwangi (0:00:38)
+  - All right.
+
+Leonard Mwangi (0:00:41)
+  - I'm not sure what today's plan is, so I'm not sure if Martin or Rediet, you're driving as George and I catch up.
+
+Rediet Damte (0:00:54)
+  - There are some feedbacks from Marsha.
+
+Rediet Damte (0:00:57)
+  - which we are communicating with on the email already. So we can we can discuss about that. Martin, if you have something more.
+
+Leonard Mwangi (0:01:03)
+  - Okay.
+
+Martin Muchuki (0:01:12)
+  - No, it's just that normally this is the status call and then at 11 the UAT call.
+
+Leonard Mwangi (0:01:21)
+  - Okay, all right. I will go ahead and let them in.
+
+Leonard Mwangi (0:01:30)
+  - Good morning, Gary. Good morning, Marsha.
+
+Marsha Edwards (0:01:33)
+  - Good morning.
+
+Gary Miller (0:01:34)
+  - More.
+
+Leonard Mwangi (0:01:35)
+  - How are you doing?
+
+Gary Miller (0:01:38)
+  - Doing good. What about yourself?
+
+Leonard Mwangi (0:01:40)
+  - Been great as well.
+
+Gary Miller (0:01:41)
+  - Okay.
+
+Leonard Mwangi (0:01:42)
+  - It's Friday, so that makes a difference.
+
+Marsha Edwards (0:01:45)
+  - Exactly.
+
+Gary Miller (0:01:45)
+  - Yeah.
+
+Leonard Mwangi (0:01:46)
+  - Yes.
+
+Leonard Mwangi (0:01:49)
+  - All right, Miss Marsha, I think we can jump right in. I've been seeing emails come back and forth for testing, which I think we're making good progress there. So ready to, Martin, go ahead and let us know how we are doing on.
+
+Marsha Edwards (0:02:00)
+  - Yes.
+
+Leonard Mwangi (0:02:10)
+  - The items that Marsha is discovering.
+
+Rediet Damte (0:02:16)
+  - Okay. Good morning, everyone. Hi, Marsha. Hi, Gary. Happy Friday.
+
+Marsha Edwards (0:02:19)
+  - Oroni.
+
+Gary Miller (0:02:20)
+  - Oroni.
+
+Marsha Edwards (0:02:21)
+  - Aah.
+
+Gary Miller (0:02:22)
+  - Right.
+
+Rediet Damte (0:02:25)
+  - Yeah, thank you so much for testing, Marsha, on all those fixes. And we're actively working on the comment section for the attachments. We're also testing it from our end. You're getting the same error, right, for the upload file? Okay.
+
+Marsha Edwards (0:02:41)
+  - Yes.
+
+Rediet Damte (0:02:44)
+  - OK, I'm actively looking into that, and...
+
+Rediet Damte (0:02:50)
+  - for the...
+
+Rediet Damte (0:02:53)
+  - For the polishing parts, like for the yes and no, we're also making changes on that part. That's the update.
+
+Marsha Edwards (0:02:59)
+  - Oh, okay, great. Yeah, that one was like, this is not a big deal, but...
+
+Rediet Damte (0:03:03)
+  - Yeah.
+
+Rediet Damte (0:03:05)
+  - Yeah.
+
+Marsha Edwards (0:03:06)
+  - Um...
+
+Rediet Damte (0:03:08)
+  - I think everything else from the last test, it seems like it's passed on your int, so it's good.
+
+Marsha Edwards (0:03:17)
+  - Yes.
+
+Rediet Damte (0:03:18)
+  - Um, yeah.
+
+Marsha Edwards (0:03:19)
+  - And then you're working on the attachments as well.
+
+Rediet Damte (0:03:23)
+  - So currently what we have, we are currently working on the comment section and the attachment here that you're facing today.
+
+Marsha Edwards (0:03:23)
+  - Okay.
+
+Marsha Edwards (0:03:31)
+  - Okay. Yeah, I think that's pretty much it.
+
+Rediet Damte (0:03:36)
+  - Yes. And for the email template, I think Teresa is not available on the 11th o'clock meeting, but she'll be available in the afternoon. If you wanted to, she has some questions so we can.
+
+Marsha Edwards (0:03:57)
+  - Yes, I think what they're wondering is in Word, you can make like tokens for dropdowns and things within the Word document.
+
+Rediet Damte (0:03:57)
+  - Schedule that, if that's okay, we take us.
+
+Marsha Edwards (0:04:10)
+  - I know I used to do it a long time ago. It's been a while. I think that's what she's asking is, is it possible that they could have a drop down of, you know, this or this, you know, kind of embedded in that Word document that you're using for the template?
+
+Leonard Mwangi (0:04:12)
+  - Okay.
+
+Rediet Damte (0:04:28)
+  - George Leonard, do you have any inputs?
+
+George Oroni (0:04:35)
+  - No, I haven't done that before. So to make sure I understand this correctly, Marsha is within a Word document where, you know, maybe using select an option where we have, you can embed a drop down where they can choose.
+
+Leonard Mwangi (0:04:35)
+  - Go ahead.
+
+Marsha Edwards (0:04:54)
+  - Yes.
+
+George Oroni (0:04:55)
+  - Instead of just typing, we could look into that. I'm not 100% sure if it's possible because I haven't done that before, but we can look into that and actually while we're on this call, let me take a look and then I can share that.
+
+Marsha Edwards (0:04:56)
+  - Yeah.
+
+Gary Miller (0:04:58)
+  - No.
+
+Marsha Edwards (0:05:11)
+  - And I'm going to show my age because you know what I think I used to do work perfect.
+
+George Oroni (0:05:16)
+  - Yeah.
+
+Marsha Edwards (0:05:20)
+  - Okay, wow.
+
+Rediet Damte (0:05:23)
+  - BI.
+
+Marsha Edwards (0:05:24)
+  - But I think I know in our prosecutor system.
+
+Marsha Edwards (0:05:29)
+  - They had that, and I don't, I can ask the person that builds the templates for that if she knows how that works too, but I'm sure there's probably a YouTube video on it.
+
+George Oroni (0:05:35)
+  - Mm.
+
+George Oroni (0:05:43)
+  - Guide.
+
+Marsha Edwards (0:05:43)
+  - I'll play around with it and see, but I think that's what she's asking.
+
+George Oroni (0:05:45)
+  - It looks like a quick check online looks like it's possible, yes.
+
+Marsha Edwards (0:05:52)
+  - Okay, I think that's what she's asking. Instead of having a million templates, if there's just like, it could be this or this, is to go ahead and build that into the template itself. And then you don't have to have a lot of different, you know, kind of 1 template, but here's two options for it.
+
+George Oroni (0:05:53)
+  - Yeah.
+
+Marsha Edwards (0:06:12)
+  - That's my understanding of what she's asking.
+
+Rediet Damte (0:06:16)
+  - Yeah.
+
+Rediet Damte (0:06:17)
+  - Okay, okay, uh, we'll look into that.
+
+Marsha Edwards (0:06:21)
+  - Okay.
+
+Rediet Damte (0:06:22)
+  - And get back with you.
+
+Rediet Damte (0:06:24)
+  - Wait in 5 minutes.
+
+Marsha Edwards (0:06:25)
+  - So do you want to like reschedule the 11 o'clock for sometime this afternoon?
+
+Rediet Damte (0:06:32)
+  - And...
+
+Marsha Edwards (0:06:34)
+  - I don't know if Patricia's, she didn't say Patricia was available.
+
+Marsha Edwards (0:06:39)
+  - or leave the 11 o'clock and then just see when she's available this afternoon.
+
+Rediet Damte (0:06:46)
+  - Yes.
+
+Leonard Mwangi (0:06:46)
+  - Yeah, we can do that.
+
+Leonard Mwangi (0:06:53)
+  - I read it all, Martin, do you want to reach out and see when is available?
+
+Rediet Damte (0:07:00)
+  - Sure, yes.
+
+Leonard Mwangi (0:07:02)
+  - OK, and then we can, I think this afternoon we do have some flexibility, Marsha, so we should be good.
+
+Marsha Edwards (0:07:08)
+  - Okay.
+
+Marsha Edwards (0:07:10)
+  - Yeah.
+
+Marsha Edwards (0:07:12)
+  - Yeah, no, 'cause I think everything else looks good, you know, you're working on those two things.
+
+Leonard Mwangi (0:07:13)
+  - It's.
+
+Marsha Edwards (0:07:20)
+  - And then on the, just going to do the Word template. I assume that's going to be on the new ones, because the, okay, that's, yeah, it's kind of like, well, no, you're not going to take away the old ones.
+
+Rediet Damte (0:07:26)
+  - Ohh, yes, yes, I was about to explain that.
+
+Rediet Damte (0:07:32)
+  - Yeah, since it's already created file, it's going to be active. It's triggered by the flow. So whenever the new applications are coming, it's going to be there only with the word, no PDF. Yeah.
+
+Marsha Edwards (0:07:45)
+  - Okay. And do you have any idea how long it takes for the templates to...
+
+Marsha Edwards (0:07:52)
+  - To generate.
+
+Rediet Damte (0:07:55)
+  - With this new feature requested, can we get back with you? What, how, how much?
+
+Marsha Edwards (0:08:02)
+  - Oh, I just wondered in general, kind of how long, because there's some of them, you know, I keep clicking and it's like, okay, it's not there yet. Okay, it's not there yet. I just didn't know if we knew, because I'm sure it's going to come up, someone's going to process something. And then the next person will go like, well, where's the form? If we just said it's, you know, half hour or it's.
+
+Rediet Damte (0:08:12)
+  - Oh.
+
+Rediet Damte (0:08:15)
+  - Mhm.
+
+Rediet Damte (0:08:17)
+  - Yeah.
+
+Marsha Edwards (0:08:22)
+  - However long we think it might take.
+
+Marsha Edwards (0:08:24)
+  - Can you tell in the background, like when it appears on that on this that tab?
+
+Rediet Damte (0:08:25)
+  - Yeah.
+
+Rediet Damte (0:08:27)
+  - We should.
+
+Rediet Damte (0:08:31)
+  - Yeah, I can look into it now, too, and we can tell.
+
+Marsha Edwards (0:08:32)
+  - I just wanna...
+
+Marsha Edwards (0:08:34)
+  - Yeah.
+
+Marsha Edwards (0:08:37)
+  - Because if we can set expectations so they're not just constantly looking for it and say, well, it's at least 30 minutes or however long it takes.
+
+Rediet Damte (0:08:50)
+  - Yes, I...
+
+Gary Miller (0:08:51)
+  - No.
+
+Rediet Damte (0:08:53)
+  - I'm looking into that now, but yes, we should be able to tell.
+
+Marsha Edwards (0:08:57)
+  - Okay.
+
+Marsha Edwards (0:08:58)
+  - And there is one ID that still doesn't have...
+
+Marsha Edwards (0:09:06)
+  - Um...
+
+Marsha Edwards (0:09:07)
+  - Is ID 46? It looks like it came in me out of when it was.
+
+Marsha Edwards (0:09:15)
+  - Um...
+
+Marsha Edwards (0:09:17)
+  - Submitted, but...
+
+Marsha Edwards (0:09:20)
+  - It still doesn't have one. It came in on the 7th.
+
+Marsha Edwards (0:09:24)
+  - So I don't, I don't know if they did this morning or yesterday or something, but I've been checking that one to see how long it takes as well. I didn't do one this morning, so I keep clicking back to see, but there is 46 that doesn't have templates for some reason.
+
+Rediet Damte (0:09:42)
+  - Okay.
+
+Rediet Damte (0:09:44)
+  - I think that happens because it didn't go through the whole process. We were doing back and forth these things and we just moved the status from one, jumping it. So that's why you're not showing a template.
+
+Marsha Edwards (0:09:53)
+  - Ahh.
+
+Marsha Edwards (0:09:56)
+  - Okay. Okay.
+
+Marsha Edwards (0:10:00)
+  - Okay.
+
+Marsha Edwards (0:10:01)
+  - Great.
+
+Rediet Damte (0:10:02)
+  - Dinh.
+
+Rediet Damte (0:10:03)
+  - Mm.
+
+Rediet Damte (0:10:06)
+  - You.
+
+Marsha Edwards (0:10:06)
+  - I know you've been meeting with Candace and she's been helping with some stuff. Everything okay there?
+
+Rediet Damte (0:10:12)
+  - Yes, so we've met with Candace and Nicole for the branding for some of the...
+
+Marsha Edwards (0:10:16)
+  - Yeah.
+
+Rediet Damte (0:10:21)
+  - Ask us for the colors; it has been updated and everything has passed from the paint.
+
+Rediet Damte (0:10:29)
+  - So I think we should be good from the funding side.
+
+Marsha Edwards (0:10:32)
+  - Okay.
+
+Rediet Damte (0:10:34)
+  - Yes.
+
+Rediet Damte (0:10:39)
+  - Okay and.
+
+Rediet Damte (0:10:42)
+  - Trying to bring the...
+
+Rediet Damte (0:10:47)
+  - Hello, looks like.
+
+Rediet Damte (0:10:52)
+  - M.
+
+Rediet Damte (0:10:55)
+  - While I'm bringing that, if there, if there are any items, we can discuss my sister.
+
+Marsha Edwards (0:10:59)
+  - That's okay. You can let me know.
+
+Rediet Damte (0:11:03)
+  - Okay, yeah.
+
+Marsha Edwards (0:11:05)
+  - Well, great.
+
+Marsha Edwards (0:11:08)
+  - Anything else?
+
+Leonard Mwangi (0:11:12)
+  - I think the only other thing on my end is the templates. I think we then will figure out if Marsha, we need to do a change order for it based on the findings that we do have here.
+
+Marsha Edwards (0:11:21)
+  - Right, yeah.
+
+Marsha Edwards (0:11:24)
+  - Okay.
+
+Leonard Mwangi (0:11:25)
+  - Yes. So I'll communicate that before end of day today.
+
+Marsha Edwards (0:11:30)
+  - Okay, great.
+
+Marsha Edwards (0:11:33)
+  - We'll tell Alan, we'll tell Adam when he comes back that you ran this fastest speeding.
+
+Gary Miller (0:11:39)
+  - M.
+
+Leonard Mwangi (0:11:41)
+  - It's like everybody put on a helmet because I don't know.
+
+Marsha Edwards (0:11:41)
+  - And.
+
+Marsha Edwards (0:11:46)
+  - Speed meeting.
+
+Marsha Edwards (0:11:51)
+  - Great, okay, thanks.
+
+Leonard Mwangi (0:11:54)
+  - All right. Anything else, George, Martin?
+
+George Oroni (0:11:59)
+  - No, I think I'm good for now.
+
+Martin Muchuki (0:12:03)
+  - Yeah, I'm good as well. Thank you.
+
+Marsha Edwards (0:12:05)
+  - Great, thanks.
+
+Leonard Mwangi (0:12:07)
+  - All right, thank you so much. Thank you, Mister Miller.
+
+Rediet Damte (0:12:07)
+  - All right, thank you all.
+
+Gary Miller (0:12:10)
+  - All right, I'm good on my end, so thank you.
+
+Leonard Mwangi (0:12:13)
+  - Thank you.
+
+Gary Miller (0:12:14)
+  - Sorry.
+
+Rediet Damte (0:12:15)
+  - Bye.

@@ -1,0 +1,161 @@
+CACHED MEETING TRANSCRIPT
+=========================
+
+Meeting ID: MSpkYmQ0NmYzMi1mYWE3LTQ0ODEtOTY3ZS1kZGU0ZWZjMWM0Y2IqMCoqMTk6bWVldGluZ19ZMk16T0RJNU5UY3RaV1ZqWVMwMFpURTNMV0U0TmpZdFptTm1NbVUyWTJZMVltUmtAdGhyZWFkLnYy
+Transcript ID: MSMjMCMjOGJkYjU3ZGEtYjhkOS00MTE4LWFlNDgtNThhYmIzYzAyODE1
+Date: May 15, 2026
+Time: 8:59 AM
+Entries: 50
+
+TRANSCRIPT
+----------
+
+Rediet Damte (0:00:24)
+  - Good morning, Ouma.
+
+Leonard Mwangi (0:00:26)
+  - Good morning.
+
+Martin Muchuki (0:00:28)
+  - Good morning.
+
+Leonard Mwangi (0:00:30)
+  - How's everybody doing?
+
+George Oroni (0:00:32)
+  - Good morning.
+
+Leonard Mwangi (0:00:33)
+  - Hey, George, welcome back.
+
+George Oroni (0:00:35)
+  - Thank you, thank you.
+
+Leonard Mwangi (0:00:38)
+  - All right.
+
+Leonard Mwangi (0:00:41)
+  - I'm not sure what today's plan is, so I'm not sure if Martin or Rediet, you're driving as George and I catch up.
+
+Rediet Damte (0:00:53)
+  - There are some feedbacks from Marsha.
+
+Rediet Damte (0:00:57)
+  - which we are communicating with on the email already. So we can we can discuss about that. Martin, if you have something more.
+
+Leonard Mwangi (0:01:03)
+  - Okay.
+
+Martin Muchuki (0:01:12)
+  - No, it's just that normally this is the status call and then at 11 the UAT call.
+
+Leonard Mwangi (0:01:20)
+  - Okay, all right. I will go ahead and let them in.
+
+Leonard Mwangi (0:01:30)
+  - Good morning, Gary. Good morning, Marsha.
+
+Marsha Edwards (0:01:33)
+  - Good morning.
+
+Gary Miller (0:01:34)
+  - More.
+
+Leonard Mwangi (0:01:35)
+  - How are you doing?
+
+Gary Miller (0:01:38)
+  - Doing good. What about yourself?
+
+Leonard Mwangi (0:01:39)
+  - Been great as well.
+
+Gary Miller (0:01:41)
+  - Okay.
+
+Leonard Mwangi (0:01:42)
+  - It's Friday, so that makes a difference.
+
+Marsha Edwards (0:01:44)
+  - Exactly.
+
+Gary Miller (0:01:45)
+  - Yeah.
+
+Leonard Mwangi (0:01:46)
+  - Yes.
+
+Leonard Mwangi (0:01:49)
+  - All right, Miss Marsha, I think we can jump right in. I've been seeing emails come back and forth for testing, which I think we're making good progress there. So ready to, Martin, go ahead and let us know how we are doing on.
+
+Marsha Edwards (0:02:00)
+  - Yes.
+
+Leonard Mwangi (0:02:09)
+  - The items that Marsha is discovering.
+
+Rediet Damte (0:02:16)
+  - Okay. Good morning, everyone. Hi, Marsha. Hi, Gary. Happy Friday.
+
+Marsha Edwards (0:02:19)
+  - Oroni.
+
+Gary Miller (0:02:19)
+  - Oroni.
+
+Marsha Edwards (0:02:21)
+  - Aah.
+
+Gary Miller (0:02:21)
+  - Right.
+
+Rediet Damte (0:02:25)
+  - Yeah, thank you so much for testing, Marsha, on all those fixes. And we're actively working on the comment section for the attachments. We're also testing it from our end. You're getting the same error, right, for the upload file? Okay.
+
+Marsha Edwards (0:02:41)
+  - Yes.
+
+Rediet Damte (0:02:44)
+  - OK, I'm actively looking into that, and...
+
+Rediet Damte (0:02:50)
+  - for the...
+
+Rediet Damte (0:02:53)
+  - For the polishing parts, like for the yes and no, we're also making changes on that part. That's the update.
+
+Marsha Edwards (0:02:59)
+  - Oh, okay, great. Yeah, that one was like, this is not a big deal, but...
+
+Rediet Damte (0:03:03)
+  - Yeah.
+
+Rediet Damte (0:03:05)
+  - Yeah.
+
+Marsha Edwards (0:03:06)
+  - Um...
+
+Rediet Damte (0:03:08)
+  - I think everything else from the last test, it seems like it's passed on your int, so it's good.
+
+Marsha Edwards (0:03:17)
+  - Yes.
+
+Rediet Damte (0:03:18)
+  - Um, yeah.
+
+Marsha Edwards (0:03:19)
+  - And then you're working on the attachments as well.
+
+Rediet Damte (0:03:23)
+  - So currently what we have, we are currently working on the comment section and the attachment here that you're facing today.
+
+Marsha Edwards (0:03:23)
+  - Okay.
+
+Marsha Edwards (0:03:31)
+  - Okay. Yeah, I think that's pretty much it.
+
+Rediet Damte (0:03:36)
+  - Yes. And for the email template, I think Teresa is not available on the 11th o'clock meeting, but she'll be available in the afternoon. If you wanted to, she has some questions so we can.
