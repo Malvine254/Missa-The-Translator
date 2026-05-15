@@ -29,6 +29,15 @@
     "emailSenderUserId": {
       "value": "${{EMAIL_SENDER_USER_ID}}"
     },
+    "recorderEnabled": {
+      "value": "${{RECORDER_ENABLED}}"
+    },
+    "recorderBaseUrl": {
+      "value": "${{RECORDER_BASE_URL}}"
+    },
+    "recorderSharedSecret": {
+      "value": "${{SECRET_RECORDER_SHARED_SECRET}}"
+    },
     "webAppSKU": {
       "value": "B1"
     },

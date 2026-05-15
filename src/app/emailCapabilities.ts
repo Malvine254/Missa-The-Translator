@@ -38,6 +38,9 @@ export interface EmailSendResult {
 export interface InboxRequestAnalysis {
   wantsReplyDraft: boolean;
   maxResults: number;
+  senderFilter?: string;
+  dateFilter?: 'today' | 'week';
+  requestType: 'digest' | 'search' | 'general';
 }
 
 export interface InboxSearchResult {
@@ -47,8 +50,13 @@ export interface InboxSearchResult {
 }
 
 function createModel() {
+  const modelName =
+    config.azureOpenAIDeploymentName ||
+    process.env.AZURE_OPENAI_DEPLOYMENT_NAME ||
+    'gpt-4.1';
+
   return new OpenAIChatModel({
-    model: config.azureOpenAIDeploymentName,
+    model: modelName,
     apiKey: config.azureOpenAIKey,
     endpoint: config.azureOpenAIEndpoint,
     apiVersion: '2024-10-21',
@@ -61,16 +69,40 @@ function parseJsonResponse(raw: string): any {
 }
 
 /**
- * Simple inbox request parsing - just detect reply intent and result count.
- * The actual message matching is done by LLM in llmSearchInbox.
+ * Parse inbox request: detect reply intent, result count, sender filter, date range, and request type.
  */
 export function parseInboxRequest(message: string): InboxRequestAnalysis {
   const text = (message || '').trim();
   const wantsReplyDraft = /(draft\s+(?:a\s+)?reply|write\s+(?:a\s+)?reply|respond\s+to|reply\s+to)/i.test(text);
   const explicitCount = text.match(/\b(?:top|last|latest)\s+(\d{1,2})\b/i);
-  const maxResults = Math.min(Math.max(Number(explicitCount?.[1] || 10), 1), 20);
 
-  return { wantsReplyDraft, maxResults };
+  // Detect digest: user wants all/many emails for a time period
+  const isDigest = /\b(all\s+(?:my\s+)?emails?\s+(?:today|this\s+week|from\s+today)|today'?s?\s+emails?|emails?\s+(?:from\s+)?today|daily\s+(?:email\s+)?(?:digest|summary)|what\s+(?:came|emails?)\s+(?:in\s+)?today|inbox\s+(?:digest|summary)|show\s+(?:me\s+)?all\s+(?:my\s+)?emails?)\b/i.test(text);
+
+  // Detect date scope
+  let dateFilter: 'today' | 'week' | undefined;
+  if (/\b(today|this\s+morning|today'?s?)\b/i.test(text)) dateFilter = 'today';
+  else if (/\b(this\s+week|past\s+week|last\s+week)\b/i.test(text)) dateFilter = 'week';
+
+  // Extract sender name from patterns like "from Malvine", "what did Edgar send me", "Leonard's emails"
+  let senderFilter: string | undefined;
+  const senderMatch =
+    text.match(/\bfrom\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i) ||
+    text.match(/\bwhat\s+did\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+send\b/i) ||
+    text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)'?s?\s+emails?\b/i) ||
+    text.match(/\bemails?\s+(?:sent\s+)?by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/i);
+  if (senderMatch) senderFilter = senderMatch[1];
+
+  const requestType: 'digest' | 'search' | 'general' =
+    isDigest ? 'digest' : senderFilter ? 'search' : 'general';
+
+  // Digest: fetch up to 50; sender search: 30; general: 10; explicit count overrides
+  const defaultCount = isDigest ? 50 : senderFilter ? 30 : 10;
+  const maxResults = explicitCount
+    ? Math.min(Math.max(Number(explicitCount[1]), 1), 50)
+    : defaultCount;
+
+  return { wantsReplyDraft, maxResults, senderFilter, dateFilter, requestType };
 }
 
 /**
@@ -327,15 +359,24 @@ export async function summarizeInboxMessages(
     return 'No matching emails found.';
   }
 
-  // Build message data with full body content
   const messageData = messages.map(m => ({
     from: m.fromName || m.fromAddress,
     subject: m.subject,
     date: m.receivedDateTime,
-    body: m.bodyContent || m.bodyPreview || '',
+    body: (m.bodyContent || m.bodyPreview || '').slice(0, 400),
     importance: m.importance,
     isRead: m.isRead,
+    flagged: m.flagged,
   }));
+
+  const isDigest = messages.length >= 5;
+  const digestHeader = isDigest
+    ? `Format as a structured email digest. For each email output exactly:\n` +
+      `**[subject]** — *[sender] · [readable time]*\n` +
+      `> [1–2 sentence summary of what the email is about and any action needed]\n\n` +
+      `After all emails add a short **Key Actions** section (max 4 bullets) listing the most important things needing attention.\n`
+    : `Write a natural, concise response. For each email include the sender, subject, received time, and key takeaway.\n` +
+      `If there are action items or deadlines, highlight them. Use markdown bullets where helpful.\n`;
 
   const prompt = new ChatPrompt({
     messages: [
@@ -343,23 +384,19 @@ export async function summarizeInboxMessages(
         role: 'user',
         content:
           `User request: "${request}"\n\n` +
-          `Emails:\n${JSON.stringify(messageData, null, 1)}\n\n` +
-          `FORMAT REQUIREMENTS (STRICT):\n` +
-          `1. Start with: **From:** [Sender] | **Date:** [Date]\n` +
-          `2. Next line: **Subject:** [Subject]\n` +
-          `3. Then a blank line, followed by the email content\n` +
-          `4. Use proper markdown:\n` +
-          `   - ## for main section headers (with blank line before/after)\n` +
-          `   - **Bold** for emphasis\n` +
-          `   - Bullet points with proper spacing\n` +
-          `   - Numbered lists where appropriate\n` +
-          `5. If email has structured content (meeting notes, action items), preserve that structure cleanly\n` +
-          `6. Keep concise - summarize long emails to key points\n` +
-          `7. NO run-on headers (each header on its own line)\n` +
-          `8. NO walls of text - use paragraphs and spacing`,
+          `Emails (${messages.length} total):\n${JSON.stringify(messageData, null, 1)}\n\n` +
+          digestHeader +
+          `Use readable times like "Today 2:30 PM" or "May 14 9:15 AM".\n` +
+          `Use only provided email data — never invent details.\n` +
+          `Importance "high" or flagged=true means urgent — call that out.\n` +
+          `isRead=false means unread — mark those as **(unread)**.\n` +
+          `Output markdown only.`,
       },
     ],
-    instructions: 'Output clean, professional markdown. Headers on separate lines. Proper spacing between sections.',
+    instructions:
+      'You are a practical inbox assistant. Produce structured, scannable output. ' +
+      'Each email gets its own entry. Be concise — one line of summary per email for digests, more detail for single-email queries. ' +
+      'Never hallucinate content not in the provided emails.',
     model: createModel(),
   });
 

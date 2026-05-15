@@ -7,7 +7,7 @@ const config = {
   graphClientSecret: process.env.GRAPH_CLIENT_SECRET,
   azureOpenAIKey: process.env.AZURE_OPENAI_API_KEY,
   azureOpenAIEndpoint: process.env.AZURE_OPENAI_ENDPOINT,
-  azureOpenAIDeploymentName: process.env.AZURE_OPENAI_DEPLOYMENT_NAME,
+  azureOpenAIDeploymentName: process.env.AZURE_OPENAI_DEPLOYMENT_NAME || 'gpt-4.1',
   graphApiEndpoint: process.env.GRAPH_API_ENDPOINT || 'https://graph.microsoft.com/v1.0',
   cognitiveServicesEndpoint: process.env.COGNITIVE_SERVICES_ENDPOINT,
   cognitiveServicesKey: process.env.COGNITIVE_SERVICES_KEY,

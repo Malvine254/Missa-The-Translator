@@ -2,67 +2,241 @@ import axios, { AxiosInstance } from 'axios';
 import { ManagedIdentityCredential } from '@azure/identity';
 import config from './config';
 
+const LOGO_REMOTE_URL = 'https://armely.com/images/logo/logo-replace.png';
+let _cachedLogoDataUri: string | null = null;
+
+// Suppress duplicate 403 "no application access policy" fix messages — log once per process.
+let _accessPolicyFixLogged = false;
+
+/** Fetch the Armely logo once and cache it as a base64 data URI so Exchange can't strip it. */
+async function fetchLogoDataUri(): Promise<string> {
+  if (_cachedLogoDataUri) return _cachedLogoDataUri;
+  try {
+    const res = await axios.get(LOGO_REMOTE_URL, { responseType: 'arraybuffer', timeout: 6000 });
+    _cachedLogoDataUri = `data:image/png;base64,${Buffer.from(res.data).toString('base64')}`;
+    return _cachedLogoDataUri;
+  } catch {
+    return LOGO_REMOTE_URL; // fallback: keep the URL and hope for the best
+  }
+}
+
 /**
- * Convert markdown text to HTML for email formatting.
- * Handles: headers, bold, italic, bullet points, numbered lists, links, code blocks.
+ * Convert markdown text to a beautifully styled HTML email.
+ * Produces a full email template with a navy header banner, styled sections, and branded footer.
  */
-function markdownToHtml(markdown: string): string {
+function markdownToHtml(markdown: string, logoSrc: string = LOGO_REMOTE_URL): string {
   if (!markdown) return '';
 
-  const anchorStyle = 'color:#2563eb;text-decoration:none;font-weight:600;border-bottom:1px solid #bfdbfe;';
-  
-  let html = markdown
-    // Escape HTML entities first
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
+  // Brand palette — navy blue as primary
+  const PRIMARY   = '#1B3A6B';
+  const ACCENT    = '#2A5BAE';
+  const LIGHT_BG  = '#EEF3FA';
+  const BORDER    = '#C4D4E8';
+  const TEXT      = '#374151';
+  const TEXT_DARK = '#111827';
+  const MUTED     = '#6B7280';
+  const FONT      = 'Segoe UI,Helvetica,Arial,sans-serif';
 
-    // Allow explicit HTML anchor tags in source text by converting escaped tags back to clickable links
-    .replace(/&lt;a\s+href=["'](https?:\/\/[^"']+)["'][^&]*&gt;([\s\S]*?)&lt;\/a&gt;/gi, `<a href="$1" target="_blank" rel="noopener noreferrer" style="${anchorStyle}">$2</a>`)
-    
-    // Headers (## Header → <h2>)
-    .replace(/^### (.+)$/gm, '<h3 style="color:#333;margin:16px 0 8px 0;">$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2 style="color:#333;margin:20px 0 10px 0;">$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1 style="color:#333;margin:24px 0 12px 0;">$1</h1>')
+  const aStyle = `color:${ACCENT};text-decoration:none;font-weight:600;border-bottom:1px solid ${BORDER};`;
 
-    // Markdown links [text](url)
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, `<a href="$2" target="_blank" rel="noopener noreferrer" style="${anchorStyle}">$1</a>`)
-    
-    // Bold and italic
-    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/___(.+?)___/g, '<strong><em>$1</em></strong>')
-    .replace(/__(.+?)__/g, '<strong>$1</strong>')
-    .replace(/_(.+?)_/g, '<em>$1</em>')
-    
-    // Inline code
-    .replace(/`([^`]+)`/g, '<code style="background:#f4f4f4;padding:2px 6px;border-radius:3px;font-family:monospace;">$1</code>')
-    
-    // Horizontal rules
-    .replace(/^---+$/gm, '<hr style="border:none;border-top:1px solid #ddd;margin:16px 0;">')
-    .replace(/^\*\*\*+$/gm, '<hr style="border:none;border-top:1px solid #ddd;margin:16px 0;">')
-    
-    // Bullet points (• or - or *)
-    .replace(/^[•\-\*]\s+(.+)$/gm, '<li style="margin:4px 0;">$1</li>')
-    
-    // Numbered lists
-    .replace(/^\d+\.\s+(.+)$/gm, '<li style="margin:4px 0;">$1</li>')
-    
-    // Line breaks
-    .replace(/\n\n/g, '</p><p style="margin:12px 0;">')
-    .replace(/\n/g, '<br>');
-  
-  // Wrap consecutive <li> items in <ul>
-  html = html.replace(/(<li[^>]*>.*?<\/li>)(\s*<br>\s*)?(<li[^>]*>)/g, '$1$3');
-  html = html.replace(/(<li[^>]*>.*?<\/li>)+/g, '<ul style="margin:8px 0;padding-left:24px;">$&</ul>');
-  
-  // Wrap in paragraph if not starting with block element
-  if (!html.startsWith('<h') && !html.startsWith('<ul') && !html.startsWith('<p')) {
-    html = '<p style="margin:12px 0;">' + html + '</p>';
+  function escHtml(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
-  
-  return `<div style="font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#333;">${html}</div>`;
+
+  function inline(text: string): string {
+    return text
+      // Restore explicit <a href="..."> tags that were entity-escaped
+      .replace(/&lt;a\s+href=["'](https?:\/\/[^"']+)["'][^&]*&gt;([\s\S]*?)&lt;\/a&gt;/gi,
+        `<a href="$1" target="_blank" rel="noopener noreferrer" style="${aStyle}">$2</a>`)
+      // Markdown links [text](url)
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+        `<a href="$2" target="_blank" rel="noopener noreferrer" style="${aStyle}">$1</a>`)
+      // Bold+italic, bold, italic (asterisk)
+      .replace(/\*\*\*(.+?)\*\*\*/g, `<strong><em>$1</em></strong>`)
+      .replace(/\*\*(.+?)\*\*/g,     `<strong style="color:${TEXT_DARK};font-weight:700;">$1</strong>`)
+      .replace(/\*(.+?)\*/g,         `<em style="color:${MUTED};">$1</em>`)
+      // Bold+italic, bold, italic (underscore)
+      .replace(/___(.+?)___/g, `<strong><em>$1</em></strong>`)
+      .replace(/__(.+?)__/g,   `<strong style="color:${TEXT_DARK};font-weight:700;">$1</strong>`)
+      .replace(/_(.+?)_/g,     `<em style="color:${MUTED};">$1</em>`)
+      // Inline code
+      .replace(/`([^`]+)`/g,
+        `<code style="background:${LIGHT_BG};color:${PRIMARY};padding:2px 7px;border-radius:4px;font-family:Consolas,monospace;font-size:12px;border:1px solid ${BORDER};">$1</code>`);
+  }
+
+  const lines = markdown.split('\n');
+  let title    = '';
+  let metaLine = '';
+  const parts: string[] = [];
+  let i = 0;
+  let listBuf: string[]  = [];
+  let ordered  = false;
+  let inList   = false;
+
+  function flushList() {
+    if (!listBuf.length) return;
+    const rows = listBuf.map((item, idx) => ordered
+      ? `<tr>
+           <td width="24" valign="top" style="color:${PRIMARY};font-weight:700;font-size:13px;padding:4px 10px 4px 0;white-space:nowrap;font-family:${FONT};">${idx + 1}.</td>
+           <td valign="top" style="color:${TEXT};font-size:14px;line-height:1.6;padding:4px 0;font-family:${FONT};">${inline(item)}</td>
+         </tr>`
+      : `<tr>
+           <td width="18" valign="top" style="color:${PRIMARY};font-size:16px;padding:3px 10px 3px 0;line-height:1.6;font-family:${FONT};">&#9679;</td>
+           <td valign="top" style="color:${TEXT};font-size:14px;line-height:1.6;padding:3px 0;font-family:${FONT};">${inline(item)}</td>
+         </tr>`
+    ).join('');
+    parts.push(`<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:4px 0 14px 6px;">${rows}</table>`);
+    listBuf = [];
+    inList  = false;
+  }
+
+  while (i < lines.length) {
+    const raw  = lines[i];
+    const line = escHtml(raw);
+
+    // H1 — meeting title → goes into the header banner
+    const h1 = raw.match(/^# (.+)$/);
+    if (h1) {
+      flushList();
+      title = inline(escHtml(h1[1]));
+      i++;
+      // Metadata italic line immediately after title: *Meeting: ... | Participants: ... | Date: ...*
+      if (i < lines.length && /^\*[^*\s].+[^*\s]\*$/.test(lines[i].trim())) {
+        const metaRaw = lines[i].trim().replace(/^\*(.+)\*$/, '$1');
+        metaLine = inline(escHtml(metaRaw));
+        i++;
+      }
+      continue;
+    }
+
+    // Skip the "Generated by" footer line — it's rendered in the template footer
+    if (/Generated\s+by.*[Mm]ela\s*AI/i.test(raw) || /Generated\s+by\s+Armely/i.test(raw)) {
+      i++;
+      continue;
+    }
+
+    // H2 — section header with navy left-border accent
+    const h2 = raw.match(/^## (.+)$/);
+    if (h2) {
+      flushList();
+      parts.push(
+        `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:22px 0 10px 0;">
+           <tr>
+             <td style="background:${LIGHT_BG};border-left:4px solid ${PRIMARY};padding:9px 16px;border-radius:0 5px 5px 0;">
+               <span style="color:${PRIMARY};font-size:14px;font-weight:700;letter-spacing:0.2px;font-family:${FONT};">${inline(escHtml(h2[1]))}</span>
+             </td>
+           </tr>
+         </table>`
+      );
+      i++;
+      continue;
+    }
+
+    // H3 — sub-header with subtle accent border
+    const h3 = raw.match(/^### (.+)$/);
+    if (h3) {
+      flushList();
+      parts.push(
+        `<p style="color:${ACCENT};font-size:13px;font-weight:700;margin:14px 0 6px 0;padding:0 0 4px 10px;border-left:3px solid ${BORDER};font-family:${FONT};">${inline(escHtml(h3[1]))}</p>`
+      );
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^-{3,}$/.test(raw) || /^\*{3,}$/.test(raw)) {
+      flushList();
+      parts.push(
+        `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0;">
+           <tr><td height="1" style="border-top:1px solid ${BORDER};font-size:0;line-height:0;">&nbsp;</td></tr>
+         </table>`
+      );
+      i++;
+      continue;
+    }
+
+    // Bullet list item (•, -, or *)
+    const bullet = raw.match(/^[•\-\*]\s+(.+)$/);
+    if (bullet) {
+      if (!inList || ordered) { flushList(); inList = true; ordered = false; }
+      listBuf.push(bullet[1]);
+      i++;
+      continue;
+    }
+
+    // Numbered list item
+    const numbered = raw.match(/^\d+\.\s+(.+)$/);
+    if (numbered) {
+      if (!inList || !ordered) { flushList(); inList = true; ordered = true; }
+      listBuf.push(numbered[1]);
+      i++;
+      continue;
+    }
+
+    // Empty line
+    if (raw.trim() === '') {
+      flushList();
+      i++;
+      continue;
+    }
+
+    // Regular paragraph
+    flushList();
+    parts.push(
+      `<p style="margin:4px 0 10px 0;color:${TEXT};font-size:14px;line-height:1.7;font-family:${FONT};">${inline(line)}</p>`
+    );
+    i++;
+  }
+  flushList();
+
+  const LOGO_URL = logoSrc;
+
+  const logoBarHtml =
+    `<table width="100%" cellpadding="0" cellspacing="0" border="0">
+       <tr>
+         <td style="background:${PRIMARY};padding:18px 32px 16px 32px;border-bottom:1px solid rgba(255,255,255,0.15);">
+           <span style="font-family:${FONT};font-size:20px;font-weight:700;color:#ffffff;letter-spacing:1px;">Mela AI Meeting Assistant</span>
+         </td>
+       </tr>
+     </table>`;
+
+  const headerHtml = title
+    ? `<table width="100%" cellpadding="0" cellspacing="0" border="0">
+         <tr>
+           <td style="background:${PRIMARY};padding:20px 32px 24px 32px;">
+             <p style="margin:0 0 6px 0;color:rgba(255,255,255,0.55);font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;font-family:${FONT};">Meeting Summary</p>
+             <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;line-height:1.35;font-family:${FONT};">${title}</h1>
+             ${metaLine ? `<p style="margin:10px 0 0 0;color:rgba(255,255,255,0.7);font-size:12px;line-height:1.5;font-family:${FONT};">${metaLine}</p>` : ''}
+           </td>
+         </tr>
+       </table>`
+    : '';
+
+  const footerHtml =
+    `<table width="100%" cellpadding="0" cellspacing="0" border="0">
+       <tr>
+         <td style="background:${PRIMARY};padding:20px 36px;text-align:center;">
+           <p style="margin:0 0 6px 0;font-family:${FONT};font-size:15px;font-weight:700;color:#ffffff;letter-spacing:0.5px;">Mela AI Meeting Assistant</p>
+           <p style="margin:0;color:rgba(255,255,255,0.65);font-size:12px;font-family:${FONT};">
+             Generated by&nbsp;<a href="https://armely.com/mela-ai" target="_blank" rel="noopener noreferrer"
+               style="color:#ffffff;font-weight:600;text-decoration:underline;text-underline-offset:2px;">Armely's Mela AI Meeting Assistant</a>
+           </p>
+         </td>
+       </tr>
+     </table>`;
+
+  return `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#EEF3FA;">
+  <tr>
+    <td align="center" style="padding:24px 10px;">
+      <table width="700" cellpadding="0" cellspacing="0" border="0" style="max-width:700px;background:#ffffff;border:1px solid ${BORDER};">
+        <tr><td>${logoBarHtml}</td></tr>
+        <tr><td>${headerHtml}</td></tr>
+        <tr><td style="padding:28px 36px 32px 36px;">${parts.join('\n')}</td></tr>
+        <tr><td>${footerHtml}</td></tr>
+      </table>
+    </td>
+  </tr>
+</table>`;
 }
 
 function summarizeError(error: any): string {
@@ -112,6 +286,20 @@ export interface MailMessageSummary {
   flagged?: boolean;
 }
 
+export interface PlannerTaskSummary {
+  id: string;
+  title: string;
+  planId?: string;
+  planTitle?: string;
+  bucketId?: string;
+  percentComplete?: number;
+  priority?: number;
+  startDateTime?: string;
+  dueDateTime?: string;
+  completedDateTime?: string;
+  createdDateTime?: string;
+}
+
 interface TranscriptionResult {
   status: string;
   id: string;
@@ -144,6 +332,10 @@ class GraphApiHelper {
   private graphClient: AxiosInstance;
   private tokenFactory: (() => Promise<string>) | null = null;
   private static readonly GRAPH_TIMEOUT_MS = 15000;
+  private static readonly USER_INFO_TTL_MS  = 30 * 60 * 1000; // 30 minutes
+  private static readonly TIMEZONE_TTL_MS   = 60 * 60 * 1000; // 60 minutes
+  private userInfoCache  = new Map<string, { data: UserInfo | null; at: number }>();
+  private timezoneCache  = new Map<string, { tz: string; at: number }>();
 
   private extractJoinWebUrlFromText(text: string): string | null {
     if (!text) return null;
@@ -337,11 +529,11 @@ class GraphApiHelper {
     /**
      * Get access token using client credentials flow (OAuth 2.0)
      */
-    private async getTokenUsingClientCredentials(): Promise<string> {
+    private async getTokenUsingClientCredentials(preferredTenantId?: string): Promise<string> {
       try {
         const clientId = config.graphClientId || process.env.CLIENT_ID;
         const clientSecret = config.graphClientSecret || process.env.CLIENT_SECRET;
-        const tenantId = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID;
+        const tenantId = preferredTenantId || process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID;
 
         if (!clientId || !clientSecret || !tenantId) {
           console.warn(`[GRAPH_AUTH] Missing credentials: CLIENT_ID=${!!clientId}, CLIENT_SECRET=${!!clientSecret}, TENANT_ID=${!!tenantId}`);
@@ -394,20 +586,23 @@ class GraphApiHelper {
    * Get user information by ID to identify them by name
    */
   async getUserInfo(userId: string): Promise<UserInfo | null> {
+    const hit = this.userInfoCache.get(userId);
+    if (hit && Date.now() - hit.at < GraphApiHelper.USER_INFO_TTL_MS) return hit.data;
     try {
       const response = await this.graphClient.get(`/users/${encodeURIComponent(userId)}`);
-      return {
+      const data: UserInfo = {
         id: response.data.id,
         displayName: response.data.displayName || response.data.givenName || '',
         mail: response.data.mail,
         userPrincipalName: response.data.userPrincipalName,
       };
+      this.userInfoCache.set(userId, { data, at: Date.now() });
+      return data;
     } catch (error) {
       console.log(`[GRAPH_API] Using fallback user profile for ${userId}`);
-      return {
-        id: userId,
-        displayName: '',
-      };
+      const fallback: UserInfo = { id: userId, displayName: '' };
+      // Don't cache failures — let the next call retry
+      return fallback;
     }
   }
 
@@ -415,13 +610,15 @@ class GraphApiHelper {
    * Get user's timezone from mailbox settings
    */
   async getUserTimezone(userId: string): Promise<string> {
+    const hit = this.timezoneCache.get(userId);
+    if (hit && Date.now() - hit.at < GraphApiHelper.TIMEZONE_TTL_MS) return hit.tz;
     try {
       const token = await this.getTokenUsingClientCredentials();
       if (!token) {
         console.warn(`[TIMEZONE] No token available, defaulting to Central Standard Time`);
         return 'Central Standard Time';
       }
-      
+
       const response = await axios.get(
         `https://graph.microsoft.com/v1.0/users/${userId}/mailboxSettings`,
         {
@@ -429,10 +626,11 @@ class GraphApiHelper {
           timeout: GraphApiHelper.GRAPH_TIMEOUT_MS
         }
       );
-      
-      const timezone = response.data?.timeZone || 'Central Standard Time';
-      console.log(`[TIMEZONE] User ${userId} timezone: ${timezone}`);
-      return timezone;
+
+      const tz = response.data?.timeZone || 'Central Standard Time';
+      console.log(`[TIMEZONE] User ${userId} timezone: ${tz}`);
+      this.timezoneCache.set(userId, { tz, at: Date.now() });
+      return tz;
     } catch (error: any) {
       console.warn(`[TIMEZONE] Could not fetch timezone for ${userId}, defaulting to Central Standard Time:`, error?.message);
       return 'Central Standard Time';
@@ -474,7 +672,7 @@ class GraphApiHelper {
 
   async getInboxMessages(
     userId: string,
-    options?: { top?: number }
+    options?: { top?: number; senderName?: string; dateFilter?: 'today' | 'week' }
   ): Promise<MailMessageSummary[]> {
     try {
       if (!this.tokenFactory) {
@@ -482,15 +680,43 @@ class GraphApiHelper {
         return [];
       }
 
-      // Fetch messages - filtering is done by LLM, not here
-      const top = Math.min(Math.max(options?.top || 20, 1), 50);
+      const { senderName, dateFilter } = options || {};
+      const top = Math.min(Math.max(options?.top || 20, 1), 100);
       const select = 'id,subject,from,receivedDateTime,importance,isRead,bodyPreview,conversationId,webLink,categories,flag,body';
-      const response = await this.graphGetWithClientCredentials(
-        `/users/${encodeURIComponent(userId)}/mailFolders/inbox/messages?$top=${top}&$orderby=receivedDateTime desc&$select=${encodeURIComponent(select)}`
-      );
 
-      const messages = (response.data?.value || []).map((message: any) => this.mapMailMessage(message));
-      console.log(`[GRAPH_API] Loaded ${messages.length} inbox message(s) for ${userId}`);
+      let url: string;
+      if (senderName) {
+        // $search with KQL "from:name" for partial sender name matching.
+        // Note: $search and $filter cannot be combined — date filter applied client-side below.
+        const safeSearch = senderName.replace(/"/g, '');
+        url = `/users/${encodeURIComponent(userId)}/mailFolders/inbox/messages?$search=${encodeURIComponent(`"from:${safeSearch}"`)}&$top=${top}&$select=${encodeURIComponent(select)}`;
+      } else if (dateFilter) {
+        const since = dateFilter === 'today'
+          ? new Date(new Date().setHours(0, 0, 0, 0)).toISOString()
+          : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        // Note: $filter + $orderby together causes 400 on messages — sort client-side.
+        url = `/users/${encodeURIComponent(userId)}/mailFolders/inbox/messages?$top=${top}&$filter=${encodeURIComponent(`receivedDateTime ge ${since}`)}&$select=${encodeURIComponent(select)}`;
+      } else {
+        url = `/users/${encodeURIComponent(userId)}/mailFolders/inbox/messages?$top=${top}&$orderby=receivedDateTime desc&$select=${encodeURIComponent(select)}`;
+      }
+
+      const response = await this.graphGetWithClientCredentials(url);
+      let messages: MailMessageSummary[] = (response.data?.value || []).map((message: any) => this.mapMailMessage(message));
+
+      // Client-side date filter when sender search is active (can't combine $search + $filter)
+      if (senderName && dateFilter) {
+        const cutoff = dateFilter === 'today'
+          ? new Date(new Date().setHours(0, 0, 0, 0)).getTime()
+          : Date.now() - 7 * 24 * 60 * 60 * 1000;
+        messages = messages.filter(m => new Date(m.receivedDateTime).getTime() >= cutoff);
+      }
+
+      // Sort newest-first (required when $filter is used without $orderby)
+      if (dateFilter || senderName) {
+        messages.sort((a, b) => new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime());
+      }
+
+      console.log(`[GRAPH_API] Loaded ${messages.length} inbox message(s) for ${userId}${senderName ? ` (sender: ${senderName})` : ''}${dateFilter ? ` (${dateFilter})` : ''}`);
       return messages;
     } catch (error: any) {
       const status = error?.response?.status;
@@ -754,6 +980,31 @@ class GraphApiHelper {
       console.error(`[GRAPH_API] Failed to fetch user chats: status=${status}, error=${errMsg}`);
       return [];
     }
+  }
+
+  /**
+   * List the meeting-related groups/chats a user belongs to.
+   * Includes group and meeting chats, ordered by last update desc.
+   */
+  async listMeetingGroupsForUser(
+    userId: string,
+    options?: { limit?: number; query?: string }
+  ): Promise<Array<{ id: string; title: string; chatType: string; lastUpdated?: string }>> {
+    const limit = Math.min(Math.max(options?.limit || 50, 1), 100);
+    const rawChats = await this.getUserChats(userId, options?.query, limit);
+    if (!rawChats.length) return [];
+
+    const filtered = rawChats
+      .filter((chat) => chat.chatType === 'group' || chat.chatType === 'meeting')
+      .sort((a, b) => new Date(b.lastUpdated || 0).getTime() - new Date(a.lastUpdated || 0).getTime())
+      .map((chat) => ({
+        id: chat.id,
+        title: chat.topic || 'Untitled chat',
+        chatType: chat.chatType,
+        lastUpdated: chat.lastUpdated,
+      }));
+
+    return filtered;
   }
 
   /**
@@ -1251,20 +1502,38 @@ class GraphApiHelper {
     }
   }
 
+  // Cached Bot Connector token to avoid re-fetching on every proactive send
+  private _botConnectorToken: string = '';
+  private _botConnectorTokenExpiry: number = 0;
+
   /**
    * Get a Bot Connector API token (scope: api.botframework.com) for proactive messaging.
+   * Caches the token until 60 s before expiry.
    */
   private async getBotConnectorToken(): Promise<string> {
+    // Return cached token if still valid
+    if (this._botConnectorToken && Date.now() < this._botConnectorTokenExpiry - 60_000) {
+      return this._botConnectorToken;
+    }
+
     try {
-      const clientId = process.env.CLIENT_ID;
+      const clientId     = process.env.CLIENT_ID;
       const clientSecret = process.env.CLIENT_SECRET;
 
       const isUserAssignedMsi = (process.env.BOT_TYPE || '').toLowerCase() === 'userassignedmsi';
       if (isUserAssignedMsi || !clientSecret) {
-        return await this.getManagedIdentityToken('https://api.botframework.com/.default');
+        const msiToken = await this.getManagedIdentityToken('https://api.botframework.com/.default');
+        // MSI tokens don't expose expiry here — cache for 50 min
+        this._botConnectorToken = msiToken;
+        this._botConnectorTokenExpiry = Date.now() + 50 * 60 * 1000;
+        console.log(`[BOT_CONNECTOR_AUTH] Obtained MSI token for botframework.com (clientId=${clientId || 'env-managed'})`);
+        return msiToken;
       }
 
-      if (!clientId || !clientSecret) return '';
+      if (!clientId || !clientSecret) {
+        console.error('[BOT_CONNECTOR_AUTH] CLIENT_ID or CLIENT_SECRET is missing — cannot acquire Bot Connector token');
+        return '';
+      }
 
       const form = new URLSearchParams();
       form.append('client_id', clientId);
@@ -1272,15 +1541,30 @@ class GraphApiHelper {
       form.append('scope', 'https://api.botframework.com/.default');
       form.append('grant_type', 'client_credentials');
 
-      // Use botframework.com tenant for multi-tenant bot connector tokens
+      // Single-tenant bots must request from their own tenant.
+      // Multi-tenant (or UserAssignedMSI) bots use the botframework.com pseudo-tenant.
+      const botType  = (process.env.BOT_TYPE || 'MultiTenant').toLowerCase();
+      const tenantId = process.env.TENANT_ID || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID || 'botframework.com';
+      const tokenTenant = (botType === 'singletenant') ? tenantId : 'botframework.com';
+
+      console.log(`[BOT_CONNECTOR_AUTH] Requesting token: clientId=${clientId}, botType=${botType}, tenant=${tokenTenant}`);
+
       const response = await axios.post(
-        `https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token`,
+        `https://login.microsoftonline.com/${tokenTenant}/oauth2/v2.0/token`,
         form.toString(),
         { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
       );
-      return response.data.access_token;
-    } catch (error) {
-      console.error(`[BOT_CONNECTOR_AUTH_ERROR] Failed to obtain Bot Connector token:`, error);
+
+      const token   = response.data.access_token as string;
+      const expiresIn = (response.data.expires_in as number) || 3600;
+      this._botConnectorToken       = token;
+      this._botConnectorTokenExpiry = Date.now() + expiresIn * 1000;
+      console.log(`[BOT_CONNECTOR_AUTH] Token acquired (expires in ${expiresIn}s)`);
+      return token;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const body   = JSON.stringify(error?.response?.data || {}).slice(0, 400);
+      console.error(`[BOT_CONNECTOR_AUTH_ERROR] Failed to obtain Bot Connector token: status=${status} body=${body} msg=${error?.message}`);
       return '';
     }
   }
@@ -1295,9 +1579,9 @@ class GraphApiHelper {
    * Get the online meeting resource ID for a given organizer + joinWebUrl.
    * Requires OnlineMeetings.Read.All — uses Graph API credentials.
    */
-  async getOnlineMeetingId(organizerId: string, joinWebUrl: string): Promise<string | null> {
+  async getOnlineMeetingId(organizerId: string, joinWebUrl: string, meetingTenantId?: string): Promise<string | null> {
     try {
-      const graphToken = await this.getTokenUsingClientCredentials();
+      const graphToken = await this.getTokenUsingClientCredentials(meetingTenantId);
       if (!graphToken) return null;
       const encodedUrl = encodeURIComponent(joinWebUrl);
       const response = await axios.get(
@@ -1317,7 +1601,23 @@ class GraphApiHelper {
     } catch (error: any) {
       const status = error?.response?.status;
       const msg = error?.response?.data?.error?.message || error?.message;
-      console.warn(`[GRAPH_API] Could not resolve meeting ID (status=${status}): ${msg}`);
+      if (status === 403 && (msg || '').toLowerCase().includes('application access policy')) {
+        const appId = process.env.GRAPH_CLIENT_ID || process.env.CLIENT_ID;
+        console.warn(`[GRAPH_API] 403 No application access policy for app ${appId} — meeting ID lookup blocked`);
+        if (!_accessPolicyFixLogged) {
+          _accessPolicyFixLogged = true;
+          console.error(
+            `[GRAPH_API] ── Teams Admin Fix Required (run once) ────────────────────────\n` +
+            `  New-CsApplicationAccessPolicy -Identity "MissaBot-Policy" \\\n` +
+            `    -AppIds "${appId}" \\\n` +
+            `    -Description "Allow Missa to read online meetings"\n` +
+            `  Grant-CsApplicationAccessPolicy -PolicyName "MissaBot-Policy" -Global\n` +
+            `[GRAPH_API] ─────────────────────────────────────────────────────────────────`
+          );
+        }
+      } else {
+        console.warn(`[GRAPH_API] Could not resolve meeting ID (status=${status}): ${msg}`);
+      }
       return null;
     }
   }
@@ -1328,9 +1628,9 @@ class GraphApiHelper {
    * Requires OnlineMeetingTranscript.Read.All
    * Handles pagination via @odata.nextLink
    */
-  async listMeetingTranscripts(organizerId: string, meetingId: string): Promise<any[]> {
+  async listMeetingTranscripts(organizerId: string, meetingId: string, meetingTenantId?: string): Promise<any[]> {
     try {
-      const graphToken = await this.getTokenUsingClientCredentials();
+      const graphToken = await this.getTokenUsingClientCredentials(meetingTenantId);
       if (!graphToken) return [];
       console.log(`[GRAPH_API] Listing transcripts for meeting ${meetingId}`);
       
@@ -1373,9 +1673,9 @@ class GraphApiHelper {
    * Returns array of transcripts with meetingId, id, createdDateTime
    * NOTE: $orderby is NOT supported on this endpoint - sort client-side
    */
-  async getAllTranscriptsForUser(userId: string, limit: number = 20): Promise<any[]> {
+  async getAllTranscriptsForUser(userId: string, limit: number = 20, meetingTenantId?: string): Promise<any[]> {
     try {
-      const graphToken = await this.getTokenUsingClientCredentials();
+      const graphToken = await this.getTokenUsingClientCredentials(meetingTenantId);
       if (!graphToken) return [];
       console.log(`[GRAPH_API] Getting all transcripts for user ${userId}, limit=${limit}`);
       
@@ -1414,8 +1714,8 @@ class GraphApiHelper {
    * Tries multiple endpoints: beta API, then v1.0 API
    * Returns plain text (vtt format by default)
    */
-  async downloadTranscriptContent(organizerId: string, meetingId: string, transcriptId: string): Promise<string | null> {
-    const graphToken = await this.getTokenUsingClientCredentials();
+  async downloadTranscriptContent(organizerId: string, meetingId: string, transcriptId: string, meetingTenantId?: string): Promise<string | null> {
+    const graphToken = await this.getTokenUsingClientCredentials(meetingTenantId);
     if (!graphToken) return null;
     console.log(`[GRAPH_API] Downloading transcript content: ${transcriptId}`);
     
@@ -1440,6 +1740,37 @@ class GraphApiHelper {
     }
   }
 
+  private async tryDownloadTranscriptContent(
+    organizerId: string,
+    meetingId: string,
+    transcriptId: string,
+    meetingTenantId?: string
+  ): Promise<{ content: string | null; status?: number; message?: string }> {
+    const graphToken = await this.getTokenUsingClientCredentials(meetingTenantId);
+    if (!graphToken) {
+      return { content: null, message: 'No Graph token' };
+    }
+
+    try {
+      console.log(`[GRAPH_API] Trying v1.0 endpoint for transcript download`);
+      const response = await axios.get(
+        `https://graph.microsoft.com/v1.0/users/${organizerId}/onlineMeetings/${meetingId}/transcripts/${transcriptId}/content?$format=text/vtt`,
+        {
+          headers: { Authorization: `Bearer ${graphToken}`, Accept: 'text/vtt' },
+          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+        }
+      );
+      const content = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+      console.log(`[GRAPH_API] Downloaded transcript content via v1.0 (${content.length} chars)`);
+      return { content };
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const message = error?.response?.data?.error?.message || error?.message;
+      console.warn(`[GRAPH_API] Could not download transcript (status=${status}): ${message}`);
+      return { content: null, status, message };
+    }
+  }
+
   /**
    * Fetch the full transcript text for a meeting.
    * Resolves meeting ID by joinWebUrl, lists its transcripts, downloads the latest.
@@ -1450,21 +1781,28 @@ class GraphApiHelper {
     organizerId: string,
     joinWebUrl: string,
     minCreatedTimestamp?: number,
-    maxCreatedTimestamp?: number
+    maxCreatedTimestamp?: number,
+    options?: { strictWindow?: boolean }
   ): Promise<string | null> {
     try {
       let transcripts: any[] = [];
       let meetingId: string | null = null;
+      const meetingTenantId = this.extractTenantIdFromJoinWebUrl(joinWebUrl) || undefined;
+      if (meetingTenantId) {
+        console.log(`[GRAPH_API] Using meeting tenant from joinWebUrl context: ${meetingTenantId}`);
+      } else {
+        console.log(`[GRAPH_API] Meeting tenant not found in joinWebUrl context; falling back to configured tenant`);
+      }
 
       // Try to resolve meeting ID by joinWebUrl, then list its transcripts
-      meetingId = await this.getOnlineMeetingId(organizerId, joinWebUrl);
+      meetingId = await this.getOnlineMeetingId(organizerId, joinWebUrl, meetingTenantId);
 
       if (meetingId) {
-        transcripts = await this.listMeetingTranscripts(organizerId, meetingId);
+        transcripts = await this.listMeetingTranscripts(organizerId, meetingId, meetingTenantId);
       } else {
         // No meeting ID found — fall back to scanning organizer's transcripts
         console.log(`[GRAPH_API] Meeting ID lookup failed - falling back to getAllTranscripts scan`);
-        transcripts = await this.getAllTranscriptsForUser(organizerId, 20);
+        transcripts = await this.getAllTranscriptsForUser(organizerId, 20, meetingTenantId);
       }
 
       if (transcripts.length === 0) {
@@ -1480,8 +1818,10 @@ class GraphApiHelper {
       // when getAllTranscripts fallback picks transcripts from newer, unrelated meetings.
       let filteredTranscripts = transcripts;
       if (minCreatedTimestamp || maxCreatedTimestamp) {
-        // Lower bound: 1-hour grace before call start for early transcripts
-        const lowerBound = minCreatedTimestamp ? minCreatedTimestamp - (60 * 60 * 1000) : 0;
+        // Lower bound: for live polls use a tight 5-minute grace; for historical queries use 1 hour.
+        // A large grace window lets previous-session transcripts bleed into the current call.
+        const lowerGraceMs = options?.strictWindow ? (5 * 60 * 1000) : (60 * 60 * 1000);
+        const lowerBound = minCreatedTimestamp ? minCreatedTimestamp - lowerGraceMs : 0;
         // Upper bound: 2-hour grace after call end for Teams processing delay
         const upperBound = maxCreatedTimestamp ? maxCreatedTimestamp + (2 * 60 * 60 * 1000) : Infinity;
 
@@ -1497,7 +1837,11 @@ class GraphApiHelper {
         console.log(`[GRAPH_API] Time-window filter: ${transcripts.length} transcripts -> ${filteredTranscripts.length} in window [${minDate}, ${maxDate}]`);
 
         if (filteredTranscripts.length === 0) {
-          console.log(`[GRAPH_API] No transcripts found in the specified time window - meeting transcript may not exist yet`);
+          // No transcripts fall within the specified time window.
+          // When a window is set by a session-specific caller (live polling, post-meeting fetch),
+          // returning data from outside that window would introduce stale data from a previous
+          // meeting occurrence. Return null so the caller can retry later.
+          console.log(`[GRAPH_API] No transcripts in window — returning null (caller will retry)`);
           return null;
         }
       }
@@ -1509,17 +1853,45 @@ class GraphApiHelper {
         return dateB - dateA;
       });
 
-      const latest = filteredTranscripts[0];
-      const transcriptMeetingId = latest.meetingId || meetingId;
-      console.log(`[GRAPH_API] Using latest transcript: id=${latest.id}, callId=${latest.callId || 'N/A'}, meetingId=${transcriptMeetingId}, created=${latest.createdDateTime}`);
+      const maxCandidates = Math.min(filteredTranscripts.length, 6);
+      console.log(`[GRAPH_API] Attempting transcript download from up to ${maxCandidates} candidate(s)`);
 
-      if (!transcriptMeetingId) {
-        console.warn(`[GRAPH_API] No meeting ID available for transcript download`);
-        return null;
+      for (let i = 0; i < maxCandidates; i++) {
+        const candidate = filteredTranscripts[i];
+        const transcriptMeetingId = candidate.meetingId || meetingId;
+        console.log(
+          `[GRAPH_API] Candidate ${i + 1}/${maxCandidates}: id=${candidate.id}, callId=${candidate.callId || 'N/A'}, meetingId=${transcriptMeetingId}, created=${candidate.createdDateTime}`
+        );
+
+        if (!transcriptMeetingId) {
+          console.warn(`[GRAPH_API] Skipping transcript candidate with no meeting ID`);
+          continue;
+        }
+
+        const downloadResult = await this.tryDownloadTranscriptContent(
+          organizerId,
+          transcriptMeetingId,
+          candidate.id,
+          meetingTenantId
+        );
+        if (downloadResult.content) {
+          return downloadResult.content;
+        }
+
+        // This is a tenant/app policy block, not a per-transcript issue.
+        if (
+          downloadResult.status === 403 &&
+          (downloadResult.message || '').toLowerCase().includes('application is not allowed')
+        ) {
+          console.warn(
+            `[GRAPH_API] Stopping transcript scan due to application access policy/RSC restriction: ${downloadResult.message}`
+          );
+          return null;
+        }
       }
 
-      const content = await this.downloadTranscriptContent(organizerId, transcriptMeetingId, latest.id);
-      return content || null;
+      console.log(`[GRAPH_API] Tried ${maxCandidates} transcript candidate(s), none were downloadable`);
+      return null;
     } catch (error) {
       this.logGraphError('fetchMeetingTranscriptText', error);
       return null;
@@ -1534,29 +1906,144 @@ class GraphApiHelper {
         return false;
       }
 
-      const url = `${serviceUrl.replace(/\/$/, '')}/v3/conversations/${encodeURIComponent(conversationId)}/activities`;
-      console.log(`[PROACTIVE] Sending message to conversation: ${conversationId}`);
-
       const botId = process.env.BOT_ID || process.env.CLIENT_ID || '';
+      const url   = `${serviceUrl.replace(/\/$/, '')}/v3/conversations/${encodeURIComponent(conversationId)}/activities`;
+
+      console.log(`[PROACTIVE] Sending: botId=${botId}, conversationId=${conversationId}, serviceUrl=${serviceUrl.slice(0, 60)}`);
+
       await axios.post(url, {
         type: 'message',
-        from: {
-          id: botId,
-          name: config.botDisplayName,
-        },
-        text
+        from: { id: botId, name: config.botDisplayName },
+        text,
       }, {
         headers: {
           Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
+          'Content-Type': 'application/json',
+        },
       });
 
       console.log(`[PROACTIVE] Message sent successfully`);
       return true;
-    } catch (error) {
-      this.logGraphError('sendProactiveMessage', error);
+    } catch (error: any) {
+      const status   = error?.response?.status;
+      const body     = JSON.stringify(error?.response?.data || {}).slice(0, 600);
+      const botId    = process.env.BOT_ID || process.env.CLIENT_ID || '(unset)';
+      const clientId = process.env.CLIENT_ID || '(unset)';
+      console.error(
+        `[PROACTIVE_ERROR] status=${status} botId=${botId} clientId=${clientId}\n` +
+        `[PROACTIVE_ERROR] response body: ${body}\n` +
+        `[PROACTIVE_ERROR] message: ${error?.message}`
+      );
+      if (status === 401) {
+        // Clear cached token so next call re-fetches
+        this._botConnectorToken = '';
+        this._botConnectorTokenExpiry = 0;
+        console.error(
+          `[PROACTIVE_ERROR] 401 Unauthorized — token invalidated for next retry.\n` +
+          `[PROACTIVE_ERROR] Check: CLIENT_ID matches Azure Bot Service registration, ` +
+          `CLIENT_SECRET is current, BOT_ID env var is set correctly.`
+        );
+      }
       return false;
+    }
+  }
+
+  async sendProactiveCard(serviceUrl: string, conversationId: string, card: object): Promise<boolean> {
+    try {
+      const token = await this.getBotConnectorToken();
+      if (!token) {
+        console.warn('[PROACTIVE] No Bot Connector token — cannot send proactive card');
+        return false;
+      }
+      const botId = process.env.BOT_ID || process.env.CLIENT_ID || '';
+      const url = `${serviceUrl.replace(/\/$/, '')}/v3/conversations/${encodeURIComponent(conversationId)}/activities`;
+      console.log(`[PROACTIVE] Sending card: botId=${botId}, conversationId=${conversationId}`);
+      await axios.post(url, {
+        type: 'message',
+        from: { id: botId, name: config.botDisplayName },
+        attachments: [{
+          contentType: 'application/vnd.microsoft.card.adaptive',
+          content: card,
+        }],
+      }, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      console.log(`[PROACTIVE] Card sent successfully`);
+      return true;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const body = JSON.stringify(error?.response?.data || {}).slice(0, 600);
+      const botId = process.env.BOT_ID || process.env.CLIENT_ID || '(unset)';
+      console.error(`[PROACTIVE_ERROR] Card send failed: status=${status} botId=${botId}\n[PROACTIVE_ERROR] body: ${body}`);
+      if (status === 401) {
+        this._botConnectorToken = '';
+        this._botConnectorTokenExpiry = 0;
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Look up the 1:1 chat ID between this bot app and a user via the Teams App Installation API.
+   * Returns null if the app isn't installed for that user or the API fails.
+   * Requires TeamsAppInstallation.ReadWriteSelfForUser.All application permission.
+   */
+  async getPersonalBotChatId(userId: string): Promise<string | null> {
+    try {
+      const teamsAppId = process.env.TEAMS_APP_PUBLISHED_APP_ID || process.env.TEAMS_APP_ID || '';
+      if (!teamsAppId) { console.warn('[GRAPH_API] TEAMS_APP_PUBLISHED_APP_ID not set — cannot look up personal bot chat'); return null; }
+      const safeAppId = teamsAppId.replace(/'/g, "''");
+      const response = await this.graphGetWithClientCredentials(
+        `/users/${encodeURIComponent(userId)}/teamwork/installedApps?$filter=teamsApp/id eq '${safeAppId}'&$expand=chat&$select=id,chat`
+      );
+      const installations: any[] = response.data?.value || [];
+      const chatId = installations[0]?.chat?.id || null;
+      if (chatId) console.log(`[GRAPH_API] Found personal bot chat for ${userId}: ${chatId.slice(0, 40)}...`);
+      return chatId;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const msg = JSON.stringify(error?.response?.data?.error || error?.message || '').slice(0, 200);
+      console.warn(`[GRAPH_API] getPersonalBotChatId failed (${status}): ${msg}`);
+      return null;
+    }
+  }
+
+  /**
+   * Create (or retrieve) a 1:1 conversation between the bot and a Teams user.
+   * Uses the Bot Connector REST API — works even if the user has never messaged the bot.
+   * Returns the conversation ID on success, null on failure.
+   */
+  async getOrCreatePersonalConversation(
+    userId: string,
+    tenantId: string,
+    serviceUrl: string
+  ): Promise<string | null> {
+    try {
+      const token = await this.getBotConnectorToken();
+      if (!token) { console.warn('[PROACTIVE] No Bot Connector token for conversation create'); return null; }
+      const botId = process.env.BOT_ID || process.env.CLIENT_ID || '';
+      const botName = process.env.BOT_DISPLAY_NAME || config.botDisplayName || 'Missa';
+      const url = `${serviceUrl.replace(/\/$/, '')}/v3/conversations`;
+      const response = await axios.post(url, {
+        bot: { id: botId, name: botName },
+        members: [{ id: userId }],
+        channelData: { tenant: { id: tenantId } },
+        isGroup: false,
+      }, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+      });
+      const conversationId = response.data?.id;
+      console.log(`[PROACTIVE] Created/fetched 1:1 conversation for ${userId}: ${conversationId}`);
+      return conversationId || null;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const msg = JSON.stringify(error?.response?.data || error?.message || '').slice(0, 300);
+      console.error(`[PROACTIVE] getOrCreatePersonalConversation failed (${status}): ${msg}`);
+      return null;
     }
   }
 
@@ -1564,7 +2051,7 @@ class GraphApiHelper {
    * Send an email on behalf of the user.
    * Body content can be markdown or plain text - it will be converted to HTML.
    * Supports single recipient (string) or multiple recipients (string array).
-   * 
+   *
    * @param options.sendIndependently - If true, sends separate emails to each recipient so one failure doesn't affect others
    */
   async sendEmail(
@@ -1610,8 +2097,10 @@ class GraphApiHelper {
       const url = `https://graph.microsoft.com/v1.0/users/${senderUserId}/sendMail`;
       console.log(`[GRAPH_API] Sending email from ${senderUserId} to ${recipients.join(', ')}${senderUserId !== userId ? ` (on behalf of ${userId})` : ''}`);
 
-      // Convert markdown/plain text to properly formatted HTML
-      const htmlBody = markdownToHtml(body);
+      // Convert markdown/plain text to properly formatted HTML.
+      // Embed logo as base64 so Exchange cannot strip the external src URL.
+      const logoSrc = await fetchLogoDataUri();
+      const htmlBody = markdownToHtml(body, logoSrc);
 
       // Build toRecipients array for all recipients
       const toRecipients = recipients.map(email => ({
@@ -1788,7 +2277,8 @@ class GraphApiHelper {
 
     const senderUserId = config.emailSenderUserId || userId;
     const url = `https://graph.microsoft.com/v1.0/users/${senderUserId}/sendMail`;
-    const htmlBody = markdownToHtml(body);
+    const logoSrc = await fetchLogoDataUri();
+    const htmlBody = markdownToHtml(body, logoSrc);
 
     // When using service account, auto-fetch reply-to email if not provided
     let replyToEmail = options?.replyToEmail;
@@ -2007,6 +2497,125 @@ class GraphApiHelper {
       }
       this.logGraphError('getCalendarEvents', error);
       return { success: false, error: errMsg };
+    }
+  }
+
+  /**
+   * Fetch Microsoft Planner tasks assigned to a user.
+   * Uses Graph: GET /users/{id}/planner/tasks
+   */
+  async getPlannerTasksForUser(
+    userId: string,
+    top: number = 100
+  ): Promise<{ success: boolean; tasks?: PlannerTaskSummary[]; error?: string }> {
+    try {
+      const token = await this.getTokenUsingClientCredentials();
+      if (!token) {
+        return { success: false, error: 'Unable to acquire Microsoft Graph token for Planner tasks.' };
+      }
+
+      const pageSize = Math.min(Math.max(top, 1), 200);
+      const selectFields = 'id,title,planId,bucketId,percentComplete,priority,startDateTime,dueDateTime,completedDateTime,createdDateTime';
+      let url: string | null =
+        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(userId)}/planner/tasks` +
+        `?$top=${pageSize}&$select=${selectFields}`;
+
+      const rawTasks: any[] = [];
+      while (url) {
+        const response = await axios.get(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+        });
+        rawTasks.push(...(response.data?.value || []));
+        url = response.data?.['@odata.nextLink'] || null;
+      }
+
+      const uniquePlanIds = [...new Set(rawTasks.map((t: any) => t?.planId).filter(Boolean))] as string[];
+      const planTitleById = new Map<string, string>();
+      for (const planId of uniquePlanIds) {
+        try {
+          const planResponse = await axios.get(
+            `https://graph.microsoft.com/v1.0/planner/plans/${encodeURIComponent(planId)}?$select=id,title`,
+            {
+              headers: { Authorization: `Bearer ${token}` },
+              timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+            }
+          );
+          if (planResponse.data?.id) {
+            planTitleById.set(planResponse.data.id, planResponse.data.title || 'Planner Plan');
+          }
+        } catch {
+          // Plan title enrichment is best-effort.
+        }
+      }
+
+      const tasks: PlannerTaskSummary[] = rawTasks.map((task: any) => ({
+        id: task?.id || '',
+        title: task?.title || '(Untitled task)',
+        planId: task?.planId,
+        planTitle: task?.planId ? planTitleById.get(task.planId) : undefined,
+        bucketId: task?.bucketId,
+        percentComplete: typeof task?.percentComplete === 'number' ? task.percentComplete : undefined,
+        priority: typeof task?.priority === 'number' ? task.priority : undefined,
+        startDateTime: task?.startDateTime,
+        dueDateTime: task?.dueDateTime,
+        completedDateTime: task?.completedDateTime,
+        createdDateTime: task?.createdDateTime,
+      }));
+
+      console.log(`[GRAPH_API] Retrieved ${tasks.length} planner task(s) for user ${userId}`);
+      return { success: true, tasks };
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const code = error?.response?.data?.error?.code;
+      const message = error?.response?.data?.error?.message || error?.message || 'Unknown planner error';
+      console.error(`[GRAPH_API] Planner task fetch failed: status=${status}, code=${code}, message=${message}`);
+      return { success: false, error: `Planner API failed (${status || 'n/a'}${code ? `/${code}` : ''}): ${message}` };
+    }
+  }
+
+  async getUserPlannerPlans(userId: string): Promise<Array<{ id: string; title: string }>> {
+    try {
+      const response = await this.graphGetWithClientCredentials(
+        `/users/${encodeURIComponent(userId)}/planner/plans?$select=id,title`
+      );
+      return (response.data?.value || []).map((p: any) => ({ id: p.id as string, title: (p.title as string) || 'Planner' }));
+    } catch (error) {
+      this.logGraphError(`Failed to fetch Planner plans for ${userId}`, error);
+      return [];
+    }
+  }
+
+  async createPlannerTask(
+    planId: string,
+    title: string,
+    assigneeUserId: string,
+    dueDateTime?: string
+  ): Promise<{ success: boolean; taskId?: string; error?: string }> {
+    try {
+      const token = await this.getTokenUsingClientCredentials();
+      if (!token) return { success: false, error: 'No Graph token available' };
+      const body: Record<string, unknown> = {
+        planId,
+        title,
+        assignments: {
+          [assigneeUserId]: { '@odata.type': '#microsoft.graph.plannerAssignment', orderHint: ' !' },
+        },
+      };
+      if (dueDateTime) body.dueDateTime = dueDateTime;
+      const response = await axios.post(
+        `${config.graphApiEndpoint}/planner/tasks`,
+        body,
+        {
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          timeout: GraphApiHelper.GRAPH_TIMEOUT_MS,
+        }
+      );
+      return { success: true, taskId: response.data?.id };
+    } catch (error: any) {
+      const msg = error?.response?.data?.error?.message || error?.message || 'Unknown error';
+      console.error(`[GRAPH_API] Failed to create Planner task: ${msg}`);
+      return { success: false, error: msg };
     }
   }
 

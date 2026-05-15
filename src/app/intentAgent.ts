@@ -28,6 +28,7 @@ export type IntentLabel =
   | 'minutes'
   | 'transcribe'
   | 'meeting_overview'
+  | 'list_meeting_groups'
   | 'read_chats'
   | 'insights'
   | 'meeting_question'
@@ -35,6 +36,8 @@ export type IntentLabel =
   | 'reply_email'
   | 'send_email'
   | 'profile_details'
+  | 'check_planner_tasks'
+  | 'prepare_meeting'
   | 'check_calendar'
   | 'list_attendees'
   | 'general_chat'
@@ -282,6 +285,11 @@ const TOOL_CAPABILITIES = {
     requirements: ['Meeting exists in calendar or history'],
     produces: ['Meeting details', 'Attendees', 'Schedule info'],
   },
+  list_meeting_groups: {
+    description: 'List meeting groups/chats the user is a member of',
+    requirements: ['Chat membership visibility'],
+    produces: ['Group and meeting chat list', 'Conversation scope context'],
+  },
   read_chats: {
     description: 'Read recent messages in the current meeting/channel chat',
     requirements: ['Chat history access'],
@@ -317,10 +325,20 @@ const TOOL_CAPABILITIES = {
     requirements: ['User identity'],
     produces: ['Profile details', 'Contact information'],
   },
+  prepare_meeting: {
+    description: 'Help user prepare for an upcoming meeting by fetching calendar details, attendees, and giving prep advice',
+    requirements: ['Calendar access', 'Meeting scheduled'],
+    produces: ['Meeting prep tips', 'Attendee list', 'Logistics info', 'Agenda context'],
+  },
   check_calendar: {
     description: 'Check calendar and schedule information',
     requirements: ['Calendar access'],
     produces: ['Schedule overview', 'Meeting list', 'Availability'],
+  },
+  check_planner_tasks: {
+    description: 'Check Planner tasks and prioritize them',
+    requirements: ['Planner task access permissions'],
+    produces: ['Task list', 'Due-date grouping', 'Priority ordering'],
   },
   list_attendees: {
     description: 'List meeting attendees and their contact information',
@@ -353,6 +371,12 @@ export class IntentAgent {
       return this.createDefaultDecision('general_chat', trimmedMessage, 'Empty message');
     }
 
+    // Deterministic guardrail for short follow-ups so we don't lose context to generic chat.
+    const deterministicDecision = this.tryDeterministicFollowupDecision(trimmedMessage, context);
+    if (deterministicDecision) {
+      return deterministicDecision;
+    }
+
     // Get conversation state
     const state = getConversationState(context.conversationId);
     
@@ -373,6 +397,91 @@ export class IntentAgent {
     conversationStates.set(context.conversationId, state);
     
     return decision;
+  }
+
+  private tryDeterministicFollowupDecision(message: string, context: AgentContext): AgentDecision | null {
+    const text = (message || '').trim();
+    if (!text) return null;
+
+    // Keyword fast-path: "prepare/preparing" + meeting keyword → always prepare_meeting
+    const lower = text.toLowerCase();
+    if (/\bprepar(e|ing)\b/.test(lower) && /\bmeeting|call|standup|sync|session\b/.test(lower)) {
+      console.log(`[DECISION_LOG] Fast-path match: "prepare + meeting" → prepare_meeting`);
+      return {
+        intent: 'prepare_meeting',
+        confidence: 'high',
+        reasoning: 'Keyword fast-path: message contains "prepare/preparing" with a meeting reference.',
+        needsClarification: false,
+        refinedQuery: text,
+        parameters: {},
+      };
+    }
+
+    const last = context.lastBotResponse;
+    if (!last?.contentType || !last?.timestamp) return null;
+
+    const isRecent = Date.now() - last.timestamp < 20 * 60 * 1000;
+    if (!isRecent) return null;
+
+    const isLikelyFollowup =
+      lower.length <= 140 &&
+      /(which|priority|prioritize|what should i|what next|what about|tell me more|who said|what did|focus|details|that|it|this)/i.test(lower);
+    if (!isLikelyFollowup) return null;
+
+    if (last.contentType === 'inbox_email') {
+      return {
+        intent: 'check_inbox',
+        confidence: 'high',
+        reasoning: 'Deterministic follow-up: recent inbox context detected, route to cached inbox Q&A.',
+        needsClarification: false,
+        refinedQuery: `Using the previously shown inbox emails, answer this follow-up: ${text}`,
+        parameters: {
+          isReformatRequest: true,
+        },
+      };
+    }
+
+    if (last.contentType === 'planner_tasks') {
+      return {
+        intent: 'check_planner_tasks',
+        confidence: 'high',
+        reasoning: 'Deterministic follow-up: recent planner task context detected, route to planner task handler.',
+        needsClarification: false,
+        refinedQuery: `Using the previously shown planner tasks, answer this follow-up: ${text}`,
+        parameters: {
+          isReformatRequest: true,
+        },
+      };
+    }
+
+    if (['summary', 'minutes', 'transcript', 'insights', 'meeting_overview'].includes(last.contentType)) {
+      const isFormatOnlyFollowup = /\b(shorter|longer|bullet|bullets|reformat|rewrite|format|concise|brief|detailed|expand|compress)\b/i.test(lower);
+      return {
+        intent: isFormatOnlyFollowup ? 'summarize' : 'meeting_question',
+        confidence: 'high',
+        reasoning: 'Deterministic follow-up: recent meeting-content context detected, keep routing inside meeting context.',
+        needsClarification: false,
+        refinedQuery: `Using the previously shown meeting content, answer this follow-up: ${text}`,
+        parameters: {
+          isReformatRequest: true,
+        },
+      };
+    }
+
+    if (last.contentType === 'meeting_groups') {
+      return {
+        intent: 'list_meeting_groups',
+        confidence: 'high',
+        reasoning: 'Deterministic follow-up: recent meeting groups context detected, keep group listing scope.',
+        needsClarification: false,
+        refinedQuery: `Using the previously shown meeting groups, handle this follow-up: ${text}`,
+        parameters: {
+          isReformatRequest: true,
+        },
+      };
+    }
+
+    return null;
   }
 
   private buildContextSummary(state: ConversationState, context: AgentContext): string {
@@ -463,6 +572,7 @@ export class IntentAgent {
           role: 'user',
           content: `You are an Intent Agent for a Teams meeting & productivity assistant bot.
 Your ONLY job: pick the right action and enrich the query. ALWAYS BIAS TOWARD ACTION.
+Use semantic understanding of user intent and conversation context, not rigid keyword matching.
 
 USER: "${message}"
 CONTEXT:
@@ -477,15 +587,18 @@ join_meeting   → User wants bot to join/enter an active Teams call
 summarize      → Generate a summary/recap of a meeting (current, past, or last)
 minutes        → Generate formal meeting minutes, notes, action items, decisions
 transcribe     → Fetch/show the raw meeting transcript text
-meeting_overview → Show meeting details, info about a meeting
+meeting_overview → Show meeting details, info about a PAST meeting already attended
+list_meeting_groups → List group and meeting chats the user is part of
 insights       → Extract key takeaways, highlights, important points from a meeting
 meeting_question → Answer a SPECIFIC question about meeting content ("what did X say about Y?")
 read_chats     → Read/show recent chat messages in the current conversation
 check_inbox    → View/check/read emails, show inbox, filter by sender or date
+check_planner_tasks → Show Planner tasks, due dates, and priority recommendations
 reply_email    → Read an email and auto-draft a reply (bot reads + drafts, user does NOT need to specify content)
 send_email     → Send content to someone: send last bot output, send a reply draft, compose new email
 profile_details → Show user's own email address/profile
-check_calendar → Show upcoming meetings, schedule, availability, today/tomorrow meetings
+prepare_meeting → Help user PREPARE for an UPCOMING meeting: fetch today's meetings, attendees, give prep advice
+check_calendar → Show upcoming meetings, schedule, availability, today/tomorrow meetings (viewing only, no prep)
 list_attendees → List meeting attendees and their email addresses
 general_chat   → Greetings, thanks, casual conversation, general questions, anything not above
 clarification_needed → ONLY when request is absolute gibberish or self-contradictory
@@ -521,14 +634,24 @@ MEETING CONTENT SCENARIOS:
 • "what did [person] say about [topic]?" / "did anyone mention [topic]?" → meeting_question
 • "what was discussed about budget?" / "who talked about the deadline?" → meeting_question
 
-CALENDAR & PROFILE:
+CALENDAR & PREPARATION:
 • "my schedule" / "what meetings do I have today" / "calendar" / "am I free at 3pm?" → check_calendar
 • "meetings tomorrow" / "what's on my agenda this week" → check_calendar
+• "help me prepare for my meeting" / "prepare for the meeting I have today" / "get ready for my meeting" / "help me prepare for meetings I have today" → prepare_meeting  ← ALWAYS this, never check_calendar or meeting_overview
+• "I have a meeting today, help me prepare" / "preparing for the call" / "how do I prepare for the standup" → prepare_meeting
 • "my email" / "my profile" / "what's my email address" → profile_details
+
+⚠️ KEY DISAMBIGUATION: "prepare" + meeting context = prepare_meeting. "show/check/view" + calendar context = check_calendar. Never confuse them.
+
+PLANNER TASK SCENARIOS:
+• "check my planner tasks" / "show my planner tasks" / "planner tasks" / "my tasks in planner" → check_planner_tasks
+• "what tasks are due today" / "which planner task is highest priority" / "prioritize my planner tasks" → check_planner_tasks
+• If user explicitly says "planner" + "tasks", NEVER route to check_calendar
 
 MEETING ACTIONS:
 • "join the call" / "join the meeting" / "come join us" → join_meeting
 • "who's in the meeting" / "list attendees" / "attendee emails" → list_attendees
+• "list my meeting groups" / "which meeting groups am I in" / "show my group chats" → list_meeting_groups
 
 CHAT:
 • "read all chats" / "show chat messages" / "what's been said in chat" → read_chats
@@ -548,7 +671,7 @@ FOLLOW-UP & CONFIRMATION SCENARIOS:
   - Include format in refined_query: "Reformat the previous [contentType]: make it shorter/longer/bullets"
 • "what did X say" / "tell me more about Y" / "focus on Z" → FOLLOW-UP QUESTION (not reformat):
   - If lastBotResponse.contentType = 'inbox_email' → check_inbox (keep same context)
-  - If lastBotResponse.contentType = 'summary'/'minutes'/'transcript' → summarize (set is_reformat_request=true, refined_query includes the question)
+  - If lastBotResponse.contentType = 'summary'/'minutes'/'transcript'/'insights'/'meeting_overview' → meeting_question (set is_reformat_request=true, refined_query includes the question)
 • Pronouns "it" / "that" / "this" / "them" → resolve from last bot output or conversation context
 
 ⚠️ CRITICAL FOLLOW-UP RULE (AVOID GRAPH CALLS):
@@ -556,7 +679,8 @@ When user asks about, reformats, or follows up on previously shown content:
 - ALWAYS set is_reformat_request=true — this tells handlers to use CACHED content, not re-fetch from Graph API
 - Look at lastBotResponse.contentType to determine routing:
   - 'inbox_email' → check_inbox
-  - 'summary'/'minutes'/'transcript'/'insights'/'meeting_overview' → summarize
+  - 'summary'/'minutes'/'transcript'/'insights'/'meeting_overview' → meeting_question (or summarize only for explicit reformat wording)
+  - 'meeting_groups' → list_meeting_groups
 - NEVER route to a different content type than what was just shown
 - refined_query should describe what to do with the EXISTING content
 
@@ -583,7 +707,8 @@ When user asks about, reformats, or follows up on previously shown content:
 13. refined_query MUST be a clear, complete, context-enriched version of what the user asked — this is the ONLY thing handlers read.
 14. ⚠️ FOLLOW-UP QUESTIONS after showing ANY content → route to SAME handler with is_reformat_request=true:
     - After inbox_email → check_inbox
-    - After summary/minutes/transcript/insights → summarize  
+  - After summary/minutes/transcript/insights/meeting_overview → meeting_question (summarize only for pure reformat asks)
+  - After meeting_groups → list_meeting_groups
     - This tells handlers to use CACHED content, avoiding expensive Graph API re-fetches
 15. ⚠️ GRAPH CALL AVOIDANCE: When is_reformat_request=true, handlers will use cached content. Set this flag for:
     - "make it shorter/longer/bullets" (reformat requests)
@@ -631,10 +756,23 @@ Think step-by-step, then output ONLY valid JSON:
       const jsonStr = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       const parsed = JSON.parse(jsonStr);
 
-      console.log(`[INTENT_AGENT] Thinking: ${(parsed.thinking || '').slice(0, 200)}...`);
-      console.log(`[INTENT_AGENT] Decision: ${parsed.intent} (${parsed.confidence})`);
-
       const intent = this.validateIntent(parsed.intent);
+
+      // ── Structured decision log — visible in Azure App Service log stream ──
+      const prevIntent  = context.lastBotResponse?.contentType ?? 'none';
+      const prevMessage = getConversationState(context.conversationId)
+        .recentUserMessages.slice(-2, -1)[0]?.text ?? '(none)';
+      console.log(
+        `\n[DECISION_LOG] ══════════════════════════════════════════\n` +
+        `[DECISION_LOG] User         : ${context.userName}\n` +
+        `[DECISION_LOG] Prev message : ${prevMessage.slice(0, 120)}\n` +
+        `[DECISION_LOG] Prev response: ${prevIntent}\n` +
+        `[DECISION_LOG] Current msg  : ${message.slice(0, 120)}\n` +
+        `[DECISION_LOG] Thinking     : ${(parsed.thinking || '').slice(0, 300)}\n` +
+        `[DECISION_LOG] → Intent     : ${intent} (${parsed.confidence ?? 'unknown'})\n` +
+        `[DECISION_LOG] Refined query: ${(parsed.refined_query || message).slice(0, 120)}\n` +
+        `[DECISION_LOG] ══════════════════════════════════════════`
+      );
       
       return {
         intent,
@@ -655,11 +793,11 @@ Think step-by-step, then output ONLY valid JSON:
 
   private validateIntent(intent: string): IntentLabel {
     const validIntents: IntentLabel[] = [
-      'join_meeting', 'summarize', 'minutes', 'transcribe', 'meeting_overview',
+      'join_meeting', 'summarize', 'minutes', 'transcribe', 'meeting_overview', 'list_meeting_groups',
       'read_chats',
       'insights', 'meeting_question', 'check_inbox', 'reply_email', 'send_email',
-      'profile_details', 'check_calendar', 'list_attendees', 'general_chat',
-      'clarification_needed'
+      'profile_details', 'check_planner_tasks', 'prepare_meeting', 'check_calendar', 'list_attendees',
+      'general_chat', 'clarification_needed',
     ];
     
     if (validIntents.includes(intent as IntentLabel)) {

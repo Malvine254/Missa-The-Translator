@@ -1,5 +1,14 @@
+import { operatorLog } from "../operatorConsole";
 import { App } from "@microsoft/teams.apps";
 import { ChatPrompt } from "@microsoft/teams.ai";
+import {
+  buildEnableRecordingPayload,
+  enableRecording as recorderEnableRecording,
+  isRecorderEnabled,
+  verifyInboundBearer as verifyRecorderBearer,
+  verifyInboundHmac as verifyRecorderHmac,
+  type RecordingCompletedNotification as RecorderCompletedPayload,
+} from '../recorderClient';
 import { LocalStorage } from "@microsoft/teams.common";
 import { OpenAIChatModel } from "@microsoft/teams.openai";
 import { MessageActivity, TokenCredentials, ClientCredentials } from '@microsoft/teams.api';
@@ -9,7 +18,7 @@ import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 const PDFDocument = require('pdfkit');
 import config from "../config";
-import graphApiHelper, { type MailMessageSummary } from "../graphApiHelper";
+import graphApiHelper, { type MailMessageSummary, type PlannerTaskSummary } from "../graphApiHelper";
 import summarizationHelper from "../summarizationHelper";
 import {
   analyzeEmailRequest,
@@ -31,52 +40,38 @@ import {
   type IntentLabel as AgentIntentLabel,
 } from "./intentAgent";
 
-const ENABLE_VERBOSE_CONSOLE = (process.env.ENABLE_VERBOSE_CONSOLE || 'false').toLowerCase() === 'true';
-const baseConsoleLog = console.log.bind(console);
-
-const ESSENTIAL_LOG_PREFIXES = [
-  '[MESSAGE]',
-  '[MODEL_RESPONSE]',
-  '[TRANSCRIPT]',
-  '[TEAMS_SEND_OK]',
-  '[TEAMS_SEND_FAIL]',
-  '[CALLS_WEBHOOK]',
-  '[CALLS_API]',
-  '[CALLS_AUTH]',
-  '[TRANSCRIPTION]',
-  '[LIVE_TRANSCRIPT', // matches [LIVE_TRANSCRIPT], [LIVE_TRANSCRIPT_POLL], etc.
-  '[LIVE_SESSION]',
-  '[GRAPH_API]',
-  '[GRAPH_AUTH]',
-  '[TRANSCRIPT_DIAG]',
-  '[TRANSCRIPT_SUB]',
-  '[VTT_PARSER]',
-  '[STREAM_PREVIEW]',
-  '[STREAM_STATS]',
-  '[PARTICIPANTS]',
-  '[AUTO_LEAVE]',
-  '[JOIN_FLOW]',
-  '[JOIN_RETRY]',
-  '[STATUS_NOTICE]',
-  '[CACHE_UPDATE]',
-];
-
-function shouldKeepConsoleLog(args: any[]): boolean {
-  const first = args?.[0];
-  if (typeof first !== 'string') {
-    return true;
-  }
-  if (!first.startsWith('[')) {
-    return true;
-  }
-  return ESSENTIAL_LOG_PREFIXES.some((prefix) => first.startsWith(prefix));
-}
-
 function getTruncatedLogPreview(text: string, maxChars = 260): string {
   const normalized = (text || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return '(empty)';
   if (normalized.length <= maxChars) return normalized;
   return `${normalized.slice(0, maxChars)}... [truncated]`;
+}
+
+function summarizeConversationType(activity: any, isMeetingConversation?: boolean): string {
+  if (isMeetingConversation) return 'meeting chat';
+  if (activity?.conversation?.isGroup) return 'group chat';
+  return 'personal chat';
+}
+
+function shortConversationId(id?: string): string {
+  if (!id) return 'unknown';
+  return id.length > 18 ? `${id.slice(0, 8)}...${id.slice(-6)}` : id;
+}
+
+function logProcessedTranscript(fields: {
+  source: string;
+  entryCount: number;
+  meetingSubject?: string;
+  isLive?: boolean;
+  conversationId?: string;
+}): void {
+  operatorLog('Processed transcript', {
+    source: fields.source,
+    entries: fields.entryCount,
+    live: fields.isLive ? 'yes' : 'no',
+    meeting: fields.meetingSubject,
+    conversation: shortConversationId(fields.conversationId),
+  });
 }
 
 function toInlineScriptJson(value: unknown): string {
@@ -101,16 +96,6 @@ function extractModelResponseText(response: any): string {
   return '';
 }
 
-// Keep runtime logs concise by default; set ENABLE_VERBOSE_CONSOLE=true for deep debugging.
-if (!ENABLE_VERBOSE_CONSOLE) {
-  console.log = (...args: any[]) => {
-    if (!shouldKeepConsoleLog(args)) {
-      return;
-    }
-    baseConsoleLog(...args);
-  };
-}
-
 // Create storage for conversation history
 const storage = new LocalStorage();
 
@@ -118,7 +103,7 @@ const storage = new LocalStorage();
 // Keep up to 5 recent responses for better context resolution
 interface LastBotResponse {
   content: string;
-  contentType: 'calendar' | 'summary' | 'minutes' | 'transcript' | 'meeting_overview' | 'insights' | 'general' | 'inbox_email';
+  contentType: 'calendar' | 'prepare_meeting' | 'planner_tasks' | 'summary' | 'minutes' | 'transcript' | 'meeting_overview' | 'insights' | 'meeting_groups' | 'general' | 'inbox_email';
   subject?: string;
   timestamp: number;
   recipientType?: 'self' | 'other' | 'multiple' | 'all_participants' | null;
@@ -146,6 +131,334 @@ interface InboxContext {
 }
 
 const inboxContextMap = new Map<string, InboxContext>();
+
+interface PersonalConversationRef {
+  userId: string;
+  conversationId: string;
+  serviceUrl: string;
+  displayName?: string;
+  updatedAt: number;
+}
+
+const personalConversationMap = new Map<string, PersonalConversationRef>();
+// Resolved after ADMIN_DATA_DIR is declared (called lazily at startup)
+let PERSONAL_CONV_REFS_FILE = '';
+
+function getPersonalConvRefsFile(): string {
+  if (!PERSONAL_CONV_REFS_FILE) PERSONAL_CONV_REFS_FILE = path.join(ADMIN_DATA_DIR, 'personal_conv_refs.json');
+  return PERSONAL_CONV_REFS_FILE;
+}
+
+function loadPersonalConvRefs(): void {
+  try {
+    const file = getPersonalConvRefsFile();
+    if (!fs.existsSync(file)) return;
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    for (const [userId, ref] of Object.entries(data)) {
+      personalConversationMap.set(userId, ref as PersonalConversationRef);
+    }
+    console.log(`[PERSONAL_CONV] Loaded ${personalConversationMap.size} personal conversation ref(s) from disk`);
+  } catch { /* non-fatal */ }
+}
+
+function savePersonalConvRefs(): void {
+  try {
+    const data: Record<string, PersonalConversationRef> = {};
+    for (const [userId, ref] of personalConversationMap) data[userId] = ref;
+    fs.writeFileSync(getPersonalConvRefsFile(), JSON.stringify(data, null, 2), 'utf-8');
+  } catch { /* non-fatal */ }
+}
+
+function cachePersonalConversationReference(
+  userId: string,
+  conversationId: string,
+  serviceUrl: string,
+  displayName?: string
+) {
+  if (!userId || !conversationId || !serviceUrl) return;
+  personalConversationMap.set(userId, {
+    userId,
+    conversationId,
+    serviceUrl,
+    displayName,
+    updatedAt: Date.now(),
+  });
+  savePersonalConvRefs();
+}
+
+function buildPlannerTaskDigestMessage(displayName: string, tasks: PlannerTaskSummary[]): string {
+  const firstName = extractFirstName(normalizeDisplayName(displayName));
+  const openTasks = (tasks || [])
+    .filter((task) => !task.completedDateTime && (task.percentComplete ?? 0) < 100)
+    .slice();
+
+  const dueAt = (task: PlannerTaskSummary): number => {
+    const parsed = task.dueDateTime ? new Date(task.dueDateTime).getTime() : Number.POSITIVE_INFINITY;
+    return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+  };
+
+  openTasks.sort((a, b) => dueAt(a) - dueAt(b));
+
+  if (openTasks.length === 0) {
+    return `Hi ${firstName}, your meeting just ended. You currently have no open Planner tasks.`;
+  }
+
+  const lines = openTasks.slice(0, 6).map((task, index) => {
+    const due = task.dueDateTime
+      ? new Date(task.dueDateTime).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      : 'No due date';
+    const plan = task.planTitle ? ` (${task.planTitle})` : '';
+    return `${index + 1}. ${task.title}${plan} - ${due}`;
+  });
+
+  return (
+    `Hi ${firstName}, your meeting just ended. Here are your top open Planner tasks:\n\n` +
+    `${lines.join('\n')}\n\n` +
+    `If you want, I can help prioritize which one to do first.`
+  );
+}
+
+async function sendPostMeetingTasksToPersonalChats(meetingConversationId: string): Promise<void> {
+  try {
+    const members = await graphApiHelper.getChatMembersDetailed(meetingConversationId);
+    if (!members.length) {
+      console.log(`[POST_MEETING_TASKS] No meeting members found for conversation ${meetingConversationId}`);
+      return;
+    }
+
+    let sentCount = 0;
+    let skippedNoPersonalChat = 0;
+    let failedCount = 0;
+
+    for (const member of members) {
+      const userId = member.userId || '';
+      if (!userId) continue;
+
+      const personalRef = personalConversationMap.get(userId);
+      if (!personalRef) {
+        skippedNoPersonalChat += 1;
+        continue;
+      }
+
+      const plannerResult = await graphApiHelper.getPlannerTasksForUser(userId, 50);
+      if (!plannerResult.success) {
+        failedCount += 1;
+        continue;
+      }
+
+      const taskDigest = buildPlannerTaskDigestMessage(member.displayName || personalRef.displayName || 'there', plannerResult.tasks || []);
+      const sent = await graphApiHelper.sendProactiveMessage(
+        personalRef.serviceUrl,
+        personalRef.conversationId,
+        taskDigest
+      );
+
+      if (sent) {
+        sentCount += 1;
+      } else {
+        failedCount += 1;
+      }
+    }
+
+    console.log(
+      `[POST_MEETING_TASKS] Completed for ${meetingConversationId}: sent=${sentCount}, skipped_no_personal=${skippedNoPersonalChat}, failed=${failedCount}`
+    );
+  } catch (error) {
+    console.error(`[POST_MEETING_TASKS] Failed to send post-meeting tasks:`, error);
+  }
+}
+
+function buildMeetingTasksAdaptiveCard(meetingTitle: string, firstName: string, tasks: PendingTaskItem[]): object {
+  const taskContainers: object[] = tasks.map(task => ({
+    type: 'Container',
+    style: 'emphasis',
+    spacing: 'Medium',
+    items: [
+      {
+        type: 'ColumnSet',
+        columns: [
+          {
+            type: 'Column',
+            width: 'stretch',
+            items: [{
+              type: 'TextBlock',
+              text: `Task ${task.id}`,
+              weight: 'Bolder',
+              size: 'Small',
+              color: 'Accent',
+              spacing: 'None',
+            }],
+          },
+          {
+            type: 'Column',
+            width: 'auto',
+            items: [{
+              type: 'Input.Toggle',
+              id: `task_skip_${task.id}`,
+              title: 'Skip',
+              value: 'false',
+              spacing: 'None',
+            }],
+          },
+        ],
+      },
+      {
+        type: 'Input.Text',
+        id: `task_title_${task.id}`,
+        value: task.title,
+        placeholder: 'Edit task title...',
+        label: 'Title',
+        spacing: 'Small',
+      },
+      {
+        type: 'Input.Date',
+        id: `task_due_${task.id}`,
+        label: 'Due Date (optional)',
+        spacing: 'Small',
+        ...(task.dueDate ? { value: task.dueDate } : {}),
+      },
+    ],
+  }));
+
+  return {
+    type: 'AdaptiveCard',
+    version: '1.4',
+    body: [
+      {
+        type: 'TextBlock',
+        text: 'Meeting Action Items',
+        weight: 'Bolder',
+        size: 'Large',
+        spacing: 'None',
+      },
+      {
+        type: 'TextBlock',
+        text: `Hi ${firstName}! Your meeting **"${meetingTitle}"** just ended. Review and edit your action items below, then post them to Planner.`,
+        wrap: true,
+        spacing: 'Small',
+        color: 'Default',
+      },
+      ...taskContainers,
+    ],
+    actions: [
+      {
+        type: 'Action.Submit',
+        title: 'Post to Planner',
+        style: 'positive',
+        data: { action: 'meeting_tasks_post', taskCount: tasks.length },
+      },
+      {
+        type: 'Action.Submit',
+        title: 'Skip All',
+        style: 'destructive',
+        data: { action: 'meeting_tasks_skip_all' },
+      },
+    ],
+  };
+}
+
+async function sendMeetingTasksToParticipants(
+  meetingConversationId: string,
+  transcriptEntries: TranscriptEntry[],
+  meetingTitle: string,
+  tenantId?: string,
+  serviceUrl?: string
+): Promise<void> {
+  try {
+    const finalEntries = transcriptEntries.filter(e => e.isFinal);
+    if (!finalEntries.length) return;
+
+    const members = await graphApiHelper.getChatMembersDetailed(meetingConversationId);
+    if (!members.length) return;
+
+    const participantNames = members.map(m => m.displayName || '').filter(Boolean);
+    const transcriptText = transcriptEntriesToPlainText(finalEntries);
+    const actionItems = await extractActionItemsFromTranscript(transcriptText, participantNames);
+    if (!actionItems.length) {
+      console.log(`[MEETING_TASKS] No action items found for ${meetingConversationId}`);
+      return;
+    }
+
+    console.log(`[MEETING_TASKS] Extracted ${actionItems.length} action item(s) for ${meetingConversationId}`);
+
+    // Determine service URL and tenant ID for fallback conversation creation
+    const defaultTenantId = tenantId || process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID || '';
+    const defaultServiceUrl = serviceUrl || 'https://smba.trafficmanager.net/teams/';
+
+    // Group by matched participant
+    const tasksByUser = new Map<string, { member: { displayName: string; userId?: string }; items: typeof actionItems }>();
+    for (const item of actionItems) {
+      const assigneeLower = (item.assignee || '').toLowerCase().trim();
+      const matched = members.find(m => {
+        const name = (m.displayName || '').toLowerCase();
+        const first = name.split(' ')[0];
+        return name === assigneeLower || first === assigneeLower || name.startsWith(assigneeLower) || assigneeLower.startsWith(first);
+      });
+      if (!matched?.userId) continue;
+      if (!tasksByUser.has(matched.userId)) tasksByUser.set(matched.userId, { member: matched, items: [] });
+      tasksByUser.get(matched.userId)!.items.push(item);
+    }
+
+    let sentCount = 0;
+    for (const [userId, { member, items }] of tasksByUser) {
+      let personalRef = personalConversationMap.get(userId);
+      if (!personalRef) {
+        // Try the Teams App Installation API first — returns the actual 1:1 chat ID
+        let convId = await graphApiHelper.getPersonalBotChatId(userId);
+        // Fallback: Bot Connector conversation create
+        if (!convId) convId = await graphApiHelper.getOrCreatePersonalConversation(userId, defaultTenantId, defaultServiceUrl);
+        if (!convId) { console.log(`[MEETING_TASKS] Could not resolve personal chat for ${userId} (${member.displayName})`); continue; }
+        personalRef = { userId, conversationId: convId, serviceUrl: defaultServiceUrl, updatedAt: Date.now() };
+        cachePersonalConversationReference(userId, convId, defaultServiceUrl);
+      }
+
+      const pendingTasks: PendingTaskItem[] = items.map((t, idx) => ({
+        id: idx + 1, title: t.task, dueDate: t.dueDate || undefined, skipped: false,
+      }));
+
+      const firstName = extractFirstName(normalizeDisplayName(member.displayName || 'there'));
+      const card = buildMeetingTasksAdaptiveCard(meetingTitle, firstName, pendingTasks);
+
+      const sent = await graphApiHelper.sendProactiveCard(personalRef.serviceUrl, personalRef.conversationId, card);
+      if (sent) sentCount++;
+    }
+
+    console.log(`[MEETING_TASKS] Sent action items to ${sentCount}/${tasksByUser.size} participant(s)`);
+  } catch (error) {
+    console.error(`[MEETING_TASKS] Failed:`, error);
+  }
+}
+
+// ── Meeting action-item confirmation state ────────────────────────────────
+interface PendingTaskItem {
+  id: number;
+  title: string;
+  dueDate?: string;
+  skipped: boolean;
+}
+
+interface PendingMeetingTasksState {
+  userId: string;
+  meetingTitle: string;
+  tasks: PendingTaskItem[];
+  serviceUrl: string;
+  expiresAt: number;
+}
+
+// Keyed by the participant's personal conversationId
+const pendingMeetingTasksMap = new Map<string, PendingMeetingTasksState>();
+
+function buildPendingTasksMessage(state: PendingMeetingTasksState): string {
+  const active = state.tasks.filter(t => !t.skipped);
+  if (!active.length) return 'All tasks have been skipped — nothing will be posted to Planner.';
+  const lines = active.map(t => `**${t.id}.** ${t.title}${t.dueDate ? ` _(due ${t.dueDate})_` : ''}`).join('\n');
+  return (
+    `Tasks from **"${state.meetingTitle}"**:\n\n${lines}\n\n` +
+    `Reply **\`confirm\`** to post all to Planner, ` +
+    `**\`N: new title\`** to edit (e.g. \`1: Review budget doc\`), ` +
+    `or **\`skip N\`** to remove a task.`
+  );
+}
 
 /** Track the last clarification question the bot asked in each conversation */
 interface PendingClarification {
@@ -295,8 +608,13 @@ interface ActiveCall {
   establishedAt?: number;   // timestamp when call was established
   terminatedAt?: number;    // timestamp when call was terminated
   leavingInProgress?: boolean; // prevent duplicate hang-up
+  recorderEnableSentAt?: number;
 }
 const activeCallMap = new Map<string, ActiveCall>();
+const recorderEnableInFlightCalls = new Set<string>();
+const recorderEnableCompletedCalls = new Set<string>();
+const RECORDER_ENABLE_MAX_ATTEMPTS = 8;
+const RECORDER_ENABLE_RETRY_MS = 15_000; // base — doubles each attempt, capped at 60 s
 
 // Live transcript storage: conversationId -> array of transcript entries
 interface TranscriptEntry {
@@ -322,14 +640,21 @@ const PERSISTENCE_ROOT = (IS_RUNNING_ON_AZURE && AZURE_HOME_DIR)
   ? path.join(AZURE_HOME_DIR, 'data', 'missa-translator')
   : process.cwd();
 
-const TRANSCRIPTS_DIR = path.resolve(PERSISTENCE_ROOT, 'transcripts');
+const TRANSCRIPTS_DIR      = path.resolve(PERSISTENCE_ROOT, 'transcripts');
+// Bot-captured live session transcripts (saved during/after a call)
+const LIVE_TRANSCRIPTS_DIR  = path.join(TRANSCRIPTS_DIR, 'live');
+// On-demand Graph API fetches (stored separately so cached live data is always preferred)
+const GRAPH_TRANSCRIPTS_DIR = path.join(TRANSCRIPTS_DIR, 'graph');
 const ADMIN_DATA_DIR = path.resolve(PERSISTENCE_ROOT, 'admin_data');
 const MEETING_CONTEXT_FILE = path.join(ADMIN_DATA_DIR, 'meeting_context.json');
 
 console.log(`[STARTUP] Running on Azure: ${IS_RUNNING_ON_AZURE ? 'yes' : 'no'}`);
 console.log(`[STARTUP] Persistence root set to: ${PERSISTENCE_ROOT}`);
-console.log(`[STARTUP] Transcripts directory set to: ${TRANSCRIPTS_DIR}`);
+console.log(`[STARTUP] Transcripts directory set to: ${TRANSCRIPTS_DIR} (live=${LIVE_TRANSCRIPTS_DIR})`);
 console.log(`[STARTUP] Admin data directory set to: ${ADMIN_DATA_DIR}`);
+
+// Restore pinned transcript paths from disk so restarts don't create duplicate files
+void restorePinnedTranscriptPaths();
 
 interface MeetingContextEntry {
   organizerId: string;
@@ -916,6 +1241,50 @@ async function sendPromptWithTracking(
   return response;
 }
 
+async function extractActionItemsFromTranscript(
+  transcriptText: string,
+  participantNames: string[]
+): Promise<Array<{ assignee: string; task: string; dueDate?: string }>> {
+  if (!transcriptText.trim()) return [];
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const prompt = new ChatPrompt({
+      messages: [{
+        role: 'user',
+        content:
+          `Extract action items with clear owners from this meeting transcript.\n\n` +
+          `Known participants: ${participantNames.join(', ') || 'unknown'}\n` +
+          `Today: ${today}\n\n` +
+          `Transcript:\n${transcriptText.slice(0, 6000)}\n\n` +
+          `Return a JSON array:\n` +
+          `[{ "assignee": "Name as spoken", "task": "concise action", "dueDate": "YYYY-MM-DD or null" }]\n\n` +
+          `Rules:\n` +
+          `- Only explicit commitments with a named owner\n` +
+          `- Use the participant's name exactly as it appears in the transcript\n` +
+          `- Convert relative dates (EOD/tomorrow/Friday) to ISO dates from today\n` +
+          `- Skip vague statements without a clear owner or action\n` +
+          `- Max 10 items total\n\n` +
+          `Reply ONLY with the JSON array, no other text.`,
+      }],
+      instructions: 'Extract concrete action items only. Output valid JSON array. No prose or markdown fences.',
+      model: new OpenAIChatModel({
+        model: config.azureOpenAIDeploymentName,
+        apiKey: config.azureOpenAIKey,
+        endpoint: config.azureOpenAIEndpoint,
+        apiVersion: '2024-10-21',
+      }),
+    });
+    const result = await sendPromptWithTracking(prompt, '');
+    const raw = extractModelResponseText(result) || '[]';
+    const clean = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const items = JSON.parse(clean);
+    return Array.isArray(items) ? items.filter((i: any) => i?.assignee && i?.task) : [];
+  } catch (err) {
+    console.error('[ACTION_ITEMS] Extraction failed:', err);
+    return [];
+  }
+}
+
 function recordMeetingEstablished(conversationId: string, meetingName?: string) {
   const stats = loadBotAdminStats();
   if (!stats.meetingConversationHistory.includes(conversationId)) {
@@ -1469,6 +1838,52 @@ function saveTranscriptToFile(conversationId: string) {
 // Key: meetingKey (callId or onlineMeetingId or conversationId), Value: file path
 const pinnedTranscriptPaths = new Map<string, string>();
 
+// Track content hashes to skip re-writing identical transcript files
+const transcriptContentHashes = new Map<string, string>();
+
+/**
+ * On startup: scan existing transcript files and repopulate pinnedTranscriptPaths
+ * so bot restarts reuse existing files instead of creating duplicates.
+ */
+async function restorePinnedTranscriptPaths(): Promise<void> {
+  try {
+    await fsPromises.mkdir(LIVE_TRANSCRIPTS_DIR, { recursive: true });
+    const files = await fsPromises.readdir(LIVE_TRANSCRIPTS_DIR);
+    const txtFiles = files.filter(f => f.endsWith('.txt'));
+    let restored = 0;
+    for (const file of txtFiles) {
+      try {
+        const filePath = path.join(LIVE_TRANSCRIPTS_DIR, file);
+        const content  = await fsPromises.readFile(filePath, 'utf-8');
+        // Extract meetingKey from filename — it's the last underscore-separated segment before .txt
+        const nameWithout = file.replace(/\.txt$/, '');
+        const parts = nameWithout.split('_');
+        // meetingKey is the last part(s) that look like a call ID (UUID-like segments)
+        // Filename format: {prefix}_{date}_{HH}_{MM}_{subject...}_{meetingKey}.txt
+        // meetingKey was sanitised: alphanumeric/underscore/dash, up to 50 chars
+        const meetingKey = parts[parts.length - 1];
+        if (meetingKey && !pinnedTranscriptPaths.has(meetingKey)) {
+          pinnedTranscriptPaths.set(meetingKey, filePath);
+          // Store content hash so we don't rewrite unchanged files
+          transcriptContentHashes.set(filePath, simpleHash(content));
+          restored++;
+        }
+      } catch { /* skip unreadable files */ }
+    }
+    if (restored > 0) {
+      console.log(`[TRANSCRIPT_FILE] Restored ${restored} pinned transcript path(s) from disk`);
+    }
+  } catch (err) {
+    console.warn('[TRANSCRIPT_FILE] Could not restore pinned paths:', err);
+  }
+}
+
+function simpleHash(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = (Math.imul(31, h) + s.charCodeAt(i)) | 0; }
+  return h.toString(16);
+}
+
 /** Async implementation of transcript saving - non-blocking I/O */
 async function saveTranscriptToFileAsync(conversationId: string): Promise<void> {
   try {
@@ -1476,22 +1891,24 @@ async function saveTranscriptToFileAsync(conversationId: string): Promise<void> 
     const finalEntries = entries?.filter(e => e.isFinal) || [];
     if (finalEntries.length === 0) return;
 
-    // Ensure transcripts directory exists
-    await fsPromises.mkdir(TRANSCRIPTS_DIR, { recursive: true });
+    // Ensure live transcripts directory exists
+    await fsPromises.mkdir(LIVE_TRANSCRIPTS_DIR, { recursive: true });
 
     // Get meeting context for metadata
     const meetingContext = getCachedMeetingContext(conversationId);
-    const liveSession = getLiveTranscriptSession(conversationId);
-    const isLive = liveSession !== null;
-    const meetingSubject = liveSession?.meetingSubject || meetingContext?.subject || 'Meeting';
+    // Use activeCallMap (authoritative) to determine if this is a live session
+    const activeEntry = Array.from(activeCallMap.entries()).find(([, c]) => c.conversationId === conversationId && c.establishedAt);
+    const activeCallIdNow = activeEntry?.[0];
+    const isLive = !!activeEntry;
+    const meetingSubject = meetingContext?.subject || 'Meeting';
 
     // Generate unique meeting ID based on call start time or current time
-    const meetingStartTime = meetingContext?.callStartedAt || (liveSession ? Date.now() : Date.now());
+    const meetingStartTime = meetingContext?.callStartedAt || Date.now();
     const meetingId = generateMeetingId(conversationId, meetingStartTime);
 
     // Build a unique filename tied to this specific meeting instance
     // Use callId (unique per call) or onlineMeetingId as the primary identifier
-    const callId = liveSession?.callId || meetingContext?.callId || '';
+    const callId = activeCallIdNow || meetingContext?.callId || '';
     const onlineMeetingId = meetingContext?.onlineMeetingId || '';
     // Primary key: callId if available, else onlineMeetingId, else conversation-based fallback
     const meetingKey = callId
@@ -1509,8 +1926,8 @@ async function saveTranscriptToFileAsync(conversationId: string): Promise<void> 
       const dateStr = startDate.toISOString().slice(0, 10);
       const hourMin = `${String(startDate.getHours()).padStart(2, '0')}_${String(startDate.getMinutes()).padStart(2, '0')}`;
       const prefix = isLive ? 'live' : 'transcript';
-      // Format: {prefix}_{date}_{startTime}_{subject}_{meetingKey}.txt
-      filePath = path.join(TRANSCRIPTS_DIR, `${prefix}_${dateStr}_${hourMin}_${safeSubject}_${meetingKey}.txt`);
+      // Format: {prefix}_{date}_{startTime}_{subject}_{meetingKey}.txt — stored under live/
+      filePath = path.join(LIVE_TRANSCRIPTS_DIR, `${prefix}_${dateStr}_${hourMin}_${safeSubject}_${meetingKey}.txt`);
       pinnedTranscriptPaths.set(meetingKey, filePath);
       console.log(`[TRANSCRIPT_FILE] Pinned file path for meeting ${meetingKey}: ${filePath}`);
     }
@@ -1535,7 +1952,7 @@ async function saveTranscriptToFileAsync(conversationId: string): Promise<void> 
     if (lastTimestamp) content += `Duration: ~${formatVttTimestamp(lastTimestamp)}\n`;
     content += `Entries: ${finalEntries.length}\n`;
     content += `Status: ${isLive ? 'LIVE (in progress)' : 'Historical'}\n`;
-    if (liveSession?.callId) content += `Call ID: ${liveSession.callId}\n`;
+    if (callId) content += `Call ID: ${callId}\n`;
     if (meetingContext?.onlineMeetingId) content += `Meeting ID: ${meetingContext.onlineMeetingId}\n`;
     content += `Conversation: ${conversationId}\n`;
     content += `\n`;
@@ -1565,12 +1982,19 @@ async function saveTranscriptToFileAsync(conversationId: string): Promise<void> 
       content += `${entry.text}\n`;
     }
 
+    // Skip write if content is identical to what's already on disk
+    const newHash = simpleHash(content);
+    if (transcriptContentHashes.get(filePath) === newHash) {
+      console.log(`[TRANSCRIPT_FILE] Skipped write — content unchanged (${finalEntries.length} entries): ${path.basename(filePath)}`);
+      return;
+    }
     await fsPromises.writeFile(filePath, content, 'utf-8');
+    transcriptContentHashes.set(filePath, newHash);
     console.log(`[TRANSCRIPT_FILE] Saved ${finalEntries.length} entries to ${filePath}`);
     
     // Update cache with the file path
-    if (liveSession?.callId) {
-      const liveCacheKey = `live:${conversationId}:${liveSession.callId}`;
+    if (callId) {
+      const liveCacheKey = `live:${conversationId}:${callId}`;
       const cached = transcriptMetaCache.get(liveCacheKey);
       if (cached) {
         cached.filePath = filePath;
@@ -1592,7 +2016,7 @@ async function saveTranscriptToFileAsync(conversationId: string): Promise<void> 
       entryCount: finalEntries.length,
       organizerId: meetingContext?.organizerId,
       joinWebUrl: meetingContext?.joinWebUrl,
-      callId: liveSession?.callId || meetingContext?.callId,
+      callId: callId || meetingContext?.callId,
     });
   } catch (err) {
     console.error(`[TRANSCRIPT_FILE_ERROR] Failed to save transcript:`, err);
@@ -1608,51 +2032,46 @@ function findLatestTranscriptFilePath(
   meetingIdentifiers?: { callId?: string; onlineMeetingId?: string }
 ): string | null {
   try {
-    if (!fs.existsSync(TRANSCRIPTS_DIR)) {
-      return null;
-    }
+    // Search live/ first (bot-captured), then graph/ (on-demand API fetches).
+    // This ensures bot-captured transcripts are always preferred.
+    const searchDirs: string[] = [];
+    if (fs.existsSync(LIVE_TRANSCRIPTS_DIR))  searchDirs.push(LIVE_TRANSCRIPTS_DIR);
+    if (fs.existsSync(GRAPH_TRANSCRIPTS_DIR)) searchDirs.push(GRAPH_TRANSCRIPTS_DIR);
+    // Legacy: also check root transcripts/ for files saved before directory split
+    if (fs.existsSync(TRANSCRIPTS_DIR)) searchDirs.push(TRANSCRIPTS_DIR);
 
-    const allFiles = fs.readdirSync(TRANSCRIPTS_DIR);
-    let matches: string[] = [];
+    if (searchDirs.length === 0) return null;
 
-    // 1. BEST: Match by callId or onlineMeetingId (exact meeting)
-    if (meetingIdentifiers?.callId) {
-      const safeCallId = meetingIdentifiers.callId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
-      matches = allFiles
-        .filter((name) => name.includes(safeCallId) && name.endsWith('.txt'))
-        .map((name) => path.join(TRANSCRIPTS_DIR, name));
+    const safeCallId      = meetingIdentifiers?.callId?.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50) || '';
+    const safeMeetingId   = meetingIdentifiers?.onlineMeetingId?.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50) || '';
+    const safeConvId      = getSafeConversationId(conversationId);
+
+    for (const dir of searchDirs) {
+      let dirFiles: string[];
+      try { dirFiles = fs.readdirSync(dir); } catch { continue; }
+
+      let matches: string[] = [];
+
+      if (safeCallId) {
+        matches = dirFiles.filter((n) => n.includes(safeCallId) && n.endsWith('.txt')).map((n) => path.join(dir, n));
+      }
+      if (matches.length === 0 && safeMeetingId) {
+        matches = dirFiles.filter((n) => n.includes(safeMeetingId) && n.endsWith('.txt')).map((n) => path.join(dir, n));
+      }
+      if (matches.length === 0) {
+        matches = dirFiles
+          .filter((n) => (n.startsWith('transcript_') || n.startsWith('live_') || n.startsWith('graph_') || n.startsWith('cached_')) && n.includes(safeConvId) && n.endsWith('.txt'))
+          .map((n) => path.join(dir, n));
+      }
+
       if (matches.length > 0) {
-        console.log(`[TRANSCRIPT_CACHE] Found ${matches.length} file(s) by callId`);
+        matches.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+        console.log(`[TRANSCRIPT_CACHE] Found ${matches.length} file(s) in ${path.basename(dir)}/`);
+        return matches[0];
       }
     }
-    if (matches.length === 0 && meetingIdentifiers?.onlineMeetingId) {
-      const safeMeetingId = meetingIdentifiers.onlineMeetingId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
-      matches = allFiles
-        .filter((name) => name.includes(safeMeetingId) && name.endsWith('.txt'))
-        .map((name) => path.join(TRANSCRIPTS_DIR, name));
-      if (matches.length > 0) {
-        console.log(`[TRANSCRIPT_CACHE] Found ${matches.length} file(s) by onlineMeetingId`);
-      }
-    }
 
-    // 2. FALLBACK: Match by conversation ID (legacy files or no meeting ID available)
-    if (matches.length === 0) {
-      const safeId = getSafeConversationId(conversationId);
-      matches = allFiles
-        .filter((name) =>
-          (name.startsWith('transcript_') || name.startsWith('live_') || name.startsWith('cached_')) &&
-          name.includes(safeId) && name.endsWith('.txt')
-        )
-        .map((name) => path.join(TRANSCRIPTS_DIR, name));
-    }
-
-    if (matches.length === 0) {
-      return null;
-    }
-
-    // Return most recently modified
-    matches.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-    return matches[0];
+    return null;
   } catch (error) {
     console.warn(`[TRANSCRIPT_CACHE] Failed to find cached transcript file:`, error);
     return null;
@@ -1721,6 +2140,7 @@ function getAllTranscriptsForConversation(conversationId: string): Array<{
 // ============================================================================
 
 interface CachedTranscriptMeta {
+  userId: string;
   transcriptId: string;
   meetingId: string;
   organizerId: string;
@@ -1737,6 +2157,7 @@ interface CachedTranscriptMeta {
 
 // In-memory cache of fetched transcripts metadata
 const transcriptMetaCache = new Map<string, CachedTranscriptMeta>();
+const knownTranscriptUsers = new Set<string>();
 
 // Track known organizers for background fetching
 const knownOrganizers = new Set<string>();
@@ -1853,8 +2274,14 @@ let transcriptWorkerTimerId: ReturnType<typeof setTimeout> | undefined;
 let transcriptWorkerRunning = false;
 const TRANSCRIPT_WORKER_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const TRANSCRIPT_WORKER_INITIAL_DELAY_MS = 30_000; // 30 seconds after startup
-const MAX_TRANSCRIPTS_TO_CACHE = 5;
+const MAX_TRANSCRIPTS_TO_SYNC_PER_USER = 120;
 const TRANSCRIPT_CACHE_FRESHNESS_MS = 30 * 60 * 1000; // 30 minutes - skip re-fetch if recent
+const TRANSCRIPT_SYNC_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
+const USER_TRANSCRIPTS_DIR = path.join(TRANSCRIPTS_DIR, 'users');
+
+function getSafeUserFolderName(userId: string): string {
+  return (userId || 'unknown_user').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'unknown_user';
+}
 
 /**
  * Check if a conversation has an active live transcript session.
@@ -1894,6 +2321,13 @@ function registerLiveTranscriptSession(
     existing.lastUpdateTime = now;
     if (meetingSubject) existing.meetingSubject = meetingSubject;
   } else {
+    // A new meeting is starting on this conversation thread (different callId).
+    // Clear stale in-memory entries so the old meeting's transcript isn't served for this one.
+    if (liveTranscriptMap.has(conversationId)) {
+      const staleCount = liveTranscriptMap.get(conversationId)?.length ?? 0;
+      liveTranscriptMap.delete(conversationId);
+      console.log(`[LIVE_SESSION] Cleared ${staleCount} stale transcript entries from previous meeting on conversation=${conversationId}`);
+    }
     liveTranscriptSessions.set(conversationId, {
       callId,
       startTime: now,
@@ -1938,13 +2372,28 @@ function registerOrganizerForBackgroundFetch(organizerId: string) {
  * Returns the file path on success, null on failure.
  */
 async function saveTranscriptToFileFromVtt(
+  userId: string,
   vttContent: string,
   meetingId: string,
   transcriptId: string,
-  createdDateTime: string
+  createdDateTime: string,
+  metadata?: {
+    organizerId?: string;
+    meetingSubject?: string;
+    conversationId?: string;
+    callId?: string;
+    isLive?: boolean;
+  }
 ): Promise<string | null> {
   try {
-    await fsPromises.mkdir(TRANSCRIPTS_DIR, { recursive: true });
+    const parsedCreated = new Date(createdDateTime || '');
+    const normalizedCreatedDateTime = Number.isFinite(parsedCreated.getTime())
+      ? parsedCreated.toISOString()
+      : '';
+
+    const safeUser = getSafeUserFolderName(userId);
+    const userDir = path.join(USER_TRANSCRIPTS_DIR, safeUser);
+    await fsPromises.mkdir(userDir, { recursive: true });
 
     // Parse the VTT to get entries
     const entries = parseVttToEntries(vttContent);
@@ -1955,23 +2404,28 @@ async function saveTranscriptToFileFromVtt(
 
     // Build filename from meeting ID and date
     const safeMeetingId = meetingId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
-    const dateStr = createdDateTime ? createdDateTime.slice(0, 10) : new Date().toISOString().slice(0, 10);
-    const filePath = path.join(TRANSCRIPTS_DIR, `cached_${dateStr}_${safeMeetingId}.txt`);
+    const safeTranscriptId = transcriptId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'transcript';
+    const dateStr = normalizedCreatedDateTime ? normalizedCreatedDateTime.slice(0, 10) : 'unknown_date';
+    const filePath = path.join(userDir, `cached_${dateStr}_${safeMeetingId}_${safeTranscriptId}.txt`);
 
     // Format the transcript
-    const createdDate = new Date(createdDateTime || Date.now());
-    const formattedDate = createdDate.toLocaleDateString('en-US', {
-      year: 'numeric', month: 'long', day: 'numeric'
-    });
-    const formattedTime = createdDate.toLocaleTimeString('en-US', {
-      hour: 'numeric', minute: '2-digit'
-    });
+    const formattedDate = normalizedCreatedDateTime
+      ? new Date(normalizedCreatedDateTime).toLocaleDateString('en-US', {
+          year: 'numeric', month: 'long', day: 'numeric'
+        })
+      : 'Unknown';
+    const formattedTime = normalizedCreatedDateTime
+      ? new Date(normalizedCreatedDateTime).toLocaleTimeString('en-US', {
+          hour: 'numeric', minute: '2-digit'
+        })
+      : 'Unknown';
 
     let content = '';
     content += `CACHED MEETING TRANSCRIPT\n`;
     content += `=========================\n\n`;
     content += `Meeting ID: ${meetingId}\n`;
     content += `Transcript ID: ${transcriptId}\n`;
+    if (metadata?.meetingSubject) content += `Meeting Subject: ${metadata.meetingSubject}\n`;
     content += `Date: ${formattedDate}\n`;
     content += `Time: ${formattedTime}\n`;
     content += `Entries: ${entries.length}\n`;
@@ -2001,6 +2455,24 @@ async function saveTranscriptToFileFromVtt(
     }
 
     await fsPromises.writeFile(filePath, content, 'utf-8');
+
+    const cacheKey = `${userId}:${meetingId}:${transcriptId}`;
+    transcriptMetaCache.set(cacheKey, {
+      userId,
+      transcriptId,
+      meetingId,
+      organizerId: metadata?.organizerId || userId,
+      createdDateTime: normalizedCreatedDateTime || createdDateTime || '',
+      filePath,
+      fetchedAt: Date.now(),
+      charCount: content.length,
+      meetingSubject: metadata?.meetingSubject,
+      conversationId: metadata?.conversationId,
+      callId: metadata?.callId,
+      entryCount: entries.length,
+      isLive: !!metadata?.isLive,
+    });
+
     console.log(`[TRANSCRIPT_WORKER] Cached transcript to ${filePath} (${entries.length} entries, ${content.length} chars)`);
     return filePath;
   } catch (err) {
@@ -2010,19 +2482,137 @@ async function saveTranscriptToFileFromVtt(
 }
 
 /**
- * Background worker: Fetch and cache the last N transcripts for known organizers.
- * NOTE: This worker uses /users/{userId}/onlineMeetings/getAllTranscripts which requires
- * Application Access Policy. Since we only have RSC permissions, this worker is disabled.
- * Live transcripts still work via /chats/{chatId}/transcripts endpoint.
- * 
- * To enable: Configure Application Access Policy in Teams Admin PowerShell:
- *   New-CsApplicationAccessPolicy -Identity "MissaPolicy" -AppIds "678e7c4e-9b4b-402b-a6c3-f6892cb50674"
- *   Grant-CsApplicationAccessPolicy -PolicyName "MissaPolicy" -Global
+ * Background worker: sweep all transcripts for each known organizer and cache
+ * everything from the last 7 days.
  */
 async function runTranscriptBackgroundWorker(): Promise<void> {
-  console.log(`[TRANSCRIPT_WORKER] Background worker disabled - requires Application Access Policy`);
-  console.log(`[TRANSCRIPT_WORKER] Live transcripts work via RSC (/chats/{chatId}/transcripts)`);
-  // Worker is disabled - live transcript polling via /chats endpoint still works
+  if (transcriptWorkerRunning) {
+    console.log(`[TRANSCRIPT_WORKER] Skip run - previous cycle still in progress`);
+    return;
+  }
+
+  transcriptWorkerRunning = true;
+  try {
+    const userIds = Array.from(knownTranscriptUsers);
+    if (userIds.length === 0) {
+      console.log(`[TRANSCRIPT_WORKER] No known users yet, skipping cycle`);
+      return;
+    }
+
+    console.log(`[TRANSCRIPT_WORKER] Sync cycle started for ${userIds.length} user(s)`);
+
+    for (const userId of userIds) {
+      try {
+        const now = Date.now();
+        const lookbackCutoff = now - TRANSCRIPT_SYNC_LOOKBACK_MS;
+        const userCachedMeta = getCachedTranscriptMetaByUser(userId);
+        const cachedTranscriptIds = new Set(userCachedMeta.map((m) => m.transcriptId));
+
+        const recentMeetings = await getCachedUserMeetings(userId, true);
+        const meetingById = new Map(
+          recentMeetings
+            .filter((m) => !!m.id)
+            .map((m) => [m.id, m])
+        );
+
+        const allTranscripts = await graphApiHelper.getAllTranscriptsForUser(userId, 200);
+        if (!allTranscripts.length) {
+          console.log(`[TRANSCRIPT_WORKER] No transcripts returned for user ${userId}`);
+          continue;
+        }
+
+        const recentTranscripts = allTranscripts
+          .filter((t: any) => {
+            const createdTs = new Date(t.createdDateTime || 0).getTime();
+            return Number.isFinite(createdTs) && createdTs >= lookbackCutoff;
+          })
+          .filter((t: any) => !!t.id && !!t.meetingId)
+          .sort((a: any, b: any) => new Date(b.createdDateTime || 0).getTime() - new Date(a.createdDateTime || 0).getTime())
+          .slice(0, MAX_TRANSCRIPTS_TO_SYNC_PER_USER);
+
+        if (!recentTranscripts.length) {
+          console.log(`[TRANSCRIPT_WORKER] No transcripts in the last 7 days for user ${userId}`);
+          continue;
+        }
+
+        let downloadedCount = 0;
+        let skippedCount = 0;
+
+        // Collect meeting IDs that have an active bot call OR are in post-meeting polling —
+        // these transcripts are still growing so we must re-download even if already cached.
+        const activeMeetingIds = new Set<string>([
+          ...Array.from(activeCallMap.values())
+            .map(c => c.onlineMeetingId)
+            .filter((id): id is string => !!id),
+          ...Array.from(liveTranscriptPollingMap.values())
+            .filter(s => s.isPostMeeting && s.onlineMeetingId)
+            .map(s => s.onlineMeetingId as string),
+        ]);
+
+        for (const transcript of recentTranscripts) {
+          const isActiveMeeting = activeMeetingIds.has(transcript.meetingId);
+          if (cachedTranscriptIds.has(transcript.id) && !isActiveMeeting) {
+            skippedCount += 1;
+            continue;
+          }
+          if (isActiveMeeting) {
+            console.log(`[TRANSCRIPT_WORKER] Force-refreshing transcript ${transcript.id} for active meeting ${transcript.meetingId}`);
+          }
+
+          const meetingHint = meetingById.get(transcript.meetingId);
+          const organizerId = meetingHint?.organizerId || userId;
+
+          const vtt = await graphApiHelper.downloadTranscriptContent(
+            organizerId,
+            transcript.meetingId,
+            transcript.id
+          );
+
+          if (!vtt) {
+            continue;
+          }
+
+          const transcriptCreatedDateTime =
+            transcript.createdDateTime ||
+            meetingHint?.end ||
+            meetingHint?.start ||
+            '';
+
+          if (!transcriptCreatedDateTime) {
+            console.log(`[TRANSCRIPT_WORKER] Skip transcript ${transcript.id} - missing created timestamp`);
+            continue;
+          }
+
+          const savedPath = await saveTranscriptToFileFromVtt(
+            userId,
+            vtt,
+            transcript.meetingId,
+            transcript.id,
+            transcriptCreatedDateTime,
+            {
+              organizerId,
+              meetingSubject: meetingHint?.subject,
+            }
+          );
+
+          if (savedPath) {
+            downloadedCount += 1;
+            cachedTranscriptIds.add(transcript.id);
+          }
+        }
+
+        console.log(
+          `[TRANSCRIPT_WORKER] User ${userId}: recent=${recentTranscripts.length}, downloaded=${downloadedCount}, skippedCached=${skippedCount}`
+        );
+      } catch (userError: any) {
+        console.warn(`[TRANSCRIPT_WORKER] User sync failed for ${userId}: ${userError?.message || userError}`);
+      }
+    }
+
+    console.log(`[TRANSCRIPT_WORKER] Sync cycle complete`);
+  } finally {
+    transcriptWorkerRunning = false;
+  }
 }
 
 /**
@@ -2047,9 +2637,68 @@ function scheduleTranscriptWorker(delayMs: number = TRANSCRIPT_WORKER_INTERVAL_M
  * Start the background transcript worker.
  * Called once at app startup.
  */
+/**
+ * Rebuild transcriptMetaCache from cached_*.txt files already on disk.
+ * Runs once at startup so users can query past meeting transcripts immediately
+ * without waiting for the 5-minute background worker cycle.
+ */
+async function warmTranscriptMetaCacheFromDisk(): Promise<void> {
+  try {
+    if (!fs.existsSync(USER_TRANSCRIPTS_DIR)) return;
+    const userDirs = fs.readdirSync(USER_TRANSCRIPTS_DIR);
+    let loaded = 0;
+    for (const userDir of userDirs) {
+      const fullUserDir = path.join(USER_TRANSCRIPTS_DIR, userDir);
+      if (!fs.statSync(fullUserDir).isDirectory()) continue;
+      const userId = userDir;
+      const files = fs.readdirSync(fullUserDir).filter(f => f.startsWith('cached_') && f.endsWith('.txt'));
+      for (const file of files) {
+        const filePath = path.join(fullUserDir, file);
+        try {
+          // Read only the header lines (fast — don't load the whole file)
+          const raw = await fsPromises.readFile(filePath, 'utf-8');
+          const lines = raw.split('\n').slice(0, 20);
+          let meetingId = '';
+          let transcriptId = '';
+          let meetingSubject = '';
+          let entryCount = 0;
+          for (const line of lines) {
+            if (line.startsWith('Meeting ID: '))        meetingId      = line.slice('Meeting ID: '.length).trim();
+            else if (line.startsWith('Transcript ID: ')) transcriptId   = line.slice('Transcript ID: '.length).trim();
+            else if (line.startsWith('Meeting Subject: ')) meetingSubject = line.slice('Meeting Subject: '.length).trim();
+            else if (line.startsWith('Entries: '))       entryCount     = parseInt(line.slice('Entries: '.length), 10) || 0;
+          }
+          if (!meetingId || !transcriptId) continue;
+          const cacheKey = `${userId}:${meetingId}:${transcriptId}`;
+          if (transcriptMetaCache.has(cacheKey)) continue; // don't overwrite fresher in-memory entries
+          const stat = fs.statSync(filePath);
+          // Use file birthtime (creation time) as createdDateTime — it represents when the
+          // background worker first fetched and wrote this transcript. Falls back to mtime.
+          const createdMs = stat.birthtimeMs && stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs;
+          transcriptMetaCache.set(cacheKey, {
+            userId,
+            transcriptId,
+            meetingId,
+            organizerId: userId,
+            createdDateTime: new Date(createdMs).toISOString(),
+            filePath,
+            fetchedAt: stat.mtimeMs,
+            charCount: stat.size,
+            meetingSubject: meetingSubject || undefined,
+            entryCount,
+            isLive: false,
+          });
+          loaded++;
+        } catch { /* skip unreadable files */ }
+      }
+    }
+    if (loaded > 0) console.log(`[TRANSCRIPT_CACHE] Warmed meta cache from disk: ${loaded} entries`);
+  } catch { /* non-fatal */ }
+}
+
 function startTranscriptBackgroundWorker() {
   console.log(`[TRANSCRIPT_WORKER] Initializing background worker (first run in ${TRANSCRIPT_WORKER_INITIAL_DELAY_MS / 1000}s)`);
-  
+
   // Load all organizers from the meeting context store on startup
   try {
     const store = readMeetingContextStore();
@@ -2061,12 +2710,17 @@ function startTranscriptBackgroundWorker() {
     }
     for (const organizerId of organizerIds) {
       knownOrganizers.add(organizerId);
+      knownTranscriptUsers.add(organizerId);
     }
     console.log(`[TRANSCRIPT_WORKER] Loaded ${organizerIds.size} organizers from meeting context store`);
   } catch (err) {
     console.warn(`[TRANSCRIPT_WORKER] Failed to load organizers from meeting context:`, err);
   }
-  
+
+  // Rebuild transcriptMetaCache immediately from existing on-disk files
+  // so past-meeting queries work right away without waiting for the first worker run.
+  void warmTranscriptMetaCacheFromDisk();
+
   scheduleTranscriptWorker(TRANSCRIPT_WORKER_INITIAL_DELAY_MS);
 }
 
@@ -2075,12 +2729,24 @@ function startTranscriptBackgroundWorker() {
  */
 function getCachedTranscriptMeta(meetingId: string): CachedTranscriptMeta[] {
   const results: CachedTranscriptMeta[] = [];
-  for (const [key, meta] of transcriptMetaCache) {
-    if (key.startsWith(meetingId + ':') || meta.meetingId === meetingId) {
+  for (const [, meta] of transcriptMetaCache) {
+    if (meta.meetingId === meetingId) {
       results.push(meta);
     }
   }
   return results;
+}
+
+function getCachedTranscriptMetaByUser(userId: string): CachedTranscriptMeta[] {
+  return Array.from(transcriptMetaCache.values())
+    .filter((meta) => meta.userId === userId)
+    .sort((a, b) => {
+      const aTime = new Date(a.createdDateTime || '').getTime();
+      const bTime = new Date(b.createdDateTime || '').getTime();
+      const safeA = Number.isFinite(aTime) ? aTime : 0;
+      const safeB = Number.isFinite(bTime) ? bTime : 0;
+      return safeB - safeA;
+    });
 }
 
 /**
@@ -2094,8 +2760,10 @@ function getAllCachedTranscriptMeta(): CachedTranscriptMeta[] {
 /**
  * Load a cached transcript file content by meeting ID.
  */
-async function loadCachedTranscriptByMeetingId(meetingId: string): Promise<string | null> {
-  const metas = getCachedTranscriptMeta(meetingId);
+async function loadCachedTranscriptByMeetingId(meetingId: string, userId?: string): Promise<string | null> {
+  const metas = userId
+    ? getCachedTranscriptMetaByUser(userId).filter((meta) => meta.meetingId === meetingId)
+    : getCachedTranscriptMeta(meetingId);
   if (metas.length === 0) return null;
 
   // Use the most recent
@@ -2109,6 +2777,32 @@ async function loadCachedTranscriptByMeetingId(meetingId: string): Promise<strin
     console.warn(`[TRANSCRIPT_CACHE] Failed to load cached file ${latest.filePath}:`, err);
     return null;
   }
+}
+
+async function getCachedTranscriptContextsForUser(
+  userId: string,
+  limit: number = 6
+): Promise<Array<{ meetingSubject: string; createdDateTime: string; content: string }>> {
+  const metas = getCachedTranscriptMetaByUser(userId)
+    .filter((meta) => Date.now() - new Date(meta.createdDateTime || 0).getTime() <= TRANSCRIPT_SYNC_LOOKBACK_MS)
+    .slice(0, Math.max(1, limit));
+
+  const contexts: Array<{ meetingSubject: string; createdDateTime: string; content: string }> = [];
+  for (const meta of metas) {
+    try {
+      const content = await fsPromises.readFile(meta.filePath, 'utf-8');
+      if (!content || content.trim().length < 60) continue;
+      contexts.push({
+        meetingSubject: meta.meetingSubject || 'Untitled meeting',
+        createdDateTime: meta.createdDateTime,
+        content,
+      });
+    } catch {
+      // Ignore unreadable cache entries.
+    }
+  }
+
+  return contexts;
 }
 
 // ============================================================================
@@ -2347,6 +3041,100 @@ async function resolveMeetingInfoForConversation(conversationId: string) {
   }
 
   return graphInfo;
+}
+
+async function triggerRecorderEnableForCall(callId: string, attempt = 1): Promise<void> {
+  if (!isRecorderEnabled()) return;
+  if (recorderEnableCompletedCalls.has(callId) || recorderEnableInFlightCalls.has(callId)) return;
+
+  const callEntry = activeCallMap.get(callId);
+  if (!callEntry || callEntry.terminatedAt) return;
+
+  const tenantId =
+    process.env.BOT_TENANT_ID ||
+    process.env.TENANT_ID ||
+    process.env.TEAMS_APP_TENANT_ID ||
+    '';
+
+  let organizerId = callEntry.organizerId;
+  let onlineMeetingId = callEntry.onlineMeetingId;
+  let joinWebUrl = callEntry.joinWebUrl;
+
+  if ((!organizerId || !onlineMeetingId || !joinWebUrl) && callEntry.conversationId) {
+    try {
+      const freshInfo = await resolveMeetingInfoForConversation(callEntry.conversationId);
+      if (freshInfo?.organizer?.id && !organizerId) organizerId = freshInfo.organizer.id;
+      if ((freshInfo as any)?.onlineMeetingId && !onlineMeetingId) onlineMeetingId = (freshInfo as any).onlineMeetingId;
+      if (freshInfo?.joinWebUrl && !joinWebUrl) joinWebUrl = freshInfo.joinWebUrl;
+
+      activeCallMap.set(callId, {
+        ...callEntry,
+        organizerId,
+        onlineMeetingId,
+        joinWebUrl,
+      });
+    } catch (err: any) {
+      console.warn(`[RECORDER] Meeting info refresh failed for callId=${callId}: ${err?.message || err}`);
+    }
+  }
+
+  if (!organizerId || !onlineMeetingId || !tenantId) {
+    if (attempt < RECORDER_ENABLE_MAX_ATTEMPTS) {
+      console.log(
+        `[RECORDER] Enable deferred (attempt ${attempt}/${RECORDER_ENABLE_MAX_ATTEMPTS}) ` +
+        `for callId=${callId}: organizerId=${!!organizerId}, onlineMeetingId=${!!onlineMeetingId}, tenantId=${!!tenantId}`
+      );
+      setTimeout(() => {
+        void triggerRecorderEnableForCall(callId, attempt + 1);
+      }, RECORDER_ENABLE_RETRY_MS);
+    } else {
+      console.warn(
+        `[RECORDER] Enable skipped after ${RECORDER_ENABLE_MAX_ATTEMPTS} attempts for callId=${callId}: ` +
+        `organizerId=${!!organizerId}, onlineMeetingId=${!!onlineMeetingId}, tenantId=${!!tenantId}`
+      );
+    }
+    return;
+  }
+
+  recorderEnableInFlightCalls.add(callId);
+  try {
+    const result = await recorderEnableRecording({
+      correlationId: `${callId}-${Date.now()}`,
+      meetingId: onlineMeetingId,
+      organizerUserId: organizerId,
+      tenantId,
+      conversationId: callEntry.conversationId,
+      joinWebUrl,
+      watchUntilUtc: new Date(Date.now() + 6 * 60 * 60 * 1000),
+    });
+
+    if (result.ok) {
+      recorderEnableCompletedCalls.add(callId);
+      const latest = activeCallMap.get(callId);
+      if (latest) {
+        activeCallMap.set(callId, {
+          ...latest,
+          organizerId,
+          onlineMeetingId,
+          joinWebUrl,
+          recorderEnableSentAt: Date.now(),
+        });
+      }
+      return;
+    }
+
+    if (attempt < RECORDER_ENABLE_MAX_ATTEMPTS) {
+      const delayMs = Math.min(RECORDER_ENABLE_RETRY_MS * Math.pow(2, attempt - 1), 60_000);
+      console.warn(`[RECORDER] Enable attempt ${attempt} failed for callId=${callId}: ${result.error}. Retrying in ${delayMs / 1000}s...`);
+      setTimeout(() => {
+        void triggerRecorderEnableForCall(callId, attempt + 1);
+      }, delayMs);
+    } else {
+      console.warn(`[RECORDER] Enable failed after ${RECORDER_ENABLE_MAX_ATTEMPTS} attempts for callId=${callId}: ${result.error}`);
+    }
+  } finally {
+    recorderEnableInFlightCalls.delete(callId);
+  }
 }
 
 function getTranscriptWindowForConversation(conversationId: string): { min?: number; max?: number } {
@@ -2743,7 +3531,17 @@ async function generateFormattedSummaryHtml(
             `Participants: ${members.join(', ')}\n` +
             `Requested by: ${speaker}\n\n` +
             `Transcript:\n${transcriptText}\n\n` +
-            `Analyze this meeting and generate an intelligent Markdown summary with the 5 required sections. Extract key insights, highlight important points, and focus on what matters. Follow the instructions for format and content. DO NOT use HTML.`
+            `Analyze this meeting transcript and generate a COMPLETE Markdown summary following ALL sections in the instructions.\n\n` +
+            `CRITICAL REQUIREMENTS — zero omissions:\n` +
+            `• List EVERY participant by their exact name as spoken in the transcript\n` +
+            `• Use the exact date and time provided above — do not approximate\n` +
+            `• Capture EVERY action item, commitment, or "I'll do that" — even informal ones\n` +
+            `• Capture EVERY decision made, including tentative or conditional ones\n` +
+            `• Cover EVERY topic meaningfully discussed — do not collapse separate topics\n` +
+            `• Include a "Decisions made" section listing every agreement reached\n` +
+            `• Never use "and more", "etc.", or "among others" — spell everything out in full\n` +
+            `• A longer, complete summary is far better than a short one that misses things\n\n` +
+            `DO NOT use HTML. Use Markdown only.`
         },
       ],
       instructions: instructions,
@@ -2802,7 +3600,18 @@ async function generateMinutesHtml(
             `Time: ${timeStr}\n` +
             `Attendees: ${members.join(', ')}\n\n` +
             `Transcript:\n${transcriptText}\n\n` +
-            `Generate formal meeting minutes with all required sections in clean Markdown format. DO NOT use HTML.`
+            `Generate COMPLETE formal meeting minutes following ALL sections in the instructions.\n\n` +
+            `CRITICAL REQUIREMENTS — zero omissions:\n` +
+            `• List EVERY attendee by their exact name as it appears in the transcript\n` +
+            `• Use the exact date, time, and duration provided above\n` +
+            `• Document EVERY decision made — explicit and implicit — with who proposed and approved it\n` +
+            `• Capture EVERY action item and commitment, including informal ones said in passing\n` +
+            `• Format each action item as: **Task:** [description] → **Owner:** [name] | **Due:** [date or "Not specified"]\n` +
+            `• Cover EVERY topic discussed — do not merge or skip any\n` +
+            `• Include a "Risks and blockers" section if any were raised\n` +
+            `• Never use "and more", "etc.", or "among others" — spell everything out\n` +
+            `• Complete minutes are always better than brief ones that omit details\n\n` +
+            `DO NOT use HTML. Use Markdown only.`
         },
       ],
       instructions: instructions,
@@ -2960,12 +3769,14 @@ type IntentLabel =
   | 'minutes'
   | 'transcribe'
   | 'meeting_overview'
+  | 'list_meeting_groups'
   | 'insights'
   | 'meeting_question'
   | 'check_inbox'
   | 'reply_email'
   | 'send_email'
   | 'profile_details'
+  | 'prepare_meeting'
   | 'check_calendar'
   | 'general_chat';
 
@@ -2977,6 +3788,12 @@ async function classifyIntent(
 ): Promise<IntentLabel> {
   const text = (message || '').trim();
   if (!text) return 'general_chat';
+
+  // Fast-path: keyword bypass for high-confidence cases the LLM sometimes misclassifies
+  const lower = text.toLowerCase();
+  if (/\bprepar(e|ing)\b/.test(lower) && /\bmeeting|call|standup|sync\b/.test(lower)) {
+    return 'prepare_meeting';
+  }
 
   // Get current date context for smarter calendar detection
   const now = new Date();
@@ -2997,7 +3814,7 @@ async function classifyIntent(
           `2. **summarize** - User wants a NEW summary/recap generated (e.g., "summarize this meeting", "give me a recap", "what was discussed")\n` +
           `3. **minutes** - User wants NEW formal meeting notes/minutes generated (e.g., "create minutes", "meeting notes", "action items")\n` +
           `4. **transcribe** - User wants a NEW transcript generated (e.g., "transcribe the meeting", "get the transcript")\n` +
-          `5. **meeting_overview** - User asks about a specific meeting's details (e.g., "tell me about the meeting", "what happened in my last meeting")\n` +
+          `5. **meeting_overview** - User asks about details of a PAST meeting they already attended (e.g., "tell me about the meeting", "what happened in my last meeting", "overview of yesterday's call"). NOT for future/upcoming meetings and NOT for preparation.\n` +
           `6. **insights** - User wants key insights/highlights (e.g., "key takeaways", "main points", "highlights")\n` +
           `7. **meeting_question** - User asks a specific question about meeting content (e.g., "what did John say about X", "when did we discuss Y")\n` +
           `8. **check_inbox** - User wants the bot to review mailbox content (e.g., "check my inbox", "show urgent emails", "what did Marin send me")\n` +
@@ -3008,8 +3825,9 @@ async function classifyIntent(
           `   - Forward requests: "forward this", "send this"\n` +
           `   - Any mention of inbox/email as destination without asking for NEW content first\n` +
           `11. **profile_details** - User asks for their own profile details like "my email", "what is my email address", "my full details", "my profile"\n` +
-          `12. **check_calendar** - User asks about their schedule, meetings, availability, or calendar\n` +
-          `13. **general_chat** - Casual conversation, greetings, or anything that doesn't fit above\n\n` +
+          `12. **prepare_meeting** - User wants help PREPARING for an upcoming/future meeting. Key signals: "prepare", "get ready", "help me prepare", "preparing for". Examples: "help me prepare for my meeting", "help me prepare for the meeting I have today", "I have a meeting today help me prepare", "get me ready for my meeting", "prepare for meetings I have today". ALWAYS use this — NOT meeting_overview — when "prepare" appears.\n` +
+          `13. **check_calendar** - User asks to VIEW their schedule/calendar without preparation intent (e.g., "what meetings do I have today", "show me my calendar", "am I free Friday", "what's on my schedule")\n` +
+          `14. **general_chat** - Casual conversation, greetings, or anything that doesn't fit above\n\n` +
           `**Important rules:**\n` +
           `- "check my inbox", "urgent email", "what did Marin send me" = check_inbox\n` +
           `- "reply to Marin", "draft a response", "respond after analyzing that email" = reply_email\n` +
@@ -3025,7 +3843,9 @@ async function classifyIntent(
           `- "send the last summary to email" = send_email (not summarize!)\n` +
           `- "summarize AND email" = summarize (creating new content is primary)\n` +
           `- "my email", "what is my email", "my details", "my profile" = profile_details\n` +
-          `- Questions about calendar/schedule/availability = check_calendar\n` +
+          `- ANY message with "prepare", "preparing", "get ready for" related to a meeting = ALWAYS prepare_meeting (never meeting_overview, never check_calendar)\n` +
+          `- "help me prepare for my meeting", "prepare for the meeting today", "get ready for my meeting", "help me prepare for meetings I have today" = prepare_meeting\n` +
+          `- Questions about viewing calendar/schedule/availability (no preparation intent) = check_calendar\n` +
           `- Greetings = general_chat\n\n` +
           `Respond with JSON only: {"intent": "<one_intent_label>", "confidence": "high|medium|low", "reasoning": "<brief explanation>"}`,
 
@@ -3067,6 +3887,7 @@ async function classifyIntent(
       'reply_email',
       'send_email',
       'profile_details',
+      'prepare_meeting',
       'check_calendar',
       'general_chat',
     ];
@@ -3102,7 +3923,7 @@ async function getTranscriptTextForConversation(conversationId: string): Promise
 /**
  * Transcript source type - helps differentiate live vs historical
  */
-type TranscriptSource = 'live' | 'graph_fresh' | 'memory_cache' | 'file_cache' | 'background_cache' | 'none';
+type TranscriptSource = 'live' | 'graph_fresh' | 'memory_cache' | 'file_cache' | 'background_cache' | 'none' | 'capturing';
 
 /**
  * Get transcript text with full context about its source
@@ -3124,89 +3945,108 @@ async function getTranscriptWithContext(conversationId: string): Promise<{
     callId: undefined as string | undefined,
   };
 
-  // 1. FIRST: Check if there's an active LIVE transcript session for this conversation
-  const liveSession = getLiveTranscriptSession(conversationId);
-  if (liveSession) {
-    console.log(`[TRANSCRIPT_FETCH] Active live session detected for ${conversationId} (callId=${liveSession.callId})`);
-    const liveEntries = liveTranscriptMap.get(conversationId);
-    const liveFinalEntries = liveEntries?.filter((e) => e.isFinal) || [];
-    
-    if (liveFinalEntries.length > 0) {
-      console.log(`[TRANSCRIPT_FETCH] Using LIVE transcript (${liveFinalEntries.length} entries)`);
-      result.text = transcriptEntriesToPlainText(liveFinalEntries);
-      result.source = 'live';
-      result.isLive = true;
-      result.entryCount = liveFinalEntries.length;
-      result.meetingSubject = liveSession.meetingSubject;
-      result.callId = liveSession.callId;
-      return result;
-    }
-    // Live session exists but no entries yet - continue to check other sources
-    console.log(`[TRANSCRIPT_FETCH] Live session active but no entries captured yet`);
-  }
+  // Resolve active call for this conversation (authoritative — cleared when call ends)
+  const activeCallEntry = Array.from(activeCallMap.entries()).find(
+    ([, c]) => c.conversationId === conversationId && c.establishedAt
+  );
+  const activeCallId   = activeCallEntry?.[0];
+  const activeCall     = activeCallEntry?.[1];
+  const isCallActive   = !!activeCall;
 
-  // 2. SECOND: Check in-memory cache (may have recent entries from polling)
-  const cachedEntries = liveTranscriptMap.get(conversationId);
-  const cachedFinalEntries = cachedEntries?.filter((e) => e.isFinal) || [];
-  if (cachedFinalEntries.length > 0) {
-    console.log(`[TRANSCRIPT_FETCH] Using in-memory cache (${cachedFinalEntries.length} entries)`);
-    result.text = transcriptEntriesToPlainText(cachedFinalEntries);
-    result.source = 'memory_cache';
-    result.isLive = false;
-    result.entryCount = cachedFinalEntries.length;
-    return result;
-  }
-
-  // 3. THIRD: Check file cache (saved transcripts from this meeting)
-  // Use meeting identifiers for precise lookup instead of just conversation ID
   const meetingContext = getCachedMeetingContext(conversationId);
+
+  // Prefer live activeCallId over potentially stale meetingContext
   const meetingIds = {
-    callId: liveSession?.callId || meetingContext?.callId,
-    onlineMeetingId: meetingContext?.onlineMeetingId,
+    callId: activeCallId || meetingContext?.callId,
+    onlineMeetingId: activeCall?.onlineMeetingId || meetingContext?.onlineMeetingId,
   };
-  const cachedFile = loadCachedTranscriptText(conversationId, meetingIds);
-  if (cachedFile) {
-    console.log(`[TRANSCRIPT_FETCH] Using file cache for conversation (callId=${meetingIds.callId || 'none'}, meetingId=${meetingIds.onlineMeetingId || 'none'})`);
-    result.text = cachedFile;
-    result.source = 'file_cache';
-    result.isLive = false;
-    // Estimate entry count from content
-    result.entryCount = (cachedFile.match(/\n\s+-\s/g) || []).length || 1;
+
+  // Timestamp when current/last call was established
+  const currentCallStartedAt = activeCall?.establishedAt || meetingContext?.callStartedAt;
+
+  // 1. FIRST: In-memory live transcript map (filled by pollLiveTranscript every 10 s).
+  // This is the most up-to-date source during an active call.
+  const liveEntries = liveTranscriptMap.get(conversationId);
+  const liveFinalEntries = liveEntries?.filter((e) => e.isFinal) || [];
+  if (liveFinalEntries.length > 0) {
+    const src = isCallActive ? 'live' : 'memory_cache';
+    console.log(`[TRANSCRIPT_FETCH] Using in-memory transcript (${liveFinalEntries.length} entries, source=${src})`);
+    result.text = transcriptEntriesToPlainText(liveFinalEntries);
+    result.source = src;
+    result.isLive = isCallActive;
+    result.entryCount = liveFinalEntries.length;
     result.meetingSubject = meetingContext?.subject;
     result.callId = meetingIds.callId;
+    logProcessedTranscript({ ...result, conversationId });
     return result;
   }
 
-  // 4. FOURTH: Check background worker cache (pre-fetched transcripts)
-  if (meetingContext?.onlineMeetingId) {
-    const cachedMetas = getCachedTranscriptMeta(meetingContext.onlineMeetingId);
-    if (cachedMetas.length > 0) {
-      // Use the most recent cached transcript
-      const latest = cachedMetas.sort((a, b) => 
+  // 2. SECOND: Background worker cache (transcripts/users/{userId}/).
+  // This is the canonical on-disk store — the background worker fetches fresh VTT from Teams
+  // every 5 minutes and saves it here. Preferred over Graph API for all scenarios.
+  //
+  // Look up the session-filtered meta by onlineMeetingId, then read directly from its
+  // file path. We do NOT use loadCachedTranscriptByMeetingId (unfiltered) or mtime-based
+  // scans — both are unreliable because the background worker force-refreshes old transcript
+  // files for active meetings, causing their mtime to update to NOW regardless of content age.
+  let bgContent: string | null = null;
+  let bgMeta: CachedTranscriptMeta | null = null;
+
+  if (meetingIds.onlineMeetingId) {
+    const allMetas = getCachedTranscriptMeta(meetingIds.onlineMeetingId);
+    // During active call, restrict to entries belonging to this session (within 1 hr of call start).
+    // Post-meeting: accept any cached entry for this meeting.
+    const relevantMetas = isCallActive && currentCallStartedAt
+      ? allMetas.filter(m => new Date(m.createdDateTime).getTime() >= currentCallStartedAt - 60 * 60 * 1000)
+      : allMetas;
+    if (relevantMetas.length > 0) {
+      bgMeta = relevantMetas.sort((a, b) =>
         new Date(b.createdDateTime).getTime() - new Date(a.createdDateTime).getTime()
       )[0];
-      
-      const content = await loadCachedTranscriptByMeetingId(meetingContext.onlineMeetingId);
-      if (content) {
-        console.log(`[TRANSCRIPT_FETCH] Using background-cached transcript (meeting=${meetingContext.onlineMeetingId})`);
-        result.text = content;
-        result.source = 'background_cache';
-        result.isLive = false;
-        result.entryCount = latest.entryCount;
-        result.meetingSubject = latest.meetingSubject;
-        return result;
+    }
+    if (bgMeta) {
+      try {
+        const raw = await fsPromises.readFile(bgMeta.filePath, 'utf-8');
+        bgContent = raw.trim() || null;
+      } catch (err: any) {
+        if (err?.code === 'ENOENT') {
+          // Evict stale entry so the next call doesn't retry a missing file
+          for (const [k, v] of transcriptMetaCache) {
+            if (v === bgMeta) { transcriptMetaCache.delete(k); break; }
+          }
+        }
+        bgContent = null;
       }
     }
   }
 
-  // 5. FIFTH: Fetch fresh from Graph API (only if cache misses)
-  console.log(`[TRANSCRIPT_FETCH] Cache miss - fetching from Graph API for ${conversationId}`);
+  if (bgContent) {
+    console.log(`[TRANSCRIPT_FETCH] Using background cache (meeting=${meetingIds.onlineMeetingId || 'scanned'}, entries=${bgMeta?.entryCount ?? '?'})`);
+    result.text = bgContent;
+    result.source = 'background_cache';
+    result.isLive = isCallActive;
+    result.entryCount = bgMeta?.entryCount ?? ((bgContent.match(/\n/g) || []).length || 1);
+    result.meetingSubject = bgMeta?.meetingSubject || meetingContext?.subject;
+    logProcessedTranscript({ ...result, conversationId });
+    return result;
+  }
+
+  // 3. THIRD: During active call with no data, trigger an immediate background worker run
+  // so the users/ directory is refreshed for the next question (async, non-blocking).
+  // Return 'capturing' so the caller knows to retry in a moment.
+  if (isCallActive) {
+    console.log(`[TRANSCRIPT_FETCH] Active call — no local transcript yet. Triggering immediate worker refresh.`);
+    void runTranscriptBackgroundWorker();
+    result.source = 'capturing';
+    result.callId = meetingIds.callId;
+    result.meetingSubject = meetingContext?.subject;
+    return result;
+  }
+
+  console.log(`[TRANSCRIPT_FETCH] No cached data — fetching from Graph API for ${conversationId}`);
   const meetingInfo = await resolveMeetingInfoForConversation(conversationId);
   if (meetingInfo?.organizer?.id && meetingInfo?.joinWebUrl) {
     const transcriptWindow = getTranscriptWindowForConversation(conversationId);
-    if (transcriptWindow.min || transcriptWindow.max) {
-      console.log(`[TRANSCRIPT_FETCH] Using conversation call window filter for ${conversationId}`);
-    }
     const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
       meetingInfo.organizer.id,
       meetingInfo.joinWebUrl,
@@ -3216,13 +4056,24 @@ async function getTranscriptWithContext(conversationId: string): Promise<{
     if (vttContent) {
       const parsed = parseVttToEntries(vttContent);
       if (parsed.length > 0) {
-        console.log(`[TRANSCRIPT_FETCH] Graph API returned ${parsed.length} entries - caching result`);
+        console.log(`[TRANSCRIPT_FETCH] Graph API returned ${parsed.length} entries — saving to graph/`);
         liveTranscriptMap.set(conversationId, parsed);
-        saveTranscriptToFile(conversationId);
+        void (async () => {
+          try {
+            await fsPromises.mkdir(GRAPH_TRANSCRIPTS_DIR, { recursive: true });
+            const safeConvId = getSafeConversationId(conversationId);
+            const dateStr = new Date().toISOString().slice(0, 10);
+            const graphFilePath = path.join(GRAPH_TRANSCRIPTS_DIR, `graph_${dateStr}_${safeConvId}.txt`);
+            const textContent = transcriptEntriesToPlainText(parsed);
+            await fsPromises.writeFile(graphFilePath, textContent, 'utf-8');
+          } catch { /* non-fatal */ }
+        })();
         result.text = transcriptEntriesToPlainText(parsed);
         result.source = 'graph_fresh';
         result.isLive = false;
         result.entryCount = parsed.length;
+        result.meetingSubject = meetingContext?.subject;
+        logProcessedTranscript({ ...result, conversationId });
         return result;
       }
     }
@@ -3238,16 +4089,17 @@ async function getTranscriptWithContext(conversationId: string): Promise<{
 function getTranscriptAvailabilitySummary(conversationId: string): string {
   const parts: string[] = [];
   
-  // Check live session
-  const liveSession = getLiveTranscriptSession(conversationId);
-  if (liveSession) {
-    const liveEntries = liveTranscriptMap.get(conversationId)?.filter(e => e.isFinal) || [];
-    parts.push(`📍 **Live call in progress** (${liveEntries.length} lines captured${liveSession.meetingSubject ? `, "${liveSession.meetingSubject}"` : ''})`);
+  // Check live session via activeCallMap (authoritative)
+  const liveCallEntry = Array.from(activeCallMap.values()).find(c => c.conversationId === conversationId && c.establishedAt);
+  const liveEntries = liveTranscriptMap.get(conversationId)?.filter(e => e.isFinal) || [];
+  if (liveCallEntry) {
+    const ctx = getCachedMeetingContext(conversationId);
+    parts.push(`📍 **Live call in progress** (${liveEntries.length} lines captured${ctx?.subject ? `, "${ctx.subject}"` : ''})`);
   }
-  
+
   // Check memory cache
   const memoryEntries = liveTranscriptMap.get(conversationId)?.filter(e => e.isFinal) || [];
-  if (memoryEntries.length > 0 && !liveSession) {
+  if (memoryEntries.length > 0 && !liveCallEntry) {
     parts.push(`💾 **Recent transcript** in memory (${memoryEntries.length} entries)`);
   }
   
@@ -3312,19 +4164,23 @@ async function answerMeetingQuestionWithContext(
           `5. Only reference timestamps if the user specifically asks about timing\n` +
           `6. Tell the story naturally, as a knowledgeable colleague would explain it\n\n` +
           `How to format your response:\n` +
-          `- Write a natural, conversational answer — no rigid section headers like "Answer", "Supporting Details", "Confidence"\n` +
-          `- Summarize what was said in your own words, weaving in key phrases or short quotes only when they add flavor (not entire paragraphs)\n` +
-          `- If the speaker told a story, joke, or anecdote, retell it concisely and naturally — capture the essence, not every line\n` +
-          `- Keep it focused and readable — a few well-written paragraphs, not a wall of bullet points\n` +
-          `- If you're unsure the context fully answers the question, mention that briefly at the end`
+          `- Output markdown with clear sections\n` +
+          `- Use this structure exactly:\n` +
+          `  ## Direct answer\n` +
+          `  ## What was said\n` +
+          `  ## Notes\n` +
+          `- In "What was said", use concise bullet points\n` +
+          `- Keep quotes short and only when useful\n` +
+          `- Avoid long dense paragraphs`
       },
     ],
     instructions:
       'You are a friendly meeting assistant. Answer questions using ONLY the provided context. ' +
       'If a speaker name is mentioned, try fuzzy matching (first name, last name, partial match). ' +
       'Never make up information not in the context. ' +
-      'Be smart about what matters — read the raw transcript, understand it, and give a clear, natural answer. ' +
-      'Do NOT dump raw transcript lines with timestamps. Paraphrase and synthesize instead.',
+      'Be smart about what matters — read the raw transcript, understand it, and give a clear answer. ' +
+      'Do NOT dump raw transcript lines with timestamps. Paraphrase and synthesize instead. ' +
+      'Always format with short markdown sections and bullets for readability.',
     model: new OpenAIChatModel({
       model: config.azureOpenAIDeploymentName,
       apiKey: config.azureOpenAIKey,
@@ -3510,10 +4366,16 @@ interface LiveTranscriptPollingState {
   lastFetchedLineCount: number;
   consecutiveEmptyPolls: number;
   userNotifiedAboutDelay: boolean;
+  onlineMeetingId?: string;
+  isPostMeeting?: boolean;
+  postMeetingExpiry?: number;
+  postMeetingStablePolls?: number;
 }
 
 const liveTranscriptPollingMap = new Map<string, LiveTranscriptPollingState>();
-const LIVE_TRANSCRIPT_POLL_INTERVAL_MS = 10_000; // 10 seconds — poll via fetchMeetingTranscriptText
+const LIVE_TRANSCRIPT_POLL_INTERVAL_MS = 10_000; // 10 seconds during the meeting
+const LIVE_TRANSCRIPT_POST_MEETING_POLL_INTERVAL_MS = 30_000; // 30 seconds after meeting ends
+const LIVE_TRANSCRIPT_POST_MEETING_DURATION_MS = 10 * 60 * 1000; // keep polling 10 min post-meeting
 
 type MeetingStatusNoticeKey =
   | 'live_setup'
@@ -3554,11 +4416,29 @@ function clearMeetingStatusNotice(conversationId: string, key: MeetingStatusNoti
 
 
 
-function stopLiveTranscriptPolling(callId: string) {
+function stopLiveTranscriptPolling(callId: string, opts?: { postMeetingGrace?: boolean }) {
   const polling = liveTranscriptPollingMap.get(callId);
-  if (polling?.pollingTimerId) {
-    clearTimeout(polling.pollingTimerId);
+  if (!polling) return;
+
+  if (opts?.postMeetingGrace) {
+    // Switch to slow post-meeting polling so we capture the lagging Graph API content
+    if (polling.pollingTimerId) clearTimeout(polling.pollingTimerId);
+    // Cache the onlineMeetingId now while activeCallMap still has it (will be cleared soon)
+    if (!polling.onlineMeetingId) {
+      polling.onlineMeetingId = activeCallMap.get(callId)?.onlineMeetingId;
+    }
+    polling.isPostMeeting = true;
+    polling.postMeetingExpiry = Date.now() + LIVE_TRANSCRIPT_POST_MEETING_DURATION_MS;
+    polling.postMeetingStablePolls = 0;
+    polling.pollingTimerId = setTimeout(
+      () => void pollLiveTranscript(polling),
+      LIVE_TRANSCRIPT_POST_MEETING_POLL_INTERVAL_MS
+    );
+    console.log(`[LIVE_TRANSCRIPT_POLL] Post-meeting grace started for callId=${callId} (${LIVE_TRANSCRIPT_POST_MEETING_DURATION_MS / 60000} min)`);
+    return;
   }
+
+  if (polling.pollingTimerId) clearTimeout(polling.pollingTimerId);
   liveTranscriptPollingMap.delete(callId);
 }
 
@@ -3599,22 +4479,70 @@ function extractMeetingCallIdFromActivityPayload(activity: any): string | null {
   return null;
 }
 
+async function persistLivePollSnapshot(state: LiveTranscriptPollingState, entries: TranscriptEntry[]): Promise<void> {
+  try {
+    const onlineMeetingId = state.onlineMeetingId || activeCallMap.get(state.callId)?.onlineMeetingId;
+    if (!onlineMeetingId) return;
+
+    const finalEntries = entries.filter(e => e.isFinal);
+    const text = transcriptEntriesToPlainText(finalEntries);
+    if (!text.trim()) return;
+
+    const userDir = path.join(USER_TRANSCRIPTS_DIR, state.organizerId);
+    await fsPromises.mkdir(userDir, { recursive: true });
+
+    const dateStr = new Date(state.callStartTime).toISOString().slice(0, 10);
+    const safeMeetingId = onlineMeetingId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+    const safeCallId = state.callId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20);
+    const fileName = `live_${dateStr}_${safeMeetingId}_${safeCallId}.txt`;
+    const filePath = path.join(userDir, fileName);
+
+    await fsPromises.writeFile(filePath, text, 'utf-8');
+
+    const syntheticTranscriptId = `live_${state.callId}`;
+    const cacheKey = `${state.organizerId}:${onlineMeetingId}:${syntheticTranscriptId}`;
+    transcriptMetaCache.set(cacheKey, {
+      userId: state.organizerId,
+      transcriptId: syntheticTranscriptId,
+      meetingId: onlineMeetingId,
+      organizerId: state.organizerId,
+      createdDateTime: new Date(state.callStartTime).toISOString(),
+      filePath,
+      fetchedAt: Date.now(),
+      charCount: text.length,
+      meetingSubject: getCachedMeetingContext(state.conversationId)?.subject,
+      conversationId: state.conversationId,
+      callId: state.callId,
+      entryCount: finalEntries.length,
+      isLive: true,
+    });
+
+    console.log(`[LIVE_POLL] Persisted live snapshot to ${fileName} (${finalEntries.length} entries)`);
+  } catch { /* non-fatal */ }
+}
+
 async function pollLiveTranscript(state: LiveTranscriptPollingState) {
   try {
     // Live transcript retrieval via fetchMeetingTranscriptText:
     // - Uses callStartTime filter to get transcripts from THIS session only
     // - Always downloads VTT (content updates even when transcript ID stays the same)
     // - Tracks progress via lastFetchedLineCount, not transcript ID
+    // Use strictWindow=true so only transcripts created within 5 minutes BEFORE the call
+    // start are included. The default 1-hour grace is too wide and picks up previous sessions.
     const vttContent = await graphApiHelper.fetchMeetingTranscriptText(
       state.organizerId,
       state.joinWebUrl,
-      state.callStartTime
+      state.callStartTime,
+      undefined,
+      { strictWindow: true }
     );
 
     if (!vttContent) {
       state.consecutiveEmptyPolls++;
       console.log(`[LIVE_TRANSCRIPT_POLL] No transcript data available yet for callId=${state.callId} (empty polls: ${state.consecutiveEmptyPolls})`);
-      
+      if (state.isPostMeeting) {
+        state.postMeetingStablePolls = (state.postMeetingStablePolls || 0) + 1;
+      }
       // After 3 attempts (30 seconds), note delay silently.
       if (state.consecutiveEmptyPolls === 3 && !state.userNotifiedAboutDelay) {
         state.userNotifiedAboutDelay = true;
@@ -3623,23 +4551,24 @@ async function pollLiveTranscript(state: LiveTranscriptPollingState) {
       // Parse the full VTT content
       const allEntries = parseVttToEntries(vttContent);
       const convEntries = liveTranscriptMap.get(state.conversationId) || [];
-      
+
       // Check if we got new entries since last poll
       if (allEntries.length > state.lastFetchedLineCount) {
         const newEntries = allEntries.slice(state.lastFetchedLineCount);
         console.log(`[LIVE_TRANSCRIPT_POLL] Got ${newEntries.length} new entries (total now: ${allEntries.length})`);
-        
-        // First time getting data after empty polls - silently continue (no spam)
-        
+        state.postMeetingStablePolls = 0; // Reset stability counter on new data
         convEntries.push(...newEntries);
         liveTranscriptMap.set(state.conversationId, convEntries);
         state.lastFetchedLineCount = allEntries.length;
-        state.consecutiveEmptyPolls = 0; // Reset counter
-        
-        // Save updated transcript to file
-        saveTranscriptToFile(state.conversationId);
+        state.consecutiveEmptyPolls = 0;
+        // Persist snapshot to transcripts/users/ immediately so follow-up questions
+        // can read from the file cache even if liveTranscriptMap is not yet checked.
+        void persistLivePollSnapshot(state, convEntries);
       } else {
         console.log(`[LIVE_TRANSCRIPT_POLL] No new entries since last poll (current: ${allEntries.length})`);
+        if (state.isPostMeeting) {
+          state.postMeetingStablePolls = (state.postMeetingStablePolls || 0) + 1;
+        }
       }
     }
   } catch (error) {
@@ -3647,10 +4576,22 @@ async function pollLiveTranscript(state: LiveTranscriptPollingState) {
   }
 
   // Schedule next poll
-  if (liveTranscriptPollingMap.has(state.callId)) {
-    state.pollingTimerId = setTimeout(() => {
-      void pollLiveTranscript(state);
-    }, LIVE_TRANSCRIPT_POLL_INTERVAL_MS);
+  if (!liveTranscriptPollingMap.has(state.callId)) return;
+
+  if (state.isPostMeeting) {
+    if (Date.now() > (state.postMeetingExpiry || 0)) {
+      console.log(`[LIVE_TRANSCRIPT_POLL] Post-meeting grace expired for callId=${state.callId} — stopping`);
+      liveTranscriptPollingMap.delete(state.callId);
+      return;
+    }
+    if ((state.postMeetingStablePolls || 0) >= 3) {
+      console.log(`[LIVE_TRANSCRIPT_POLL] Transcript stable (${state.lastFetchedLineCount} entries) — stopping post-meeting poll`);
+      liveTranscriptPollingMap.delete(state.callId);
+      return;
+    }
+    state.pollingTimerId = setTimeout(() => void pollLiveTranscript(state), LIVE_TRANSCRIPT_POST_MEETING_POLL_INTERVAL_MS);
+  } else {
+    state.pollingTimerId = setTimeout(() => void pollLiveTranscript(state), LIVE_TRANSCRIPT_POLL_INTERVAL_MS);
   }
 }
 
@@ -4476,6 +5417,9 @@ const app = new App({
 // Load meeting history into memory at startup
 loadMeetingHistoryIntoMemory();
 
+// Load persisted personal conversation refs (so proactive task messages survive restarts)
+loadPersonalConvRefs();
+
 // Start the background transcript worker (non-blocking)
 startTranscriptBackgroundWorker();
 
@@ -4500,6 +5444,23 @@ async function sendTypingIndicator(sendFn: any): Promise<void> {
     // Typing indicator failures shouldn't break the flow
     console.warn('[TYPING] Failed to send typing indicator:', error);
   }
+}
+
+function startTypingHeartbeat(sendFn: any, intervalMs: number = 4000): () => void {
+  let stopped = false;
+
+  // Send one immediately so users get instant feedback.
+  void sendTypingIndicator(sendFn);
+
+  const timer = setInterval(() => {
+    if (stopped) return;
+    void sendTypingIndicator(sendFn);
+  }, intervalMs);
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }
 
 // Handle incoming messages
@@ -4547,11 +5508,24 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
     return;
   }
 
+  const stopTypingHeartbeat = startTypingHeartbeat(send);
+
   try {
     // Get user's display name for personalization
     const userName = await getUserDisplayName(activity.from.id, activity.from?.name);
     const actorName = activity.from?.name || userName;
     const requesterId = activity.from.aadObjectId || activity.from.id;
+    if (requesterId) {
+      knownTranscriptUsers.add(requesterId);
+      if (activity.conversation?.conversationType === 'personal') {
+        cachePersonalConversationReference(
+          requesterId,
+          activity.conversation.id,
+          activity.serviceUrl,
+          activity.from?.name
+        );
+      }
+    }
     const activityTenantId = getActivityTenantId(activity);
     const meetingId = activity.conversation.id || 'unknown_meeting';
     console.log(`[USER] Display name resolved: ${userName}`);
@@ -4619,6 +5593,66 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
        conversationIdLower.includes('meeting') ||
        conversationIdLower.includes('spaces'));
 
+    // ── Adaptive card: meeting task submission ──────────────────────────────────
+    if (activity.value?.action === 'meeting_tasks_post' || activity.value?.action === 'meeting_tasks_skip_all') {
+      const cardUserId = (activity.from?.aadObjectId || requesterId || '').trim();
+
+      if (activity.value.action === 'meeting_tasks_skip_all') {
+        await send(new MessageActivity('Got it — all meeting action items skipped. Nothing will be posted to Planner.').addAiGenerated());
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      }
+
+      const taskCount = parseInt(String(activity.value.taskCount || '0'));
+      const toPost: Array<{ title: string; dueDate?: string }> = [];
+      const skippedTitles: string[] = [];
+      for (let i = 1; i <= taskCount; i++) {
+        const title = String(activity.value[`task_title_${i}`] || '').trim();
+        const dueDate = String(activity.value[`task_due_${i}`] || '').trim() || undefined;
+        const skip = String(activity.value[`task_skip_${i}`]) === 'true';
+        if (skip || !title) { if (title) skippedTitles.push(title); }
+        else toPost.push({ title, dueDate });
+      }
+
+      if (!toPost.length) {
+        await send(new MessageActivity('All tasks were skipped — nothing posted to Planner.').addAiGenerated());
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      }
+
+      await sendTypingIndicator(send);
+      const plans = await graphApiHelper.getUserPlannerPlans(cardUserId);
+      if (!plans.length) {
+        const itemList = toPost.map(t => `• ${t.title}`).join('\n');
+        await send(new MessageActivity(
+          `I couldn't find any Planner plans for your account. Create a plan in Microsoft Planner first.\n\nYour action items:\n${itemList}`
+        ).addAiGenerated());
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      }
+
+      const plan = plans[0];
+      const resultLines: string[] = [];
+      for (const task of toPost) {
+        const r = await graphApiHelper.createPlannerTask(plan.id, task.title, cardUserId, task.dueDate);
+        resultLines.push(r.success ? `✅ ${task.title}` : `⚠️ ${task.title} — ${r.error || 'failed'}`);
+      }
+      const skippedNote = skippedTitles.length > 0 ? `\n\n_Skipped: ${skippedTitles.join(', ')}_` : '';
+      await send(new MessageActivity(
+        `Tasks posted to **${plan.title}**:\n\n${resultLines.join('\n')}${skippedNote}`
+      ).addAiGenerated());
+      storage.set(conversationKey, messages);
+      storage.set(sharedConversationKey, sharedMessages);
+      storage.set(llmConversationKey, llmMessages);
+      return;
+    }
+
     // In group/meeting chats, only respond when the bot is @mentioned
     if (isGroupConversation && !botMentioned) {
       console.log(`[MESSAGE] Ignoring group chat message — bot not @mentioned`);
@@ -4626,6 +5660,209 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
       storage.set(sharedConversationKey, sharedMessages);
       storage.set(llmConversationKey, llmMessages);
       return;
+    }
+
+    // ── Pending meeting task reply handler (personal chat only) ──────────────
+    if (!isGroupConversation) {
+      const taskState = pendingMeetingTasksMap.get(activity.conversation.id);
+      if (taskState && Date.now() < taskState.expiresAt) {
+        const replyText = (cleanText || '').trim();
+
+        if (/^confirm$/i.test(replyText)) {
+          await sendTypingIndicator(send);
+          const active = taskState.tasks.filter(t => !t.skipped);
+          if (!active.length) {
+            pendingMeetingTasksMap.delete(activity.conversation.id);
+            await send(new MessageActivity('All tasks were already skipped — nothing to post to Planner.').addAiGenerated());
+          } else {
+            const plans = await graphApiHelper.getUserPlannerPlans(taskState.userId);
+            if (!plans.length) {
+              pendingMeetingTasksMap.delete(activity.conversation.id);
+              const itemList = active.map(t => `• ${t.title}`).join('\n');
+              await send(new MessageActivity(
+                `I couldn't find any Planner plans for your account. Create a plan in Microsoft Planner first.\n\nYour action items:\n${itemList}`
+              ).addAiGenerated());
+            } else {
+              const plan = plans[0];
+              const resultLines: string[] = [];
+              for (const task of active) {
+                const r = await graphApiHelper.createPlannerTask(plan.id, task.title, taskState.userId, task.dueDate);
+                resultLines.push(r.success ? `✅ ${task.title}` : `⚠️ ${task.title} — ${r.error || 'failed'}`);
+              }
+              const skippedCount = taskState.tasks.filter(t => t.skipped).length;
+              const skippedNote = skippedCount > 0 ? `\n\n_${skippedCount} task(s) skipped._` : '';
+              pendingMeetingTasksMap.delete(activity.conversation.id);
+              await send(new MessageActivity(
+                `Tasks posted to **${plan.title}**:\n\n${resultLines.join('\n')}${skippedNote}`
+              ).addAiGenerated());
+            }
+          }
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+
+        if (/^skip\s+all$/i.test(replyText)) {
+          pendingMeetingTasksMap.delete(activity.conversation.id);
+          await send(new MessageActivity('Got it — all meeting action items skipped. Nothing will be posted to Planner.').addAiGenerated());
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+
+        const skipMatch = replyText.match(/^skip\s+([\d][,\d\s]*)$/i);
+        if (skipMatch) {
+          const ids = skipMatch[1].split(/[,\s]+/).map(s => parseInt(s)).filter(n => !isNaN(n));
+          ids.forEach(id => { const t = taskState.tasks.find(x => x.id === id); if (t) t.skipped = true; });
+          const remaining = taskState.tasks.filter(t => !t.skipped);
+          if (!remaining.length) {
+            pendingMeetingTasksMap.delete(activity.conversation.id);
+            await send(new MessageActivity('All tasks skipped — nothing will be posted to Planner.').addAiGenerated());
+          } else {
+            await send(new MessageActivity(buildPendingTasksMessage(taskState)).addAiGenerated());
+          }
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+
+        const editMatch = replyText.match(/^(\d+)\s*:\s*(.+)$/s);
+        if (editMatch) {
+          const taskId = parseInt(editMatch[1]);
+          const newTitle = editMatch[2].trim();
+          const task = taskState.tasks.find(t => t.id === taskId && !t.skipped);
+          if (task) {
+            task.title = newTitle;
+            await send(new MessageActivity(buildPendingTasksMessage(taskState)).addAiGenerated());
+            storage.set(conversationKey, messages);
+            storage.set(sharedConversationKey, sharedMessages);
+            storage.set(llmConversationKey, llmMessages);
+            return;
+          }
+        }
+        // No task command matched — fall through to normal message handling
+      }
+    }
+
+    operatorLog('Current user request', {
+      user: userName,
+      aadUser: shortConversationId(requesterId),
+      tenant: shortConversationId(activityTenantId),
+      context: summarizeConversationType(activity, isMeetingConversation),
+      storedMessages: messages.length,
+      request: cleanText || activity.text,
+    });
+
+    // Fast composite productivity overview path (emails + planner + calendar in one ask).
+    // Runs data fetches in parallel and avoids transcript-related meeting summary flow.
+    const normalizedQuery = (cleanText || '').toLowerCase();
+    const asksEmails = /\b(email|emails|inbox|mail)\b/.test(normalizedQuery);
+    const asksPlanner = /\b(planner|tasks?|to-?do)\b/.test(normalizedQuery);
+    const asksCalendar = /\b(calendar|schedule|meetings?)\b/.test(normalizedQuery);
+    const asksSummary = /\b(summary|summari[sz]e|overview|recap|better summary)\b/.test(normalizedQuery);
+
+    if (asksEmails && asksPlanner && asksCalendar && asksSummary) {
+      console.log(`[ACTION] Processing composite productivity overview in parallel`);
+      await sendTypingIndicator(send);
+      try {
+        const userId = activity.from.aadObjectId || activity.from.id;
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const end = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+        const [inboxMessages, plannerResult, calendarResult] = await Promise.all([
+          graphApiHelper.getInboxMessages(userId, { top: 8 }),
+          graphApiHelper.getPlannerTasksForUser(userId, 100),
+          graphApiHelper.getCalendarEvents(userId, today.toISOString().split('T')[0], end.toISOString().split('T')[0]),
+        ]);
+
+        const openPlannerTasks = (plannerResult.tasks || [])
+          .filter((t) => !t.completedDateTime && (t.percentComplete ?? 0) < 100)
+          .slice(0, 12)
+          .map((t) => ({
+            title: t.title,
+            dueDateTime: t.dueDateTime,
+            planTitle: t.planTitle,
+          }));
+
+        const upcomingEvents = (calendarResult.events || [])
+          .filter((e: any) => !e.isCancelled)
+          .slice(0, 10)
+          .map((e: any) => ({
+            subject: e.subject,
+            start: e.start?.dateTime,
+            end: e.end?.dateTime,
+          }));
+
+        const inboxDigest = inboxMessages.slice(0, 6).map((m) => ({
+          from: m.fromName || m.fromAddress,
+          subject: m.subject,
+          received: m.receivedDateTime,
+        }));
+
+        const overviewPrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content:
+                `User request: "${cleanText || activity.text || ''}"\n\n` +
+                `Data fetched in parallel:\n` +
+                `- Inbox count: ${inboxMessages.length}\n` +
+                `- Planner access: ${plannerResult.success ? 'ok' : 'failed'}\n` +
+                `- Calendar access: ${calendarResult.success ? 'ok' : 'failed'}\n\n` +
+                `Inbox digest:\n${JSON.stringify(inboxDigest, null, 2)}\n\n` +
+                `Open planner tasks:\n${JSON.stringify(openPlannerTasks, null, 2)}\n\n` +
+                `Upcoming calendar events (7 days):\n${JSON.stringify(upcomingEvents, null, 2)}\n\n` +
+                `Planner error (if any): ${plannerResult.error || 'none'}\n` +
+                `Calendar error (if any): ${calendarResult.error || 'none'}`,
+            }
+          ],
+          instructions:
+            `You are Mela. Give one concise, natural productivity overview across email, planner, and calendar.\n` +
+            `Rules:\n` +
+            `1) Start with one direct sentence answering the user.\n` +
+            `2) Provide three short sections: Inbox, Planner, Calendar.\n` +
+            `3) In Planner section, identify top 1-3 priorities by due date urgency and explain briefly.\n` +
+            `4) If any source is unavailable, say so naturally and continue with available sources.\n` +
+            `5) Do NOT mention transcripts or meeting transcription.\n` +
+            `6) Do not invent data; use only provided inputs.\n` +
+            `7) Output markdown only.`,
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21',
+          }),
+        });
+
+        const overviewResponse = await sendPromptWithTracking(overviewPrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: `${cleanText || activity.text || ''}\ncomposite productivity overview`,
+        });
+
+        const responseText = (overviewResponse.content || '').trim() ||
+          `I checked your inbox, Planner tasks, and calendar together. I can share a focused priority list next if you want.`;
+
+        await send(new MessageActivity(responseText).addAiGenerated().addFeedback());
+        recordBotResponse(activity.conversation.id, {
+          content: responseText,
+          contentType: 'general',
+          subject: `Productivity overview for ${today.toISOString().split('T')[0]}`,
+          timestamp: Date.now(),
+        });
+
+        storage.set(conversationKey, messages);
+        storage.set(sharedConversationKey, sharedMessages);
+        storage.set(llmConversationKey, llmMessages);
+        return;
+      } catch (error: any) {
+        console.error(`[ERROR_PRODUCTIVITY_OVERVIEW]`, error);
+      }
     }
 
     // Build recent context for the intent classifier so it handles follow-ups and corrections naturally
@@ -4686,6 +5923,16 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
     effectiveQuery = agentDecision.refinedQuery || cleanText;
     
     console.log(`[INTENT_AGENT] Decision: ${agentDecision.intent} (${agentDecision.confidence}) - ${agentDecision.reasoning.slice(0, 100)}`);
+    operatorLog('Agent decision', {
+      intent: agentDecision.intent,
+      confidence: agentDecision.confidence,
+      clarification: agentDecision.needsClarification ? 'needed' : 'no',
+      contentType: agentDecision.parameters?.contentType,
+      target: agentDecision.parameters?.meetingTarget,
+      recipients: agentDecision.parameters?.recipients?.map((r) => r.name || r.email || r.type).join(', '),
+      refinedQuery: effectiveQuery !== cleanText ? effectiveQuery : undefined,
+      reason: agentDecision.reasoning,
+    });
 
     // Clear pending clarification now that we received a new message
     pendingClarificationMap.delete(activity.conversation.id);
@@ -4703,6 +5950,53 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
         aboutTopic: agentDecision.parameters.contentType || agentDecision.intent,
         timestamp: Date.now(),
       });
+      storage.set(conversationKey, messages);
+      storage.set(sharedConversationKey, sharedMessages);
+      storage.set(llmConversationKey, llmMessages);
+      return;
+    }
+
+    if (agentDecision.intent === 'list_meeting_groups') {
+      console.log(`[MEETING_GROUPS] Processing meeting-group listing request`);
+      await sendTypingIndicator(send);
+
+      const rawQuery = (effectiveQuery || cleanText || '').toLowerCase();
+      const hasExplicitFilter = /\b(named|called|about|for|team|project|group)\b/.test(rawQuery);
+      const queryHint = hasExplicitFilter
+        ? (effectiveQuery || cleanText || '').replace(/^using the previously shown meeting groups, handle this follow-up:\s*/i, '').trim()
+        : undefined;
+
+      const groups = await graphApiHelper.listMeetingGroupsForUser(requesterId, {
+        limit: 40,
+        query: queryHint,
+      });
+
+      if (!groups.length) {
+        await send(new MessageActivity(
+          `I couldn't find any meeting or group chats right now. If this is unexpected, I can try again in a moment.`
+        ).addAiGenerated().addFeedback());
+      } else {
+        const lines = groups.slice(0, 20).map((group, index) => {
+          const updated = group.lastUpdated
+            ? new Date(group.lastUpdated).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+            : 'time unknown';
+          const label = group.chatType === 'meeting' ? 'meeting chat' : 'group chat';
+          return `${index + 1}. ${group.title} (${label}, updated ${updated})`;
+        });
+
+        const responseText =
+          `You're currently in ${groups.length} meeting/group chats. Here are the most recent ones:\n\n` +
+          `${lines.join('\n')}`;
+        await send(new MessageActivity(responseText).addAiGenerated().addFeedback());
+
+        recordBotResponse(activity.conversation.id, {
+          content: responseText,
+          contentType: 'meeting_groups',
+          subject: 'Meeting groups list',
+          timestamp: Date.now(),
+        });
+      }
+
       storage.set(conversationKey, messages);
       storage.set(sharedConversationKey, sharedMessages);
       storage.set(llmConversationKey, llmMessages);
@@ -4852,9 +6146,14 @@ app.on('message', async ({ send: sendActivity, stream, activity }) => {
       
       // ── Reformat path: user wants to reformat last summary/minutes/transcript ────
       const _lastSummaryResp = lastBotResponseMap.get(activity.conversation.id);
+      const summarizeQueryText = (effectiveQuery || activity.text || '').trim();
+      const hasExplicitSummaryReformatCue =
+        !!agentDecision.parameters?.formatStyle ||
+        /\b(reformat|rewrite|format|bullet|bullets|shorter|longer|concise|brief|detailed|expand|compress)\b/i.test(summarizeQueryText);
       const isSummaryReformatRequest = agentDecision.parameters?.isReformatRequest &&
         _lastSummaryResp &&
         ['summary', 'minutes', 'transcript', 'insights', 'meeting_overview'].includes(_lastSummaryResp.contentType) &&
+        hasExplicitSummaryReformatCue &&
         (Date.now() - _lastSummaryResp.timestamp) < 15 * 60 * 1000; // Within 15 minutes
       
       if (isSummaryReformatRequest && _lastSummaryResp?.content) {
@@ -4921,8 +6220,8 @@ Use a natural, human conversational tone. Avoid rigid or repetitive template wor
       const isFollowUpOnSummary = agentDecision.parameters?.isReformatRequest &&
         _lastSummaryResp &&
         ['summary', 'minutes', 'transcript', 'insights', 'meeting_overview'].includes(_lastSummaryResp.contentType) &&
-        (Date.now() - _lastSummaryResp.timestamp) < 15 * 60 * 1000 &&
-        /\b(what did|who said|tell me|what about|more about|explain|focus|mentioned|action items?|decisions?|key points?|highlights?)\b/i.test(effectiveQuery || activity.text || '');
+        !isSummaryReformatRequest &&
+        (Date.now() - _lastSummaryResp.timestamp) < 15 * 60 * 1000;
       
       if (isFollowUpOnSummary && _lastSummaryResp?.content) {
         console.log(`[SUMMARIZE] Follow-up question on cached ${_lastSummaryResp.contentType}`);
@@ -5077,26 +6376,62 @@ Output valid JSON only.`,
               `Found meeting "**${pastMeeting.meeting.subject}**". Checking for transcript availability...`
             ).addAiGenerated());
             
-            // Poll for transcript with retries (transcripts may not be immediately available after meeting ends)
-            const pollResult = await pollForTranscriptReady(
-              pastMeeting.meeting.organizerId,
-              pastMeeting.meeting.joinWebUrl,
-              pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
-              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
-              6,  // maxAttempts
-              5000 // initialDelayMs (5 seconds)
-            );
-            
-            if (pollResult.success && pollResult.vttContent) {
-              const parsed = parseVttToEntries(pollResult.vttContent);
-              if (parsed.length > 0) {
+            // 1. Check background worker cache first (fast, no Graph quota)
+            const sumStartMs = pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : 0;
+            const sumEndMs   = pastMeeting.meeting.end   ? new Date(pastMeeting.meeting.end).getTime()   : Date.now();
+            const sumCachedMetas = getCachedTranscriptMetaByUser(pastMeeting.meeting.organizerId)
+              .filter(m => {
+                const t = new Date(m.createdDateTime).getTime();
+                return t >= sumStartMs - 60 * 60 * 1000 && t <= sumEndMs + 24 * 60 * 60 * 1000;
+              });
+
+            let sumParsed: TranscriptEntry[] | null = null;
+            if (sumCachedMetas.length > 0) {
+              try {
+                const raw = await fsPromises.readFile(sumCachedMetas[0].filePath, 'utf-8');
+                const cEntries = parseTranscriptTextToEntries(raw || '').filter(e => e.isFinal);
+                if (cEntries.length > 0) {
+                  console.log(`[SUMMARIZE] Cache hit for "${pastMeeting.meeting.subject}" (${cEntries.length} entries)`);
+                  sumParsed = cEntries;
+                }
+              } catch { /* fall through to live call */ }
+            }
+
+            // 2. Fall back to live Graph API call if cache missed
+            if (!sumParsed) {
+              const pollResult = await pollForTranscriptReady(
+                pastMeeting.meeting.organizerId,
+                pastMeeting.meeting.joinWebUrl,
+                sumStartMs || undefined,
+                sumEndMs || undefined,
+                1, 0
+              );
+              if (pollResult.success && pollResult.vttContent) {
+                const liveEntries = parseVttToEntries(pollResult.vttContent).filter(e => e.isFinal);
+                if (liveEntries.length > 0) sumParsed = liveEntries;
+              }
+              if (!sumParsed) {
+                await send(new MessageActivity(
+                  `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available yet. ` +
+                  `${pollResult.error || 'Transcription may not have been enabled, or the transcript is still processing.'}`
+                ).addAiGenerated().addFeedback());
+                storage.set(conversationKey, messages);
+                storage.set(sharedConversationKey, sharedMessages);
+                storage.set(llmConversationKey, llmMessages);
+                return;
+              }
+            }
+
+            if (sumParsed && sumParsed.length > 0) {
+              const parsed = sumParsed;
+              {
                 console.log(`[SUMMARIZE] Got ${parsed.length} transcript entries from past meeting`);
                 generatedSummary = await generateFormattedSummaryHtml(
                   parsed,
                   pastMeeting.meeting.subject,
                   userName,
                   [],
-                  pastMeeting.meeting.start, // Use actual meeting date
+                  pastMeeting.meeting.start,
                   { userId: requesterId, displayName: actorName, meetingId }
                 );
                 
@@ -5144,16 +6479,6 @@ Output valid JSON only.`,
                 return;
               }
             }
-            
-            // No transcript available for this past meeting after polling
-            await send(new MessageActivity(
-              `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available yet. ` +
-              `${pollResult.error || 'Transcription may not have been enabled, or the transcript is still processing.'}`
-            ).addAiGenerated().addFeedback());
-            storage.set(conversationKey, messages);
-            storage.set(sharedConversationKey, sharedMessages);
-            storage.set(llmConversationKey, llmMessages);
-            return;
           } else {
             await send(new MessageActivity(
               `I couldn't find a Teams meeting on ${targetInfo.meeting_date}. ` +
@@ -5165,11 +6490,88 @@ Output valid JSON only.`,
             return;
           }
         }
-        
+
         // --- LAST MEETING LOOKUP (most recent from calendar) ---
         if (targetInfo.target === 'last_meeting' || (!isMeetingConversation && targetInfo.target === 'current')) {
           console.log(`[SUMMARIZE] Looking up recent meetings from calendar`);
           const userId = activity.from.aadObjectId || activity.from.id;
+
+          // 1:1 cache-first path: use already synced transcript files from the last 7 days.
+          if (!isMeetingConversation) {
+            const subjectHint = (targetInfo.meeting_subject || '').trim().toLowerCase();
+            const cachedRecent = getCachedTranscriptMetaByUser(userId)
+              .filter((meta) => Date.now() - new Date(meta.createdDateTime || 0).getTime() <= TRANSCRIPT_SYNC_LOOKBACK_MS)
+              .filter((meta) => {
+                if (!subjectHint) return true;
+                const meetingSubject = (meta.meetingSubject || '').toLowerCase();
+                return meetingSubject.includes(subjectHint) || subjectHint.includes(meetingSubject);
+              })
+              .slice(0, 8);
+
+            for (const cached of cachedRecent) {
+              try {
+                const cachedText = await fsPromises.readFile(cached.filePath, 'utf-8');
+                const parsedCached = parseTranscriptTextToEntries(cachedText).filter((e) => e.isFinal);
+                if (!parsedCached.length) continue;
+
+                const cachedMeetingSubject = cached.meetingSubject || targetInfo.meeting_subject || 'Recent meeting';
+                console.log(`[SUMMARIZE] Using cached transcript for 1:1 summarize: "${cachedMeetingSubject}" (${parsedCached.length} entries)`);
+
+                await send(new MessageActivity(
+                  `Found cached transcript for "**${cachedMeetingSubject}**". Generating summary...`
+                ).addAiGenerated());
+
+                generatedSummary = await generateFormattedSummaryHtml(
+                  parsedCached,
+                  cachedMeetingSubject,
+                  userName,
+                  [],
+                  cached.createdDateTime,
+                  { userId: requesterId, displayName: actorName, meetingId }
+                );
+
+                await send(new MessageActivity(generatedSummary).addAiGenerated().addFeedback());
+
+                recordBotResponse(activity.conversation.id, {
+                  content: generatedSummary,
+                  contentType: 'summary',
+                  subject: `Meeting Summary: ${cachedMeetingSubject} — ${config.botDisplayName}`,
+                  timestamp: Date.now()
+                });
+
+                if (emailRequest.wantsEmail) {
+                  if (emailRequest.sendToAllAttendees) {
+                    const emailResult = await autoEmailSummaryToParticipants(
+                      activity.conversation.id,
+                      activity.from.aadObjectId || activity.from.id,
+                      `Meeting Summary: ${cachedMeetingSubject} — ${config.botDisplayName}`,
+                      generatedSummary
+                    );
+                    if (emailResult.sentCount > 0) {
+                      await send(new MessageActivity(`Done! I've emailed this summary to **${emailResult.sentCount} attendee(s)**.`).addAiGenerated());
+                    }
+                  } else if (emailRequest.emailAddress) {
+                    const sendResult = await graphApiHelper.sendEmail(
+                      activity.from.aadObjectId || activity.from.id,
+                      emailRequest.emailAddress,
+                      `Meeting Summary: ${cachedMeetingSubject} — ${config.botDisplayName}`,
+                      generatedSummary
+                    );
+                    if (sendResult.success) {
+                      await send(new MessageActivity(`Done! I've emailed this summary to **${emailRequest.emailAddress}**.`).addAiGenerated());
+                    }
+                  }
+                }
+
+                storage.set(conversationKey, messages);
+                storage.set(sharedConversationKey, sharedMessages);
+                storage.set(llmConversationKey, llmMessages);
+                return;
+              } catch (cacheErr: any) {
+                console.warn(`[SUMMARIZE] Failed reading cached transcript ${cached.filePath}: ${cacheErr?.message || cacheErr}`);
+              }
+            }
+          }
           
           // Find multiple recent meetings so we can try each until one has a transcript
           const pastMeetings = await graphApiHelper.findPastMeetings(userId, undefined, targetInfo.meeting_subject || undefined, 5);
@@ -5185,8 +6587,7 @@ Output valid JSON only.`,
                 meeting.joinWebUrl,
                 meeting.start ? new Date(meeting.start).getTime() : undefined,
                 meeting.end ? new Date(meeting.end).getTime() : undefined,
-                3, // fewer retries per meeting since we're trying multiple
-                3000
+                1, 0
               );
               
               if (pollResult.success && pollResult.vttContent) {
@@ -5580,14 +6981,62 @@ Output valid JSON only.`,
         }
 
         if (!transcriptEntries || transcriptEntries.length === 0) {
-          const responseActivity = new MessageActivity(
-            `I don't have any meeting transcript data yet.\n\n` +
-            `You can:\n` +
-            `� Ask me to join an upcoming meeting\n` +
-            `� Share a meeting you already attended\n` +
-            `� Request a transcript if a meeting was recorded`
-          ).addAiGenerated().addFeedback();
-          await send(responseActivity);
+          // No transcript — show what IS available: upcoming calendar meetings + recent recorded meetings
+          const userId = activity.from.aadObjectId || activity.from.id;
+          const now = new Date();
+          const todayDate = now.toISOString().split('T')[0];
+
+          const formatTime = (dtStr?: string): string => {
+            if (!dtStr) return '';
+            const m = dtStr.match(/T(\d{2}):(\d{2})/);
+            if (!m) return '';
+            let h = parseInt(m[1], 10);
+            const min = m[2];
+            const ampm = h >= 12 ? 'PM' : 'AM';
+            if (h === 0) h = 12;
+            else if (h > 12) h -= 12;
+            return min === '00' ? `${h} ${ampm}` : `${h}:${min} ${ampm}`;
+          };
+
+          const [calendarResult, recentMeetings] = await Promise.allSettled([
+            graphApiHelper.getCalendarEvents(userId, now.toISOString(), `${todayDate}T23:59:59.999Z`),
+            graphApiHelper.findPastMeetings(userId, undefined, undefined, 5),
+          ]);
+
+          const upcomingEvents = (calendarResult.status === 'fulfilled' && calendarResult.value.success)
+            ? (calendarResult.value.events || []).filter((e: any) => !e.isCancelled).slice(0, 5)
+            : [];
+
+          const pastWithTranscripts = (recentMeetings.status === 'fulfilled' && recentMeetings.value.success)
+            ? (recentMeetings.value.meetings || []).filter((m: any) => m.joinWebUrl).slice(0, 5)
+            : [];
+
+          let parts: string[] = [];
+
+          if (upcomingEvents.length > 0) {
+            const lines = upcomingEvents.map((evt: any) => {
+              const start = formatTime(evt.start?.dateTime);
+              const end = formatTime(evt.end?.dateTime);
+              return `• **${evt.subject || 'Untitled'}** — ${start}–${end}`;
+            });
+            parts.push(`**Upcoming meetings today:**\n${lines.join('\n')}`);
+          }
+
+          if (pastWithTranscripts.length > 0) {
+            const lines = pastWithTranscripts.map((m: any) => `• **${m.subject || 'Untitled'}**`);
+            parts.push(`**Recent meetings (may have transcripts):**\n${lines.join('\n')}\n\nSay something like "summarize the [meeting name]" and I'll pull it up.`);
+          }
+
+          if (parts.length === 0) {
+            parts.push(
+              `No upcoming meetings today and no recent recorded meetings found.\n\n` +
+              `You can:\n` +
+              `• Ask me to **join a meeting** to capture it live\n` +
+              `• Ask about a specific past meeting by name or date`
+            );
+          }
+
+          await send(new MessageActivity(parts.join('\n\n')).addAiGenerated().addFeedback());
           storage.set(conversationKey, messages);
           storage.set(sharedConversationKey, sharedMessages);
           storage.set(llmConversationKey, llmMessages);
@@ -5805,40 +7254,74 @@ Output valid JSON only.`,
             await send(new MessageActivity(
               `Found meeting "**${pastMeeting.meeting.subject}**". Fetching transcript...`
             ).addAiGenerated());
-            
-            // Poll for transcript
-            const pollResult = await pollForTranscriptReady(
-              pastMeeting.meeting.organizerId,
-              pastMeeting.meeting.joinWebUrl,
-              pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
-              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
-              6, 5000
-            );
-            
-            if (pollResult.success && pollResult.vttContent) {
-              const parsed = parseVttToEntries(pollResult.vttContent);
-              if (parsed.length > 0) {
-                console.log(`[TRANSCRIBE] Got ${parsed.length} transcript entries from past meeting`);
-                const displayEntries = parsed.length > 80 ? parsed.slice(-80) : parsed;
-                const transcript = await buildTranscriptHtml(
-                  displayEntries,
-                  pastMeeting.meeting.subject,
-                  [],
-                  parsed.length,
-                  parsed.length > 80,
-                  { userId: requesterId, displayName: actorName, meetingId }
-                );
-                await send(new MessageActivity(transcript).addAiGenerated().addFeedback());
+
+            // 1. Check background worker cache first (fast, no Graph quota)
+            let pastParsed: TranscriptEntry[] | null = null;
+            const meetingStartMs = pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : 0;
+            const meetingEndMs   = pastMeeting.meeting.end   ? new Date(pastMeeting.meeting.end).getTime()   : Date.now();
+            const cachedMetas = getCachedTranscriptMetaByUser(pastMeeting.meeting.organizerId)
+              .filter(m => {
+                const t = new Date(m.createdDateTime).getTime();
+                return t >= meetingStartMs - 60 * 60 * 1000 && t <= meetingEndMs + 24 * 60 * 60 * 1000;
+              });
+
+            if (cachedMetas.length > 0) {
+              try {
+                const raw = await fsPromises.readFile(cachedMetas[0].filePath, 'utf-8');
+                const cEntries = parseTranscriptTextToEntries(raw || '').filter(e => e.isFinal);
+                if (cEntries.length > 0) {
+                  console.log(`[TRANSCRIBE] Cache hit for "${pastMeeting.meeting.subject}" (${cEntries.length} entries)`);
+                  pastParsed = cEntries;
+                }
+              } catch { /* fall through to live call */ }
+            }
+
+            // 2. Fall back to live Graph API call if cache missed
+            if (!pastParsed) {
+              const pollResult = await pollForTranscriptReady(
+                pastMeeting.meeting.organizerId,
+                pastMeeting.meeting.joinWebUrl,
+                meetingStartMs || undefined,
+                meetingEndMs || undefined,
+                1, 0
+              );
+              if (pollResult.success && pollResult.vttContent) {
+                const liveEntries = parseVttToEntries(pollResult.vttContent).filter(e => e.isFinal);
+                if (liveEntries.length > 0) pastParsed = liveEntries;
+              }
+              if (!pastParsed) {
+                await send(new MessageActivity(
+                  `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
+                  `${pollResult.error || 'Transcription may not have been enabled during the call.'}`
+                ).addAiGenerated().addFeedback());
                 storage.set(conversationKey, messages);
                 storage.set(sharedConversationKey, sharedMessages);
                 storage.set(llmConversationKey, llmMessages);
                 return;
               }
             }
-            
+
+            if (pastParsed && pastParsed.length > 0) {
+              console.log(`[TRANSCRIBE] Got ${pastParsed.length} transcript entries for "${pastMeeting.meeting.subject}"`);
+              const displayEntries = pastParsed.length > 80 ? pastParsed.slice(-80) : pastParsed;
+              const transcript = await buildTranscriptHtml(
+                displayEntries,
+                pastMeeting.meeting.subject,
+                [],
+                pastParsed.length,
+                pastParsed.length > 80,
+                { userId: requesterId, displayName: actorName, meetingId }
+              );
+              await send(new MessageActivity(transcript).addAiGenerated().addFeedback());
+              storage.set(conversationKey, messages);
+              storage.set(sharedConversationKey, sharedMessages);
+              storage.set(llmConversationKey, llmMessages);
+              return;
+            }
+
             await send(new MessageActivity(
               `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available. ` +
-              `${pollResult.error || 'Transcription may not have been enabled during the call.'}`
+              `Transcription may not have been enabled during the call.`
             ).addAiGenerated().addFeedback());
             storage.set(conversationKey, messages);
             storage.set(sharedConversationKey, sharedMessages);
@@ -5860,32 +7343,62 @@ Output valid JSON only.`,
         if (targetInfo.target === 'last_meeting' || (targetInfo.target === 'past_meeting' && !targetInfo.meeting_date)) {
           console.log(`[TRANSCRIBE] Looking up recent meetings from calendar`);
           const userId = activity.from.aadObjectId || activity.from.id;
-          
+
+          // Cache-first: check already-synced transcripts before hitting Graph API
+          const subjectHintTx = (targetInfo.meeting_subject || '').trim().toLowerCase();
+          const cachedRecentTx = getCachedTranscriptMetaByUser(userId)
+            .filter((meta) => Date.now() - new Date(meta.createdDateTime || 0).getTime() <= TRANSCRIPT_SYNC_LOOKBACK_MS)
+            .filter((meta) => {
+              if (!subjectHintTx) return true;
+              return (meta.meetingSubject || '').toLowerCase().includes(subjectHintTx) || subjectHintTx.includes((meta.meetingSubject || '').toLowerCase());
+            })
+            .slice(0, 8);
+
+          for (const cached of cachedRecentTx) {
+            try {
+              const cachedText = await fsPromises.readFile(cached.filePath, 'utf-8');
+              const parsedCached = parseTranscriptTextToEntries(cachedText).filter((e) => e.isFinal);
+              if (!parsedCached.length) continue;
+              const cachedSubject = cached.meetingSubject || targetInfo.meeting_subject || 'Recent meeting';
+              console.log(`[TRANSCRIBE] Using cached transcript: "${cachedSubject}" (${parsedCached.length} entries)`);
+              const displayEntries = parsedCached.length > 80 ? parsedCached.slice(-80) : parsedCached;
+              const transcript = await buildTranscriptHtml(
+                displayEntries, cachedSubject, [], parsedCached.length, parsedCached.length > 80,
+                { userId: requesterId, displayName: actorName, meetingId }
+              );
+              await send(new MessageActivity(transcript).addAiGenerated().addFeedback());
+              storage.set(conversationKey, messages);
+              storage.set(sharedConversationKey, sharedMessages);
+              storage.set(llmConversationKey, llmMessages);
+              return;
+            } catch { /* try next */ }
+          }
+
           const pastMeetings = await graphApiHelper.findPastMeetings(userId, undefined, targetInfo.meeting_subject || undefined, 5);
-          
+
           if (pastMeetings.success && pastMeetings.meetings.length > 0) {
             let foundTranscript = false;
-            
+
             for (const meeting of pastMeetings.meetings) {
               console.log(`[TRANSCRIBE] Trying meeting: "${meeting.subject}"`);
-              
+
               const pollResult = await pollForTranscriptReady(
                 meeting.organizerId,
                 meeting.joinWebUrl,
                 meeting.start ? new Date(meeting.start).getTime() : undefined,
                 meeting.end ? new Date(meeting.end).getTime() : undefined,
-                3, 3000
+                1, 0
               );
-              
+
               if (pollResult.success && pollResult.vttContent) {
                 const parsed = parseVttToEntries(pollResult.vttContent);
                 if (parsed.length > 0) {
                   console.log(`[TRANSCRIBE] Got ${parsed.length} transcript entries from "${meeting.subject}"`);
-                  
+
                   await send(new MessageActivity(
                     `Found transcript for "**${meeting.subject}**". Formatting...`
                   ).addAiGenerated());
-                  
+
                   const displayEntries = parsed.length > 80 ? parsed.slice(-80) : parsed;
                   const transcript = await buildTranscriptHtml(
                     displayEntries,
@@ -6012,6 +7525,13 @@ Output valid JSON only.`,
 
         if (finalEntries.length > 0) {
           console.log(`[TRANSCRIPT] Returning ${finalEntries.length} entries from ${dataSource}`);
+          logProcessedTranscript({
+            source: dataSource,
+            entryCount: finalEntries.length,
+            meetingSubject: meetingTitle,
+            isLive: dataSource.includes('live') || isInCall,
+            conversationId: activity.conversation.id,
+          });
 
           // Determine which entries to show
           const displayEntries = finalEntries.length > 80 ? finalEntries.slice(-80) : finalEntries;
@@ -6059,6 +7579,13 @@ Output valid JSON only.`,
                   const responseActivity = new MessageActivity(transcript).addAiGenerated().addFeedback();
                   await send(responseActivity);
                   console.log(`[SUCCESS] Graph transcript fetched and sent (${parsed.length} entries)`);
+                  logProcessedTranscript({
+                    source: fallbackFetch.fromCache ? 'Graph/cache fallback' : 'Graph fallback',
+                    entryCount: parsed.length,
+                    meetingSubject: graphTitle,
+                    isLive: false,
+                    conversationId: activity.conversation.id,
+                  });
               } else {
                 // Check if the bot ever joined this meeting's call
                 const cachedCtx = getCachedMeetingContext(activity.conversation.id);
@@ -6361,19 +7888,55 @@ Output valid JSON only.`,
               `Found meeting "**${pastMeeting.meeting.subject}**". Checking for transcript availability...`
             ).addAiGenerated());
             
-            // Poll for transcript with retries
-            const pollResult = await pollForTranscriptReady(
-              pastMeeting.meeting.organizerId,
-              pastMeeting.meeting.joinWebUrl,
-              pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : undefined,
-              pastMeeting.meeting.end ? new Date(pastMeeting.meeting.end).getTime() : undefined,
-              6,
-              5000
-            );
+            // 1. Check background worker cache first (fast, no Graph quota)
+            const minStartMs = pastMeeting.meeting.start ? new Date(pastMeeting.meeting.start).getTime() : 0;
+            const minEndMs   = pastMeeting.meeting.end   ? new Date(pastMeeting.meeting.end).getTime()   : Date.now();
+            const minCachedMetas = getCachedTranscriptMetaByUser(pastMeeting.meeting.organizerId)
+              .filter(m => {
+                const t = new Date(m.createdDateTime).getTime();
+                return t >= minStartMs - 60 * 60 * 1000 && t <= minEndMs + 24 * 60 * 60 * 1000;
+              });
 
-            if (pollResult.success && pollResult.vttContent) {
-              const parsed = parseVttToEntries(pollResult.vttContent);
-              if (parsed.length > 0) {
+            let minParsed: TranscriptEntry[] | null = null;
+            if (minCachedMetas.length > 0) {
+              try {
+                const raw = await fsPromises.readFile(minCachedMetas[0].filePath, 'utf-8');
+                const cEntries = parseTranscriptTextToEntries(raw || '').filter(e => e.isFinal);
+                if (cEntries.length > 0) {
+                  console.log(`[MINUTES] Cache hit for "${pastMeeting.meeting.subject}" (${cEntries.length} entries)`);
+                  minParsed = cEntries;
+                }
+              } catch { /* fall through to live call */ }
+            }
+
+            // 2. Fall back to live Graph API call if cache missed
+            if (!minParsed) {
+              const pollResult = await pollForTranscriptReady(
+                pastMeeting.meeting.organizerId,
+                pastMeeting.meeting.joinWebUrl,
+                minStartMs || undefined,
+                minEndMs || undefined,
+                1, 0
+              );
+              if (pollResult.success && pollResult.vttContent) {
+                const liveEntries = parseVttToEntries(pollResult.vttContent).filter(e => e.isFinal);
+                if (liveEntries.length > 0) minParsed = liveEntries;
+              }
+              if (!minParsed) {
+                await send(new MessageActivity(
+                  `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available yet. ` +
+                  `${pollResult.error || 'Transcription may not have been enabled, or the transcript is still processing.'}`
+                ).addAiGenerated().addFeedback());
+                storage.set(conversationKey, messages);
+                storage.set(sharedConversationKey, sharedMessages);
+                storage.set(llmConversationKey, llmMessages);
+                return;
+              }
+            }
+
+            if (minParsed && minParsed.length > 0) {
+              const parsed = minParsed;
+              {
                 generatedMinutes = await generateMinutesHtml(
                   parsed,
                   pastMeeting.meeting.subject,
@@ -6421,15 +7984,6 @@ Output valid JSON only.`,
                 return;
               }
             }
-
-            await send(new MessageActivity(
-              `I found the meeting "**${pastMeeting.meeting.subject}**" but no transcript is available yet. ` +
-              `${pollResult.error || 'Transcription may not have been enabled, or the transcript is still processing.'}`
-            ).addAiGenerated().addFeedback());
-            storage.set(conversationKey, messages);
-            storage.set(sharedConversationKey, sharedMessages);
-            storage.set(llmConversationKey, llmMessages);
-            return;
           }
 
           await send(new MessageActivity(
@@ -6446,20 +8000,51 @@ Output valid JSON only.`,
         if (targetInfo.target === 'last_meeting' || (!isMeetingConversation && targetInfo.target === 'current')) {
           console.log(`[MINUTES] Looking up recent meetings from calendar`);
           const userId = activity.from.aadObjectId || activity.from.id;
+
+          // Cache-first: check already-synced transcripts before hitting Graph API
+          const subjectHintMn = (targetInfo.meeting_subject || '').trim().toLowerCase();
+          const cachedRecentMn = getCachedTranscriptMetaByUser(userId)
+            .filter((meta) => Date.now() - new Date(meta.createdDateTime || 0).getTime() <= TRANSCRIPT_SYNC_LOOKBACK_MS)
+            .filter((meta) => {
+              if (!subjectHintMn) return true;
+              return (meta.meetingSubject || '').toLowerCase().includes(subjectHintMn) || subjectHintMn.includes((meta.meetingSubject || '').toLowerCase());
+            })
+            .slice(0, 8);
+
+          for (const cached of cachedRecentMn) {
+            try {
+              const cachedText = await fsPromises.readFile(cached.filePath, 'utf-8');
+              const parsedCached = parseTranscriptTextToEntries(cachedText).filter((e) => e.isFinal);
+              if (!parsedCached.length) continue;
+              const cachedSubject = cached.meetingSubject || targetInfo.meeting_subject || 'Recent meeting';
+              console.log(`[MINUTES] Using cached transcript: "${cachedSubject}" (${parsedCached.length} entries)`);
+              await send(new MessageActivity(`Found transcript for "**${cachedSubject}**". Generating minutes...`).addAiGenerated());
+              generatedMinutes = await generateMinutesHtml(
+                parsedCached, cachedSubject, [], cached.createdDateTime,
+                { userId: requesterId, displayName: actorName, meetingId }
+              );
+              await send(new MessageActivity(generatedMinutes).addAiGenerated().addFeedback());
+              storage.set(conversationKey, messages);
+              storage.set(sharedConversationKey, sharedMessages);
+              storage.set(llmConversationKey, llmMessages);
+              return;
+            } catch { /* try next */ }
+          }
+
           const pastMeetings = await graphApiHelper.findPastMeetings(userId, undefined, targetInfo.meeting_subject || undefined, 5);
-          
+
           if (pastMeetings.success && pastMeetings.meetings.length > 0) {
             let foundTranscript = false;
-            
+
             for (const meeting of pastMeetings.meetings) {
               console.log(`[MINUTES] Trying meeting: "${meeting.subject}"`);
-              
+
               const pollResult = await pollForTranscriptReady(
                 meeting.organizerId,
                 meeting.joinWebUrl,
                 meeting.start ? new Date(meeting.start).getTime() : undefined,
                 meeting.end ? new Date(meeting.end).getTime() : undefined,
-                3, 3000
+                1, 0
               );
               
               if (pollResult.success && pollResult.vttContent) {
@@ -6741,7 +8326,9 @@ Output valid JSON only.`,
         (Date.now() - _cachedMeetingContent.timestamp) < 30 * 60 * 1000 && // Within 30 minutes
         _cachedMeetingContent.content;
       
-      if (hasCachedMeetingContent) {
+      // In meeting/group chats, prefer the latest transcript in that chat by default.
+      // Cached content is used first only for non-meeting conversations.
+      if (hasCachedMeetingContent && !isMeetingConversation) {
         // Answer from cached content - no Graph API call needed
         console.log(`[MEETING_QA] Answering from cached ${_cachedMeetingContent.contentType} content`);
         const answerPrompt = new ChatPrompt({
@@ -6756,7 +8343,13 @@ ${_cachedMeetingContent.content}
 User question: "${effectiveQuery || activity.text}"`
             }
           ],
-          instructions: `Answer based ONLY on the provided meeting content. If the information is not present, say so clearly. Be concise and direct.`,
+          instructions: `Answer based ONLY on the provided meeting content. If the information is not present, say so clearly. ` +
+            `Format the response in markdown with short readable sections:\n` +
+            `## Direct answer\n` +
+            `## What was said\n` +
+            `- concise bullet points\n` +
+            `## Notes\n` +
+            `Avoid long dense paragraphs.`,
           model: new OpenAIChatModel({
             model: config.azureOpenAIDeploymentName,
             apiKey: config.azureOpenAIKey,
@@ -6799,18 +8392,55 @@ User question: "${effectiveQuery || activity.text}"`
           Array.from(activeCallMap.values()).some(c => c.conversationId === activity.conversation.id);
 
         if (!hasTranscript && isInActiveCall) {
-          console.log(`[MEETING_QA] Active call but no transcript data captured yet`);
+          console.log(`[MEETING_QA] Active call but no transcript data captured yet — polling in progress`);
           const answer =
-            `I'm in the meeting but don't have any spoken-word transcript data yet.\n\n` +
-            `**Why?** The Microsoft Graph API only makes transcript content available after transcription is stopped or the meeting ends. ` +
-            `During an active call, I can detect that transcription is on, but I can't access the live transcript text in real time.\n\n` +
-            `**What you can do:**\n` +
-            `- **Stop transcription** briefly (click ••• → Record & Transcribe → Stop transcription), then **restart** it. ` +
-            `The stopped segment's transcript will become available and I can pull it.\n` +
-            `- **After the meeting ends**, ask me to **transcribe** or **summarize** — the full transcript will be available then.\n` +
-            `- You can also ask me to **read chats** to see what was typed in the meeting chat.`;
+            `I'm live in the meeting and capturing the transcript. No spoken-word content has been received yet.\n\n` +
+            `**This happens when:**\n` +
+            `- Transcription was just started — Teams takes 30–60 s to publish the first transcript chunk\n` +
+            `- No one has spoken yet in the meeting\n\n` +
+            `**Try:** Ask again in a moment — I refresh the transcript every 10 seconds. ` +
+            `You can also ask me to **summarize** or **transcribe** once there's some spoken content.`;
           await send(new MessageActivity(answer).addAiGenerated().addFeedback());
-          console.log(`[SUCCESS] Informed user about live transcript limitation`);
+          console.log(`[SUCCESS] Informed user about transcript capture in progress`);
+        } else if (!hasTranscript && hasCachedMeetingContent) {
+          // Fallback when transcript is temporarily unavailable in this group.
+          console.log(`[MEETING_QA] No transcript available, falling back to cached ${_cachedMeetingContent.contentType}`);
+          const answerPrompt = new ChatPrompt({
+            messages: [
+              {
+                role: 'user',
+                content: `Based on this meeting content, answer the user's question.
+
+Meeting content (${_cachedMeetingContent.contentType}):
+${_cachedMeetingContent.content}
+
+User question: "${effectiveQuery || activity.text}"`
+              }
+            ],
+            instructions: `Answer based ONLY on the provided meeting content. If the information is not present, say so clearly. ` +
+              `Format the response in markdown with short readable sections:\n` +
+              `## Direct answer\n` +
+              `## What was said\n` +
+              `- concise bullet points\n` +
+              `## Notes\n` +
+              `Avoid long dense paragraphs.`,
+            model: new OpenAIChatModel({
+              model: config.azureOpenAIDeploymentName,
+              apiKey: config.azureOpenAIKey,
+              endpoint: config.azureOpenAIEndpoint,
+              apiVersion: '2024-10-21'
+            })
+          });
+
+          const answer = await sendPromptWithTracking(answerPrompt, '', {
+            userId: requesterId,
+            displayName: actorName,
+            meetingId,
+            estimatedInputText: _cachedMeetingContent.content,
+          });
+
+          await send(new MessageActivity(answer.content || "I couldn't find that information in the meeting content.").addAiGenerated().addFeedback());
+          console.log(`[SUCCESS] Meeting question answered from cached fallback content`);
         } else {
           const shared = storage.get(sharedConversationKey) || [];
           const conversationContext = buildConversationContext(shared, 120);
@@ -6832,92 +8462,98 @@ User question: "${effectiveQuery || activity.text}"`
         await send(new MessageActivity('I encountered an error while answering based on meeting context. Please try again.').addAiGenerated());
       }
       } else {
-        // 1:1 chat - try to fetch user's most recent meeting transcript
-        console.log(`[MEETING_QA] 1:1 chat - looking up user's most recent meeting`);
+        // 1:1 chat - answer across recent attended meetings with user-scoped cache first
+        console.log(`[MEETING_QA] 1:1 chat - searching synced transcript cache first`);
         const userId = activity.from.aadObjectId || activity.from.id;
-        
-        const pastMeetings = await graphApiHelper.findPastMeetings(userId, undefined, undefined, 3);
-        
-        if (pastMeetings.success && pastMeetings.meetings.length > 0) {
-          let foundTranscript = false;
-          
-          for (const meeting of pastMeetings.meetings) {
-            const pollResult = await pollForTranscriptReady(
-              meeting.organizerId,
-              meeting.joinWebUrl,
-              meeting.start ? new Date(meeting.start).getTime() : undefined,
-              meeting.end ? new Date(meeting.end).getTime() : undefined,
-              2, // quick check
-              2000
-            );
-            
-            if (pollResult.success && pollResult.vttContent) {
-              const parsed = parseVttToEntries(pollResult.vttContent);
-              if (parsed.length > 0) {
-                console.log(`[MEETING_QA] Found transcript for "${meeting.subject}", answering question`);
-                const transcriptText = parsed.map(e => `${e.speaker}: ${e.text}`).join('\n');
-                
-                const answerPrompt = new ChatPrompt({
-                  messages: [
-                    {
-                      role: 'user',
-                      content: `Based on this meeting transcript from "${meeting.subject}", answer the user's question.
 
-Transcript:
-${transcriptText.slice(0, 15000)}
+        let cachedContexts = await getCachedTranscriptContextsForUser(userId, 8);
 
-User question: "${effectiveQuery || activity.text}"
+        // If cache is empty, trigger an immediate sync pass by checking recent meetings.
+        if (cachedContexts.length === 0) {
+          console.log(`[MEETING_QA] No synced cache found for ${userId}, attempting live fetch from recent meetings`);
+          const pastMeetings = await graphApiHelper.findPastMeetings(userId, undefined, undefined, 10);
 
-Instructions:
-- Synthesize and paraphrase — do NOT copy-paste raw transcript lines or dump verbatim quotes with timestamps
-- Tell the story naturally, as a knowledgeable colleague would explain it
-- Only reference timestamps if the user specifically asks about timing
-- Weave in short key phrases or quotes only when they add flavor, not entire paragraphs
-- Keep it focused and readable — a few well-written paragraphs, not a wall of bullet points
-- If unsure the transcript fully answers the question, mention that briefly at the end`
-                    }
-                  ],
-                  instructions: `You are a friendly meeting assistant. Answer based ONLY on the provided transcript. Be smart about what matters — read the raw transcript, understand it, and give a clear, natural answer. Do NOT dump raw lines with timestamps. Paraphrase and synthesize. Mention the meeting title naturally.`,
-                  model: new OpenAIChatModel({
-                    model: config.azureOpenAIDeploymentName,
-                    apiKey: config.azureOpenAIKey,
-                    endpoint: config.azureOpenAIEndpoint,
-                    apiVersion: '2024-10-21'
-                  })
-                });
-                
-                const answer = await sendPromptWithTracking(answerPrompt, '', {
-                  userId: requesterId,
-                  displayName: actorName,
-                  meetingId,
-                  estimatedInputText: transcriptText.slice(0, 15000),
-                });
-                
-                await send(new MessageActivity(answer.content || "I couldn't find that information in the meeting transcript.").addAiGenerated().addFeedback());
-                
-                // Cache for follow-up questions
-                recordBotResponse(activity.conversation.id, {
-                  content: transcriptText.slice(0, 20000),
-                  contentType: 'transcript',
-                  subject: meeting.subject,
-                  timestamp: Date.now(),
-                });
-                
-                foundTranscript = true;
-                break;
-              }
+          if (pastMeetings.success && pastMeetings.meetings.length > 0) {
+            for (const meeting of pastMeetings.meetings) {
+              const pollResult = await pollForTranscriptReady(
+                meeting.organizerId,
+                meeting.joinWebUrl,
+                meeting.start ? new Date(meeting.start).getTime() : undefined,
+                meeting.end ? new Date(meeting.end).getTime() : undefined,
+                1, 0
+              );
+
+              if (!pollResult.success || !pollResult.vttContent) continue;
+
+              const transcriptId = `${meeting.subject.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30)}_${new Date(meeting.end || meeting.start || Date.now()).getTime()}`;
+              await saveTranscriptToFileFromVtt(
+                userId,
+                pollResult.vttContent,
+                transcriptId,
+                transcriptId,
+                meeting.end || meeting.start || new Date().toISOString(),
+                {
+                  organizerId: meeting.organizerId,
+                  meetingSubject: meeting.subject,
+                }
+              );
             }
           }
-          
-          if (!foundTranscript) {
-            await send(new MessageActivity(
-              `I couldn't find any transcripts for your recent meetings. To answer questions about a meeting, I need the transcript to be available.\n\n` +
-              `**Tip:** Ask me to **summarize** your last meeting first, then follow up with questions.`
-            ).addAiGenerated().addFeedback());
-          }
+
+          cachedContexts = await getCachedTranscriptContextsForUser(userId, 8);
+        }
+
+        if (cachedContexts.length > 0) {
+          const transcriptBundle = cachedContexts
+            .map((ctx, idx) => `Meeting ${idx + 1}: ${ctx.meetingSubject} (${new Date(ctx.createdDateTime).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })})\n${ctx.content.slice(0, 9000)}`)
+            .join('\n\n-----\n\n');
+          const meetingTitles = cachedContexts
+            .map((ctx) => `- ${ctx.meetingSubject} (${new Date(ctx.createdDateTime).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`)
+            .slice(0, 8)
+            .join('\n');
+
+          const multiMeetingPrompt = new ChatPrompt({
+            messages: [
+              {
+                role: 'user',
+                content:
+                  `User question: "${effectiveQuery || activity.text}"\n\n` +
+                  `Recent meeting transcripts (last week):\n${transcriptBundle}\n\n` +
+                  `Available meeting titles:\n${meetingTitles}`
+              }
+            ],
+            instructions:
+              `You are a practical meeting assistant. Answer the question using ONLY the provided transcripts. ` +
+              `If the answer clearly appears in one or more meetings, respond naturally and mention the meeting title(s). ` +
+              `If multiple meetings could match and confidence is low, ask one concise clarification question asking for meeting title/date, and include 3-6 candidate titles from the list. ` +
+              `Never invent details. Keep it natural and concise.`,
+            model: new OpenAIChatModel({
+              model: config.azureOpenAIDeploymentName,
+              apiKey: config.azureOpenAIKey,
+              endpoint: config.azureOpenAIEndpoint,
+              apiVersion: '2024-10-21'
+            })
+          });
+
+          const answer = await sendPromptWithTracking(multiMeetingPrompt, '', {
+            userId: requesterId,
+            displayName: actorName,
+            meetingId,
+            estimatedInputText: transcriptBundle.slice(0, 20000),
+          });
+
+          const responseText = answer.content || `I couldn't find a reliable answer from your recent meeting transcripts.`;
+          await send(new MessageActivity(responseText).addAiGenerated().addFeedback());
+
+          recordBotResponse(activity.conversation.id, {
+            content: transcriptBundle.slice(0, 20000),
+            contentType: 'transcript',
+            subject: `Recent meetings (${cachedContexts.length})`,
+            timestamp: Date.now(),
+          });
         } else {
           await send(new MessageActivity(
-            `I couldn't find any recent meetings on your calendar. Ask me about a specific meeting or try summarizing your last meeting first.`
+            `I couldn't find transcript content from your meetings in the last week yet. I can keep syncing in the background, or you can ask me to transcribe/summarize a specific meeting title.`
           ).addAiGenerated().addFeedback());
         }
       }
@@ -6950,6 +8586,10 @@ Instructions:
         
         const mailboxUserId = activity.from.aadObjectId || activity.from.id;
         const cachedInboxCtx = inboxContextMap.get(activity.conversation.id);
+        const inboxQueryText = (effectiveQuery || activity.text || '').trim();
+        const hasExplicitInboxReformatCue =
+          !!agentDecision.parameters?.formatStyle ||
+          /\b(reformat|rewrite|format|bullet|bullets|shorter|longer|concise|brief|detailed|expand|compress)\b/i.test(inboxQueryText);
 
         // ── Fast path: reply_email with a cached matched message ─────────────────
         if (
@@ -6997,7 +8637,7 @@ Instructions:
         }
 
         // ── Reformat path: user wants to reformat last inbox content ────────────
-        if (agentDecision.parameters?.isReformatRequest && cachedInboxCtx?.lastMessages?.length) {
+        if (agentDecision.parameters?.isReformatRequest && hasExplicitInboxReformatCue && cachedInboxCtx?.lastMessages?.length) {
           console.log(`[INBOX] Reformat request with formatStyle=${agentDecision.parameters.formatStyle}`);
           const formatInstruction = agentDecision.parameters.formatStyle === 'shorter' 
             ? 'Make this MUCH shorter - 2 paragraphs maximum'
@@ -7035,7 +8675,8 @@ Instructions:
         // ── Follow-up question path: answer questions about cached email content ────
         const isFollowUpQuestion = cachedInboxCtx?.lastMessages?.length &&
           cachedInboxCtx.updatedAt > Date.now() - 10 * 60 * 1000 &&
-          /\b(what did|who said|tell me|what about|more about|explain|details|focus|priority|mentioned)\b/i.test(effectiveQuery || '');
+          ((agentDecision.parameters?.isReformatRequest && !hasExplicitInboxReformatCue) ||
+            /\b(what did|who said|tell me|what about|more about|explain|details|focus|priority|prioritize|which one|what should i do first|mentioned)\b/i.test(inboxQueryText));
         
         if (isFollowUpQuestion) {
           console.log(`[INBOX] Follow-up question about cached email content`);
@@ -7090,9 +8731,11 @@ Instructions:
           return;
         }
 
-        // ── Normal path: fetch ALL inbox messages, let LLM find relevant ones ────
+        // ── Normal path: fetch inbox messages with server-side sender/date filters ────
         const allInboxMessages = await graphApiHelper.getInboxMessages(mailboxUserId, {
-          top: 20, // Fetch more messages for LLM to search through
+          top: inboxRequest.maxResults,
+          senderName: inboxRequest.senderFilter,
+          dateFilter: inboxRequest.dateFilter,
         });
         console.log(`[INBOX] Fetched ${allInboxMessages.length} total messages`);
 
@@ -7684,8 +9327,7 @@ Respond with JSON only:
                   meetingLookup.meeting.joinWebUrl,
                   meetingLookup.meeting.start ? new Date(meetingLookup.meeting.start).getTime() : undefined,
                   meetingLookup.meeting.end ? new Date(meetingLookup.meeting.end).getTime() : undefined,
-                  3,
-                  3000
+                  1, 0
                 );
                 if (pollResult.vttContent) {
                   transcriptParsed = parseVttToEntries(pollResult.vttContent);
@@ -7716,16 +9358,16 @@ Respond with JSON only:
             const MAX_RETRIES = 3;
             const RETRY_DELAY_MS = 5000;
 
-            for (let attempt = 0; attempt < MAX_RETRIES && (!transcriptResult.text || transcriptResult.source === 'none'); attempt++) {
+            for (let attempt = 0; attempt < MAX_RETRIES && (!transcriptResult.text || transcriptResult.source === 'none' || transcriptResult.source === 'capturing'); attempt++) {
               if (attempt === 0) {
-                await send(new MessageActivity(`Waiting for Teams to prepare the transcript... This may take a moment.`).addAiGenerated());
+                await send(new MessageActivity(`Waiting for the transcript to be captured... Checking every 10 seconds.`).addAiGenerated());
               }
-              console.log(`[EMAIL] No current-meeting transcript found, waiting for Teams (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+              console.log(`[EMAIL] No transcript yet (source=${transcriptResult.source}), waiting for poll (attempt ${attempt + 1}/${MAX_RETRIES})...`);
               await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
               transcriptResult = await getTranscriptWithContext(activity.conversation.id);
             }
 
-            if (transcriptResult.text && transcriptResult.source !== 'none') {
+            if (transcriptResult.text && transcriptResult.source !== 'none' && transcriptResult.source !== 'capturing') {
               console.log(`[EMAIL] Found transcript from source: ${transcriptResult.source} (${transcriptResult.entryCount} entries)`);
               const memoryEntries = liveTranscriptMap.get(activity.conversation.id);
               transcriptEntries = memoryEntries?.filter(e => e.isFinal) || [];
@@ -7927,6 +9569,310 @@ Respond with JSON: {"subject": "clear email subject", "body": "complete email bo
       return;
     }
 
+    // Handle planner task intent
+    if (detectedIntent === 'check_planner_tasks') {
+      console.log(`[ACTION] Processing check_planner_tasks request`);
+      await sendTypingIndicator(send);
+      try {
+        const userId = activity.from.aadObjectId || activity.from.id;
+        const plannerResult = await graphApiHelper.getPlannerTasksForUser(userId, 150);
+
+        if (!plannerResult.success) {
+          const errorText = plannerResult.error || 'Unknown Planner access issue';
+          const realisticFailure =
+            `I couldn't reliably fetch your **Planner tasks** right now.\n\n` +
+            `What I know: ${errorText}\n\n` +
+            `Most common fix is Graph permissions for Planner tasks (for example delegated **Tasks.Read** / Planner task access with user consent). ` +
+            `Once enabled, ask again: **check my planner tasks**.`;
+          await send(new MessageActivity(realisticFailure).addAiGenerated().addFeedback());
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+
+        const allTasks = (plannerResult.tasks || []) as PlannerTaskSummary[];
+        const openTasks = allTasks
+          .filter((t) => !t.completedDateTime && (t.percentComplete ?? 0) < 100)
+          .slice();
+
+        if (openTasks.length === 0) {
+          const emptyMsg = `You currently have **no open Planner tasks**. Nice work.`;
+          await send(new MessageActivity(emptyMsg).addAiGenerated().addFeedback());
+          recordBotResponse(activity.conversation.id, {
+            content: emptyMsg,
+            contentType: 'planner_tasks',
+            subject: `Planner tasks for ${new Date().toISOString().split('T')[0]}`,
+            timestamp: Date.now(),
+          });
+          storage.set(conversationKey, messages);
+          storage.set(sharedConversationKey, sharedMessages);
+          storage.set(llmConversationKey, llmMessages);
+          return;
+        }
+
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+        const q = (effectiveQuery || activity.text || '').toLowerCase();
+        const wantsPriority = /priorit|which one|what should i do first|focus first|urgent|top task/.test(q);
+        const wantsSingleRecommendation = /which one|one task|single|first one|just one|give me one/.test(q);
+
+        const parseDue = (t: PlannerTaskSummary): Date | null => {
+          if (!t.dueDateTime) return null;
+          const d = new Date(t.dueDateTime);
+          return isNaN(d.getTime()) ? null : d;
+        };
+
+        const formatDue = (d: Date | null): string => {
+          if (!d) return 'No due date';
+          return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        };
+
+        const formatTask = (t: PlannerTaskSummary): string => {
+          const due = parseDue(t);
+          const plan = t.planTitle ? ` | Plan: ${t.planTitle}` : '';
+          return `- **${t.title}** — Due: ${formatDue(due)}${plan}`;
+        };
+
+        const formatTaskInline = (t: PlannerTaskSummary): string => {
+          const due = parseDue(t);
+          const plan = t.planTitle ? ` (${t.planTitle})` : '';
+          return `**${t.title}**${plan} — due ${formatDue(due)}`;
+        };
+
+        const overdue: PlannerTaskSummary[] = [];
+        const dueToday: PlannerTaskSummary[] = [];
+        const upcoming: PlannerTaskSummary[] = [];
+        const noDue: PlannerTaskSummary[] = [];
+
+        for (const t of openTasks) {
+          const due = parseDue(t);
+          if (!due) {
+            noDue.push(t);
+            continue;
+          }
+          if (due < today) overdue.push(t);
+          else if (due >= today && due < tomorrow) dueToday.push(t);
+          else upcoming.push(t);
+        }
+
+        const sortByDueAsc = (a: PlannerTaskSummary, b: PlannerTaskSummary) => {
+          const ad = parseDue(a)?.getTime() || Number.MAX_SAFE_INTEGER;
+          const bd = parseDue(b)?.getTime() || Number.MAX_SAFE_INTEGER;
+          return ad - bd;
+        };
+        overdue.sort(sortByDueAsc);
+        dueToday.sort(sortByDueAsc);
+        upcoming.sort(sortByDueAsc);
+
+        // Nuanced urgency model for realistic recommendations:
+        // due today first, then overdue (most recent overdue first), then upcoming, then no due date.
+        const overdueRecentFirst = [...overdue].sort((a, b) => {
+          const ad = parseDue(a)?.getTime() || 0;
+          const bd = parseDue(b)?.getTime() || 0;
+          return bd - ad;
+        });
+        const prioritized = [...dueToday, ...overdueRecentFirst, ...upcoming, ...noDue];
+
+        let responseText = '';
+        const topPriority = prioritized[0] || null;
+        const priorityPreview = prioritized.slice(0, 8).map((t, idx) => `${idx + 1}. ${formatTaskInline(t)}`).join('\n');
+        const overdueList = overdue.slice(0, 10).map(formatTask).join('\n') || '- None';
+        const dueTodayList = dueToday.slice(0, 10).map(formatTask).join('\n') || '- None';
+        const upcomingList = upcoming.slice(0, 12).map(formatTask).join('\n') || '- None';
+        const noDueList = noDue.slice(0, 8).map(formatTask).join('\n') || '- None';
+
+        const plannerResponsePrompt = new ChatPrompt({
+          messages: [
+            {
+              role: 'user',
+              content:
+                `User asked: "${effectiveQuery || activity.text || ''}"\n\n` +
+                `Open task count: ${openTasks.length}\n` +
+                `Mode hints: wantsPriority=${wantsPriority}, wantsSingleRecommendation=${wantsSingleRecommendation}\n\n` +
+                `Top priority candidate: ${topPriority ? formatTaskInline(topPriority) : 'None'}\n\n` +
+                `Priority preview:\n${priorityPreview || '- None'}\n\n` +
+                `Overdue:\n${overdueList}\n\n` +
+                `Due today:\n${dueTodayList}\n\n` +
+                `Upcoming:\n${upcomingList}\n\n` +
+                `No due date:\n${noDueList}`,
+            }
+          ],
+          instructions:
+            `You are Mela, a natural productivity assistant.\n` +
+            `Write a human, conversational response that is concise and practical, never robotic.\n` +
+            `Rules:\n` +
+            `1) Start with the direct answer in the first sentence.\n` +
+            `2) If wantsPriority=true and wantsSingleRecommendation=true, recommend ONE task first and explain why in plain language, then list up to 3 next tasks.\n` +
+            `3) If wantsPriority=true and wantsSingleRecommendation=false, provide a short ranked list (max 8).\n` +
+            `4) If wantsPriority=false, provide grouped sections (Overdue, Due today, Upcoming, No due date) but keep wording natural.\n` +
+            `5) Do not invent tasks or dates. Use only provided data.\n` +
+            `6) Avoid repeating the same opener/style as prior messages.\n` +
+            `7) Output markdown only.`,
+          model: new OpenAIChatModel({
+            model: config.azureOpenAIDeploymentName,
+            apiKey: config.azureOpenAIKey,
+            endpoint: config.azureOpenAIEndpoint,
+            apiVersion: '2024-10-21',
+          }),
+        });
+
+        const plannerResponse = await sendPromptWithTracking(plannerResponsePrompt, '', {
+          userId: requesterId,
+          displayName: actorName,
+          meetingId,
+          estimatedInputText: `${effectiveQuery || activity.text || ''}\nplanner tasks`,
+        });
+
+        responseText = (plannerResponse.content || '').trim();
+        if (!responseText) {
+          if (topPriority) {
+            responseText = `Start with ${formatTaskInline(topPriority)}. After that, continue with the next closest due tasks.`;
+          } else {
+            responseText = `I can list your tasks, but I do not have enough due-date detail to rank them confidently.`;
+          }
+        }
+
+        await send(new MessageActivity(responseText).addAiGenerated().addFeedback());
+        recordBotResponse(activity.conversation.id, {
+          content: responseText,
+          contentType: 'planner_tasks',
+          subject: `Planner tasks for ${new Date().toISOString().split('T')[0]}`,
+          timestamp: Date.now(),
+        });
+        console.log(`[SUCCESS] Planner tasks intent processed`);
+      } catch (error: any) {
+        console.error(`[ERROR_CHECK_PLANNER_TASKS]`, error);
+        await send(new MessageActivity(
+          `I couldn't reliably fetch your **Planner tasks** right now. Please try again in a moment. ` +
+          `If this persists, verify Planner permissions are granted for this app.`
+        ).addAiGenerated().addFeedback());
+      }
+
+      storage.set(conversationKey, messages);
+      storage.set(sharedConversationKey, sharedMessages);
+      storage.set(llmConversationKey, llmMessages);
+      return;
+    }
+
+    // Handle prepare_meeting intent - fetch today's upcoming meetings and give prep advice
+    if (detectedIntent === 'prepare_meeting') {
+      console.log(`[ACTION] Processing prepare_meeting request`);
+      await sendTypingIndicator(send);
+      try {
+        const now = new Date();
+        const todayDate = now.toISOString().split('T')[0];
+
+        const userId = activity.from.aadObjectId || activity.from.id;
+        const calendarResult = await graphApiHelper.getCalendarEvents(
+          userId,
+          now.toISOString(),
+          `${todayDate}T23:59:59.999Z`
+        );
+
+        const userTimezone = calendarResult.timezone || 'UTC';
+
+        const formatTime = (dtStr?: string): string => {
+          if (!dtStr) return '';
+          const m = dtStr.match(/T(\d{2}):(\d{2})/);
+          if (!m) return '';
+          let h = parseInt(m[1], 10);
+          const min = m[2];
+          const ampm = h >= 12 ? 'PM' : 'AM';
+          if (h === 0) h = 12;
+          else if (h > 12) h -= 12;
+          return min === '00' ? `${h} ${ampm}` : `${h}:${min} ${ampm}`;
+        };
+
+        const upcomingEvents = (calendarResult.events || [])
+          .filter((evt: any) => !evt.isCancelled)
+          .slice(0, 5);
+
+        if (!calendarResult.success || upcomingEvents.length === 0) {
+          await send(new MessageActivity(
+            `I checked your calendar but you don't have any upcoming meetings today. ` +
+            `Once you have a meeting on your calendar, just ask me again and I'll help you get ready for it!`
+          ).addAiGenerated().addFeedback());
+        } else {
+          const eventsDetail = upcomingEvents.map((evt: any) => {
+            const attendeeNames = (evt.attendees || [])
+              .map((a: any) => a.emailAddress?.name || a.emailAddress?.address || 'Unknown')
+              .filter((n: string) => n !== (userName || ''))
+              .join(', ');
+            const startTime = formatTime(evt.start?.dateTime);
+            const endTime = formatTime(evt.end?.dateTime);
+            const joinUrl = evt.onlineMeetingUrl || evt.onlineMeeting?.joinUrl || '';
+            return [
+              `Meeting: "${evt.subject || 'Untitled'}"`,
+              `Time: ${startTime}–${endTime}`,
+              `Organizer: ${evt.organizer?.emailAddress?.name || 'Unknown'}`,
+              attendeeNames ? `Attendees: ${attendeeNames}` : '',
+              evt.location?.displayName ? `Location: ${evt.location.displayName}` : '',
+              joinUrl ? `Join link: ${joinUrl}` : '',
+            ].filter(Boolean).join('\n');
+          }).join('\n\n---\n\n');
+
+          const prepPrompt = new ChatPrompt({
+            messages: [
+              {
+                role: 'user',
+                content:
+                  `Help ${userName || 'the user'} prepare for their upcoming meeting(s) today.\n\n` +
+                  `User's request: "${effectiveQuery || activity.text}"\n\n` +
+                  `Today's upcoming meetings (times in ${userTimezone}):\n\n` +
+                  `${eventsDetail}\n\n` +
+                  `For each meeting provide:\n` +
+                  `- Practical prep actions based on the meeting title\n` +
+                  `- Who to expect and what perspectives they may bring\n` +
+                  `- Logistics: time, how to join (link/location)\n` +
+                  `- Any quick tips to make the meeting productive\n` +
+                  `Keep it concise, warm, and actionable.`,
+              },
+            ],
+            instructions:
+              `You are a friendly meeting preparation assistant. Give practical, specific advice based on the meeting details. ` +
+              `Format with a clear section per meeting if there are multiple. Use **bold** for meeting titles. ` +
+              `Keep each section brief — bullet points work well. Sound helpful, not robotic.`,
+            model: new OpenAIChatModel({
+              model: config.azureOpenAIDeploymentName,
+              apiKey: config.azureOpenAIKey,
+              endpoint: config.azureOpenAIEndpoint,
+              apiVersion: '2024-10-21',
+            }),
+          });
+
+          const prepResponse = await sendPromptWithTracking(prepPrompt, '', {
+            userId: requesterId,
+            displayName: actorName,
+            meetingId,
+            estimatedInputText: `${effectiveQuery || activity.text || ''}\nmeeting prep`,
+          });
+          const prepContent = prepResponse.content || 'Happy to help you prepare!';
+          await send(new MessageActivity(prepContent).addAiGenerated().addFeedback());
+
+          recordBotResponse(activity.conversation.id, {
+            content: prepContent,
+            contentType: 'prepare_meeting',
+            subject: `Meeting preparation for today`,
+            timestamp: Date.now(),
+          });
+        }
+
+        console.log(`[SUCCESS] prepare_meeting intent processed`);
+      } catch (error: any) {
+        console.error(`[ERROR_PREPARE_MEETING]`, error);
+        await send(new MessageActivity(
+          `Sorry, I ran into an issue fetching your calendar. Could you try again?`
+        ).addAiGenerated().addFeedback());
+      }
+
+      storage.set(conversationKey, messages);
+      storage.set(sharedConversationKey, sharedMessages);
+      storage.set(llmConversationKey, llmMessages);
+      return;
+    }
+
     // Handle check calendar intent - LLM extracts parameters and generates response
     if (detectedIntent === 'check_calendar') {
       console.log(`[ACTION] Processing check_calendar request`);
@@ -7956,13 +9902,15 @@ Next week starts: ${nextWeekStart.toISOString().split('T')[0]}`;
               content: `Analyze this calendar request and extract date/time parameters.
 
 User request: "${effectiveQuery || activity.text}"
+Current user's name: ${userName || actorName || 'unknown'} (this IS the user whose calendar you're checking)
 
 ${dateContext}
 
 IMPORTANT RULES:
-1. You can ONLY check the CURRENT USER's calendar - not anyone else's
-2. If the user asks about another person's calendar (e.g., "Armely's meetings", "what does John have"), set "other_person_requested": true
-3. Extract dates ONLY for the current user's meetings
+1. You are checking the calendar of "${userName || actorName || 'the user'}" — this is the CURRENT USER, not another person
+2. Only set "other_person_requested": true if they ask about someone with a DIFFERENT name (e.g., "what does Sarah have", "John's meetings")
+3. Do NOT flag "${userName || actorName || 'the user'}" as another person — it is always the current user
+4. Extract dates ONLY for the current user's meetings
 
 Interpret relative dates correctly:
 - "today" / "today's meetings" = ${today.toISOString().split('T')[0]}
@@ -8096,12 +10044,14 @@ Respond naturally to their question about their schedule.${otherPersonRequested 
 CRITICAL: The times shown in the event list are ALREADY in the user's local timezone and pre-formatted. Use them EXACTLY as given. Do NOT recalculate, convert, or adjust any times. Just relay them.
 
 RESPONSE STYLE:
+- Start with the direct answer in one sentence
 - Be conversational and warm, not robotic or templated
-- Vary your language - don't use the same format every time
-- Use **bold** for meeting titles to help them stand out
+- Vary wording and sentence rhythm; avoid repeated canned openers
+- Use **bold** for meeting titles when helpful
 - Keep it brief and easy to scan
-- Sound like a helpful human, not a form or report
+- Sound like a helpful human, not a report template
 - Mention cancelled events briefly so the user knows they're cleared
+- If no matching events are found, say so plainly and suggest one practical next step
 
 Examples of good responses:
 - "You've got a busy afternoon! **Project Sync** at 2 PM, then **1:1 with Sarah** at 3:30 PM."
@@ -8370,6 +10320,8 @@ Generate a brief, friendly apology and suggest they try again. Be conversational
     console.error(error);
     await send("The agent encountered an error or bug.");
     await send("To continue to run this agent, please fix the agent source code.");
+  } finally {
+    stopTypingHeartbeat();
   }
 });
 
@@ -8427,17 +10379,19 @@ app.on('conversationUpdate', async ({ send: sendActivity, activity }) => {
       storage.set(greetingSentKey, Date.now());
       
       try {
-        // Detect if this is a meeting chat
-        const isMeetingChat = activity.conversation.isGroup && 
-                              (activity.conversation.id.includes('meeting') || 
-                               activity.conversation.id.includes('call') ||
-                               activity.channelId === 'msteams');
-        
-        console.log(`[MEETING_DETECTION] Detected as meeting: ${isMeetingChat}`);
+        // Detect if this is a meeting chat — prefer channelData.meeting, fall back to conversation ID pattern
+        const convId = activity.conversation?.id || '';
+        const isMeetingChat = (
+          !!activity.channelData?.meeting?.id ||
+          convId.includes('meeting_') ||
+          (activity.conversation?.isGroup && convId.includes('call'))
+        );
+
+        console.log(`[MEETING_DETECTION] Detected as meeting: ${isMeetingChat}, channelData.meeting: ${JSON.stringify(activity.channelData?.meeting || null)}`);
 
         const greeting = isMeetingChat
           ? `Hello, **${config.botDisplayName}** here! I specialize in meeting transcription.
-            
+
 **What I can do:**
 • **Join Call** — I'll join and capture the conversation live
 • **Transcribe** — Fetch the meeting transcript from Teams
@@ -8458,8 +10412,37 @@ Start a meeting and invite me, or ask about a past meeting!`;
 
         const greetingActivity = new MessageActivity(greeting).addAiGenerated();
         await send(greetingActivity);
-        
+
         console.log(`[SUCCESS] Sent greeting to ${isMeetingChat ? 'meeting' : 'conversation'}`);
+
+        // Send in-meeting notification bubble when bot joins a meeting.
+        // This shows a floating card in the Teams meeting UI (not a chat message).
+        if (isMeetingChat) {
+          try {
+            const teamsAppId = process.env.TEAMS_APP_ID || '';
+            const botDomain = process.env.BOT_DOMAIN || '';
+            if (teamsAppId && botDomain) {
+              const contentUrl = encodeURIComponent(`https://${botDomain}/meeting-notification`);
+              const bubbleUrl = `https://teams.microsoft.com/l/bubble/${teamsAppId}?url=${contentUrl}&height=180&width=300&title=Mela+AI`;
+              await send({
+                type: 'message',
+                text: '',
+                channelData: {
+                  notification: {
+                    alertInMeeting: true,
+                    externalResourceUrl: bubbleUrl,
+                  },
+                },
+              });
+              console.log(`[IN_MEETING_NOTIF] Sent bubble notification for meeting conversation: ${convId}`);
+            } else {
+              console.warn(`[IN_MEETING_NOTIF] Missing TEAMS_APP_ID or BOT_DOMAIN — bubble not sent`);
+            }
+          } catch (bubbleErr: any) {
+            // Non-fatal — bot may not have meeting extension capabilities installed yet
+            console.warn(`[IN_MEETING_NOTIF] Bubble send failed (non-fatal): ${bubbleErr?.message || bubbleErr}`);
+          }
+        }
 
         // NOTE: We no longer auto-join calls automatically on bot add.
         // Auto-join caused confusion when users wanted to ask about PAST meetings.
@@ -9270,6 +11253,77 @@ app.http.get('/api/admin/errors', async (req: any, res: any) => {
   } catch (error) {
     logAdminError('server', '/api/admin/errors', error);
     res.status(500).json({ error: 'failed_to_get_admin_errors' });
+  }
+});
+
+// ── TEST: Send a sample task message to personal chats (dev/test only) ──────
+app.http.post('/api/admin/test/send-task', async (req: any, res: any) => {
+  try {
+    const adminSession = await requireAdminAuth(req, res, true);
+    if (!adminSession) return;
+
+    const targetUserId = (req?.body?.userId || '').toString().trim();
+    // Allow explicit conversationId+serviceUrl override for when personalConversationMap is empty
+    const explicitConvId = (req?.body?.conversationId || '').toString().trim();
+    const explicitSvcUrl = (req?.body?.serviceUrl || '').toString().trim();
+    const results: Array<{ userId: string; conversationId: string; sent: boolean }> = [];
+
+    const sampleTasks: PendingTaskItem[] = [
+      { id: 1, title: 'Review the Q2 budget proposal', dueDate: undefined, skipped: false },
+      { id: 2, title: 'Follow up with the design team on brand guidelines', dueDate: new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10), skipped: false },
+      { id: 3, title: 'Schedule a 1:1 with Edgar before end of week', dueDate: undefined, skipped: false },
+    ];
+
+    // If explicit conversationId+serviceUrl+userId provided, use them directly
+    if (explicitConvId && explicitSvcUrl && targetUserId) {
+      const card = buildMeetingTasksAdaptiveCard('Test Agent New (sample)', 'there', sampleTasks);
+      const sent = await graphApiHelper.sendProactiveCard(explicitSvcUrl, explicitConvId, card);
+      res.json({ success: true, results: [{ userId: targetUserId, conversationId: explicitConvId, sent }] });
+      return;
+    }
+
+    const tenantId = process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID || '';
+    const defaultSvcUrl = 'https://smba.trafficmanager.net/teams/';
+
+    const userIds: string[] = targetUserId
+      ? [targetUserId]
+      : [...personalConversationMap.keys()];
+
+    // If no cached refs and no targetUserId, fall back to known users from admin stats
+    if (!userIds.length) {
+      const stats = loadBotAdminStats();
+      userIds.push(...Object.keys(stats.users || {}));
+    }
+
+    for (const userId of userIds) {
+      let ref = personalConversationMap.get(userId);
+      if (!ref) {
+        // Try Teams App Installation API first (returns the real 1:1 bot chat, not a meeting space)
+        let convId = await graphApiHelper.getPersonalBotChatId(userId);
+        if (!convId) convId = await graphApiHelper.getOrCreatePersonalConversation(userId, tenantId, defaultSvcUrl);
+        if (!convId) { console.log(`[TEST_TASK] Could not resolve personal chat for ${userId}`); continue; }
+        ref = { userId, conversationId: convId, serviceUrl: defaultSvcUrl, updatedAt: Date.now() };
+        cachePersonalConversationReference(userId, convId, defaultSvcUrl);
+      }
+
+      const card = buildMeetingTasksAdaptiveCard('Test Agent New (sample)', 'there', sampleTasks);
+      const sent = await graphApiHelper.sendProactiveCard(ref.serviceUrl, ref.conversationId, card);
+      results.push({ userId, conversationId: ref.conversationId, sent });
+    }
+
+    if (!results.length) {
+      res.status(404).json({
+        error: 'no_personal_chat_found',
+        hint: 'The bot could not resolve any personal 1:1 chat IDs. Please send any message to the bot in your Teams personal chat (1:1), then call this endpoint again. The conversation ID will be remembered permanently after that.',
+        knownUsers: [...personalConversationMap.keys()],
+      });
+      return;
+    }
+
+    res.json({ success: true, results });
+  } catch (error) {
+    logAdminError('server', '/api/admin/test/send-task', error);
+    res.status(500).json({ error: 'failed_to_send_test_task' });
   }
 });
 
@@ -10636,7 +12690,9 @@ app.http.post('/api/calls', async (req: any, res: any) => {
               callEntry.organizerId,
               callEntry.joinWebUrl,
               undefined,
-              { startedAt: callEntry.establishedAt }
+              { startedAt: callEntry.establishedAt },
+              callId,
+              callEntry.onlineMeetingId
             );
           }
           cancelPendingJoin(callEntry.conversationId);
@@ -10660,7 +12716,11 @@ app.http.post('/api/calls', async (req: any, res: any) => {
               callEntry.establishedAt || Date.now()
             );
           }
-          
+
+          // Trigger recorder to start watching for the MP4 (Direction 1: TS → .NET)
+          // Retry for a short window because onlineMeetingId can arrive after call establishment.
+          void triggerRecorderEnableForCall(callId, 1);
+
           await graphApiHelper.sendProactiveMessage(
             callEntry.serviceUrl,
             callEntry.conversationId,
@@ -10670,7 +12730,8 @@ app.http.post('/api/calls', async (req: any, res: any) => {
       } else if (callState === 'terminated') {
         const callEntry = activeCallMap.get(callId);
         const conversationId = callToConversationMap.get(callId);
-        stopLiveTranscriptPolling(callId);
+        // Switch to post-meeting grace polling instead of hard-stop — Graph API has 2-3 min lag
+        stopLiveTranscriptPolling(callId, { postMeetingGrace: true });
         
         // Capture call timing before we delete the entry
         const callStartedAt = callEntry?.establishedAt || Date.now();
@@ -10678,6 +12739,8 @@ app.http.post('/api/calls', async (req: any, res: any) => {
         
         activeCallMap.delete(callId);
         callToConversationMap.delete(callId);
+        recorderEnableInFlightCalls.delete(callId);
+        recorderEnableCompletedCalls.delete(callId);
         console.log(`[CALLS_WEBHOOK] Call TERMINATED - bot left the meeting (duration: ${(callEndedAt - callStartedAt) / 1000}s)`);
 
         // Save any live transcript data captured during the call BEFORE cleaning up sessions
@@ -10707,13 +12770,16 @@ app.http.post('/api/calls', async (req: any, res: any) => {
           const svcUrl = callEntry.serviceUrl;
           const convId = conversationId;
 
-          // --- IMMEDIATE: Use live transcript data if available ---
+          // --- IMMEDIATE: Use live transcript data captured during THIS call only ---
+          // Read entries before any cleanup — liveTranscriptMap was reset to [] at call establishment
+          // and only contains entries fetched during this specific session.
           const liveData = liveTranscriptMap.get(convId)?.filter(e => e.isFinal) || [];
+          const durationSec = Math.round((callEndedAt - callStartedAt) / 1000);
+          console.log(`[POST_MEETING] Call ended: liveEntries=${liveData.length}, durationSec=${durationSec}`);
+
           if (liveData.length > 0) {
-            console.log(`[POST_MEETING] Using ${liveData.length} live transcript entries for immediate summary`);
+            console.log(`[POST_MEETING] Generating summary from ${liveData.length} live entries`);
             try {
-              // Always generate a FRESH summary from the current call's transcript
-              // (never reuse a cached summary — it may be from a previous call session)
               const autoMeetingTitle = await resolveDisplayMeetingTitle(convId, orgId, getCachedMeetingContext(convId)?.subject);
               const summary = await generateFormattedSummaryHtml(liveData, autoMeetingTitle, 'Participant', [], new Date(callStartedAt));
 
@@ -10724,7 +12790,7 @@ app.http.post('/api/calls', async (req: any, res: any) => {
               );
 
               const emailNote = emailResult.sentCount > 0
-                ? `\n\n---\n*I've also emailed this summary to **${emailResult.sentCount} participant(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.*`
+                ? `\n\n---\nI have sent the meeting summary to **${emailResult.sentCount} participant(s)** by email${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`
                 : '';
 
               await graphApiHelper.sendProactiveMessage(
@@ -10735,73 +12801,80 @@ app.http.post('/api/calls', async (req: any, res: any) => {
               if (emailResult.sentCount > 0) {
                 console.log(`[POST_MEETING_EMAIL] Emailed summary to ${emailResult.sentCount} participant(s)`);
               }
+
+              // Send per-person action items to personal chats
+              const liveTitle = await resolveDisplayMeetingTitle(convId, orgId, getCachedMeetingContext(convId)?.subject);
+              void sendMeetingTasksToParticipants(convId, liveData, liveTitle, process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID || '', svcUrl);
             } catch (summaryErr) {
-              console.error(`[POST_MEETING_SUMMARY_ERROR] Failed to generate immediate summary:`, summaryErr);
+              console.error(`[POST_MEETING_SUMMARY_ERROR] Failed to generate summary:`, summaryErr);
             }
           } else {
-            // --- FALLBACK: No live data — retry via Graph API with delays ---
-            console.log(`[POST_MEETING_TRANSCRIPT] No live transcript data — will retry via Graph API for organizer=${orgId}`);
+            // liveTranscriptMap is empty — but the background worker may have cached the
+            // transcript to disk periodically while the call was live. Check it now.
+            const onlineMeetingId = callEntry.onlineMeetingId || '';
+            let bgEntries: TranscriptEntry[] = [];
 
-            const attemptFetch = async (attempt: number, maxAttempts: number) => {
-              try {
-                console.log(`[POST_MEETING_TRANSCRIPT] Attempt ${attempt}/${maxAttempts}...`);
-                const postMeetingFetch = await fetchTranscriptCacheFirst(
-                  orgId, webUrl, callStartedAt, undefined
-                );
-                if (postMeetingFetch.entries.length > 0) {
-                  const parsed = postMeetingFetch.entries;
-                  console.log(`[POST_MEETING_TRANSCRIPT] Got ${parsed.length} entries (fromCache=${postMeetingFetch.fromCache})`);
-                  liveTranscriptMap.set(convId, parsed);
-                  saveTranscriptToFile(convId);
+            if (onlineMeetingId) {
+              // Only use background cache entries created within 1 hour of call start
+              // (guards against stale previous-occurrence data for recurring meetings)
+              const freshMetas = getCachedTranscriptMeta(onlineMeetingId)
+                .filter((m) => new Date(m.createdDateTime).getTime() >= callStartedAt - 60 * 60 * 1000)
+                .sort((a, b) => new Date(b.createdDateTime).getTime() - new Date(a.createdDateTime).getTime());
 
-                  // Always generate fresh summary from the current transcript
-                  const autoMeetingTitle = await resolveDisplayMeetingTitle(convId, orgId, getCachedMeetingContext(convId)?.subject);
-                  const summary = await generateFormattedSummaryHtml(parsed, autoMeetingTitle, 'Participant', [], new Date(callStartedAt));
-
-                  const emailResult = await autoEmailSummaryToParticipants(
-                    convId, orgId,
-                    `Meeting Summary from ${config.botDisplayName}`,
-                    summary
-                  );
-
-                  const emailNote = emailResult.sentCount > 0
-                    ? `\n\n---\n*I've also emailed this summary to **${emailResult.sentCount} participant(s)**${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.*`
-                    : '';
-
-                  await graphApiHelper.sendProactiveMessage(
-                    svcUrl, convId,
-                    `**Meeting ended!** Here's your AI-generated summary:\n\n${summary}${emailNote}`
-                  );
-
-                  if (emailResult.sentCount > 0) {
-                    console.log(`[POST_MEETING_EMAIL] Emailed summary to ${emailResult.sentCount} participant(s)`);
-                  }
-                  return; // success
-                } else {
-                  console.log(`[POST_MEETING_TRANSCRIPT] No transcript available yet`);
+              if (freshMetas.length > 0) {
+                let bgContent: string | null = null;
+                try {
+                  bgContent = (await fsPromises.readFile(freshMetas[0].filePath, 'utf-8')) || null;
+                } catch { bgContent = null; }
+                if (bgContent) {
+                  bgEntries = parseTranscriptTextToEntries(bgContent);
+                  console.log(`[POST_MEETING] Found ${bgEntries.length} entries in background cache for meeting=${onlineMeetingId}`);
                 }
-                if (attempt < maxAttempts) {
-                  const delayMs = Math.min(attempt * 60_000, 180_000);
-                  console.log(`[POST_MEETING_TRANSCRIPT] Retrying in ${delayMs / 1000}s...`);
-                  setTimeout(() => attemptFetch(attempt + 1, maxAttempts), delayMs);
-                } else {
-                  console.log(`[POST_MEETING_TRANSCRIPT] All ${maxAttempts} attempts exhausted — transcript not available`);
-                  await graphApiHelper.sendProactiveMessage(
-                    svcUrl, convId,
-                    `I couldn't retrieve a meeting transcript. Teams may not have generated one — make sure transcription or recording was active during the meeting.`
-                  );
-                }
-              } catch (err) {
-                console.error(`[POST_MEETING_TRANSCRIPT_ERROR] Attempt ${attempt}:`, err);
-                if (attempt < maxAttempts) {
-                  setTimeout(() => attemptFetch(attempt + 1, maxAttempts), 60_000);
-                }
+              } else {
+                console.log(`[POST_MEETING] No background cache entries within call window for meeting=${onlineMeetingId}`);
               }
-            };
+            }
 
-            // First attempt after 30s (Graph needs time to finalize), then up to 7 attempts
-            setTimeout(() => attemptFetch(1, 7), 30_000);
+            if (bgEntries.length > 0) {
+              try {
+                liveTranscriptMap.set(convId, bgEntries);
+                const autoMeetingTitle = await resolveDisplayMeetingTitle(convId, orgId, getCachedMeetingContext(convId)?.subject);
+                const summary = await generateFormattedSummaryHtml(bgEntries, autoMeetingTitle, 'Participant', [], new Date(callStartedAt));
+
+                const emailResult = await autoEmailSummaryToParticipants(
+                  convId, orgId,
+                  `Meeting Summary from ${config.botDisplayName}`,
+                  summary
+                );
+
+                const emailNote = emailResult.sentCount > 0
+                  ? `\n\n---\nI have sent the meeting summary to **${emailResult.sentCount} participant(s)** by email${emailResult.failedCount > 0 ? ` (${emailResult.failedCount} failed)` : ''}.`
+                  : '';
+
+                await graphApiHelper.sendProactiveMessage(
+                  svcUrl, convId,
+                  `**Meeting ended!** Here's your AI-generated summary:\n\n${summary}${emailNote}`
+                );
+
+                if (emailResult.sentCount > 0) {
+                  console.log(`[POST_MEETING_EMAIL] Emailed summary (from bg cache) to ${emailResult.sentCount} participant(s)`);
+                }
+
+                // Send per-person action items to personal chats
+                const bgTitle = await resolveDisplayMeetingTitle(convId, orgId, getCachedMeetingContext(convId)?.subject);
+                void sendMeetingTasksToParticipants(convId, bgEntries, bgTitle, process.env.BOT_TENANT_ID || process.env.TEAMS_APP_TENANT_ID || '', svcUrl);
+              } catch (bgSummaryErr) {
+                console.error(`[POST_MEETING_BG_SUMMARY_ERROR]`, bgSummaryErr);
+              }
+            } else {
+              console.log(`[POST_MEETING] No transcript captured during this call (durationSec=${durationSec}) — skipping summary`);
+            }
           }
+        }
+
+        if (conversationId) {
+          // Send each attendee their own Planner task digest in 1:1 chat if we have their personal conversation ID.
+          void sendPostMeetingTasksToPersonalChats(conversationId);
         }
 
         // If meeting wasn't active (2203), auto-retry instead of giving up
@@ -10934,6 +13007,227 @@ app.http.post('/api/transcriptNotifications', async (req: any, res: any) => {
     }
   } catch (error) {
     console.error(`[TRANSCRIPT_SUB_ERROR] Failed to process notification:`, error);
+  }
+});
+
+// Inbound enable-recording trigger (Direction 1: caller → Missa → .NET recorder).
+// Validates HMAC, forwards to RECORDER_BASE_URL/api/recordings/enable, returns recorder response.
+app.http.post('/api/recordings/enable', async (req: any, res: any) => {
+  try {
+    const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const hmacError = verifyRecorderHmac(
+      req.headers?.['x-missa-timestamp'],
+      req.headers?.['x-missa-signature'],
+      rawBody
+    );
+    if (hmacError) {
+      console.warn(`[RECORDER_ENABLE] HMAC rejected: ${hmacError}`);
+      res.status(401).json({ error: 'unauthorized', reason: hmacError });
+      return;
+    }
+
+    const body = req.body as {
+      correlationId: string; meetingId: string; organizerUserId: string;
+      tenantId: string; conversationId: string; joinWebUrl?: string; watchUntilUtc?: string;
+    };
+
+    if (!isRecorderEnabled()) {
+      res.status(503).json({ error: 'recorder_not_configured' });
+      return;
+    }
+
+    let watchUntilUtc: Date | undefined;
+    if (body?.watchUntilUtc) {
+      watchUntilUtc = new Date(body.watchUntilUtc);
+      if (!Number.isFinite(watchUntilUtc.getTime())) {
+        res.status(400).json({ error: 'invalid_watchUntilUtc' });
+        return;
+      }
+    }
+
+    let enablePayload;
+    try {
+      enablePayload = buildEnableRecordingPayload({
+        correlationId:   body?.correlationId,
+        meetingId:       body?.meetingId,
+        organizerUserId: body?.organizerUserId,
+        tenantId:        body?.tenantId,
+        conversationId:  body?.conversationId,
+        joinWebUrl:      body?.joinWebUrl,
+        watchUntilUtc,
+      } as any);
+    } catch (err: any) {
+      const message = err?.message || 'invalid_enable_payload';
+      res.status(400).json({ error: message.startsWith('missing_fields') ? 'missing_fields' : message, detail: message });
+      return;
+    }
+
+    const result = await recorderEnableRecording({
+      ...enablePayload,
+      watchUntilUtc: new Date(enablePayload.watchUntilUtc),
+    });
+
+    if (!result.ok) {
+      console.warn(`[RECORDER_ENABLE] Forward failed: ${result.error}`);
+      res.status(502).json({ error: result.error });
+      return;
+    }
+
+    console.log(`[RECORDER_ENABLE] Forwarded ok: watchId=${result.recordingWatchId}`);
+    res.status(202).json({ recordingWatchId: result.recordingWatchId, status: result.status });
+  } catch (error: any) {
+    console.error('[RECORDER_ENABLE_ERROR]', error?.message || error);
+    if (!res.headersSent) res.status(500).json({ error: 'internal' });
+  }
+});
+
+// Returns current active meeting info formatted as the /api/recordings/enable request body.
+// Protected with the same bearer secret so only trusted callers can read it.
+app.http.get('/api/recordings/meeting-info', async (req: any, res: any) => {
+  const authError = verifyRecorderBearer(req.headers?.authorization || req.headers?.Authorization);
+  if (authError) {
+    res.status(401).json({ error: 'unauthorized', reason: authError });
+    return;
+  }
+
+  const tenantId =
+    process.env.BOT_TENANT_ID ||
+    process.env.TENANT_ID ||
+    process.env.TEAMS_APP_TENANT_ID ||
+    '';
+
+  const established = Array.from(activeCallMap.entries())
+    .filter(([, c]) => c.establishedAt && !c.terminatedAt);
+
+  if (established.length === 0) {
+    res.status(404).json({ error: 'no_active_meeting' });
+    return;
+  }
+
+  const [callId, callEntry] = established[established.length - 1];
+
+  let onlineMeetingId = callEntry.onlineMeetingId;
+  if (!onlineMeetingId && callEntry.conversationId) {
+    try {
+      const freshInfo = await resolveMeetingInfoForConversation(callEntry.conversationId);
+      if (freshInfo?.onlineMeetingId) {
+        onlineMeetingId = freshInfo.onlineMeetingId;
+        activeCallMap.set(callId, { ...callEntry, onlineMeetingId });
+        console.log(`[RECORDER_ENABLE] Resolved onlineMeetingId on demand: ${onlineMeetingId}`);
+      }
+    } catch (err: any) {
+      console.warn(`[RECORDER_ENABLE] Fresh lookup for onlineMeetingId failed: ${err?.message || err}`);
+    }
+  }
+
+  try {
+    const payload = buildEnableRecordingPayload({
+      correlationId:   `${callId}-${Date.now()}`,
+      meetingId:       onlineMeetingId || '',
+      organizerUserId: callEntry.organizerId || '',
+      tenantId,
+      conversationId:  callEntry.conversationId,
+      joinWebUrl:      callEntry.joinWebUrl || '',
+      watchUntilUtc:   new Date(Date.now() + 6 * 60 * 60 * 1000),
+    });
+
+    res.status(200).json(payload);
+  } catch (err: any) {
+    const message = err?.message || 'invalid_enable_payload';
+    res.status(409).json({
+      error: message.startsWith('missing_fields') ? 'missing_fields' : message,
+      detail: message,
+    });
+  }
+});
+
+// Serves the in-meeting notification bubble content (shown as a floating card in the Teams meeting UI)
+app.http.get('/meeting-notification', (_req: any, res: any) => {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mela AI</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:16px}
+.card{text-align:center;width:100%}
+.icon{font-size:32px;margin-bottom:10px}
+.title{font-size:15px;font-weight:600;color:#242424;margin-bottom:6px}
+.sub{font-size:12px;color:#616161;margin-bottom:14px;line-height:1.5}
+.hint{background:#f3f2f1;border-radius:6px;padding:8px 14px;font-size:12px;color:#424242;display:inline-block}
+.hint code{font-weight:700;color:#6264A7}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">🎙️</div>
+  <div class="title">Mela AI is here</div>
+  <div class="sub">I can join and record this meeting</div>
+  <div class="hint">Type <code>join</code> in the meeting chat</div>
+</div>
+</body>
+</html>`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(html);
+});
+
+// Inbound callback from Missa.Recorder — called when an MP4 has been archived to blob storage
+app.http.post('/api/recordings/completed', async (req: any, res: any) => {
+  try {
+    const authError = verifyRecorderBearer(req.headers?.authorization || req.headers?.Authorization);
+    if (authError) {
+      console.warn(`[RECORDER_CALLBACK] Auth rejected: ${authError}`);
+      res.status(401).json({ error: 'unauthorized', reason: authError });
+      return;
+    }
+
+    const payload = req.body as RecorderCompletedPayload;
+    if (!payload || !payload.correlationId || !payload.conversationId) {
+      res.status(400).json({ error: 'missing_fields' });
+      return;
+    }
+
+    // Acknowledge fast — recorder retries on non-2xx
+    res.status(200).json({ ok: true });
+
+    if (payload.status === 'succeeded' && payload.blobUri) {
+      const sizeMb      = payload.sizeBytes  ? (payload.sizeBytes  / 1024 / 1024).toFixed(1) : '?';
+      const durationMin = payload.durationSec ? (payload.durationSec / 60).toFixed(1)        : '?';
+      const message =
+        `**Meeting recording archived.**\n\n` +
+        `- Duration: ${durationMin} minutes\n` +
+        `- Size: ${sizeMb} MB\n` +
+        `- [Download MP4](${payload.blobUri})  *(SAS link expires in 24h)*`;
+
+      try {
+        const activeCall = Array.from(activeCallMap.values()).find(
+          (c: any) => c.conversationId === payload.conversationId
+        );
+        if (activeCall) {
+          await graphApiHelper.sendProactiveMessage(activeCall.serviceUrl, payload.conversationId, message);
+        } else {
+          console.log(`[RECORDER_CALLBACK] No active call for conversationId=${payload.conversationId}; recording at: ${payload.blobName}`);
+        }
+      } catch (err: any) {
+        console.error(`[RECORDER_CALLBACK] Failed to post recording link: ${err?.message || err}`);
+      }
+    } else if (payload.status === 'failed') {
+      console.error(
+        `[RECORDER_CALLBACK] Recording FAILED — correlationId=${payload.correlationId}; ` +
+        `code=${payload.error?.code} message=${payload.error?.message}`
+      );
+    } else {
+      // expired: no recording appeared in the watch window
+      console.warn(
+        `[RECORDER_CALLBACK] Recording EXPIRED (no MP4 in watch window) — ` +
+        `correlationId=${payload.correlationId}, status=${payload.status}`
+      );
+    }
+  } catch (error: any) {
+    console.error('[RECORDER_CALLBACK_ERROR]', error?.message || error);
+    if (!res.headersSent) res.status(500).json({ error: 'internal' });
   }
 });
 

@@ -29,6 +29,16 @@ param cognitiveServicesKey string = ''
 @description('Mailbox user ID to send AI-generated emails from (optional). If empty, sender falls back to requesting user.')
 param emailSenderUserId string = ''
 
+@description('Whether the Missa Recorder integration is enabled (true/false)')
+param recorderEnabled string = 'false'
+
+@description('Base URL of the Missa Recorder service')
+param recorderBaseUrl string = ''
+
+@description('Shared secret used to HMAC-sign requests sent to the Missa Recorder')
+@secure()
+param recorderSharedSecret string = ''
+
 param webAppSKU string
 
 @maxLength(42)
@@ -89,9 +99,9 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
           name: 'TENANT_ID'
           value: tenant().tenantId
         }
-        { 
-          name: 'BOT_TYPE' 
-          value: 'MultiTenant'
+        {
+          name: 'BOT_TYPE'
+          value: 'SingleTenant'
         }
         {
           name: 'GRAPH_CLIENT_ID'
@@ -128,6 +138,18 @@ resource webApp 'Microsoft.Web/sites@2021-02-01' = {
         {
           name: 'EMAIL_SENDER_USER_ID'
           value: emailSenderUserId
+        }
+        {
+          name: 'RECORDER_ENABLED'
+          value: recorderEnabled
+        }
+        {
+          name: 'RECORDER_BASE_URL'
+          value: recorderBaseUrl
+        }
+        {
+          name: 'RECORDER_SHARED_SECRET'
+          value: recorderSharedSecret
         }
       ]
       ftpsState: 'FtpsOnly'
